@@ -6,18 +6,40 @@ Project credential create and rotate requests accept a plaintext provider secret
 
 `GET /api/v1/workspaces` projects include the current user's nullable `pinnedAt`; it is never shared with other members. `PUT /api/v1/projects/{projectId}/pin` accepts `{ pinned: boolean }` and naturally idempotently sets that member's pin. Removing project membership removes the pin.
 
+## Membership Directories
+
+`GET /api/v1/workspaces/{workspaceId}/members` and
+`GET /api/v1/projects/{projectId}/members` accept only `q`, `role`, `cursor`,
+and `limit`. `GET /api/v1/projects/{projectId}/members/candidates` accepts only
+`q`, `cursor`, and `limit` and requires active Project administrator access.
+All three return `{ items, nextCursor }`; the default limit is 20 and the
+maximum is 50. Search is case-insensitive across user ID, display name, and
+email. Results use immutable `createdAt` and user ID ascending keysets, with
+user IDs compared using PostgreSQL `C` collation.
+
+Membership cursors are canonical opaque values bound to the authenticated
+actor, directory kind, Workspace or Project, normalized query, and role
+filter; changing only `limit` is allowed. Project candidates are selected
+server-side from current Workspace members who do not already belong to the
+Project. Membership mutations return one authoritative exact rich membership
+read and never scan a directory page. Complete membership fan-out used by
+Workspace revocation, quota recovery, and notifications is an explicit
+internal operation and is never truncated by directory limits.
+
 ## Project Usage
 
 `GET /api/v1/projects/{projectId}/usage` accepts only `endpointId` and `userId`.
 It is a bounded database read and returns
-`{ projectId, limits, fileStorage, provider, sandbox }`; it never traverses
-Project files. Provider data is always scoped to the authenticated user and one
-explicit 30 UTC-day period. The endpoint selector filters `daily` and `totals`;
-`endpoints` retains that user's per-endpoint period totals and rolling limits.
-Sandbox data is scoped to the selected member and returns the Project-lifetime
-summary plus every capacity-holding Run in `liveRuns`; `unreleasedCount` counts
-all of them, including `starting`, `release_requested`, and `failed`. It never
-returns settled Runs.
+`{ projectId, canSelectMemberUsage, limits, fileStorage, provider, sandbox }`;
+it never traverses Project files. `canSelectMemberUsage` is authoritative and
+true only for a Project owner or administrator. Provider data is always scoped
+to the authenticated user and one explicit 30 UTC-day period. The endpoint
+selector filters `daily` and `totals`; `endpoints` retains that user's
+per-endpoint period totals and rolling limits. Sandbox data is scoped to the
+selected member and returns the Project-lifetime summary plus every
+capacity-holding Run in `liveRuns`; `unreleasedCount` counts all of them,
+including `starting`, `release_requested`, and `failed`. It never returns
+settled Runs.
 
 `fileStorage` is the last recorded storage projection:
 `{ recordedBytes, measuredAt, limitBytes, remainingBytes }`. It is separate

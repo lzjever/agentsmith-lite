@@ -133,11 +133,19 @@ describe("v1 project membership API", () => {
       createdAt: created.createdAt,
       updatedAt: created.updatedAt
     });
+    const firstMemberPage=await requestJson("GET",`/api/v1/projects/${projectId}/members?limit=1`);
+    assert.equal(firstMemberPage.items.length,1);
+    assert.ok(firstMemberPage.nextCursor);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/members?cursor=${encodeURIComponent(firstMemberPage.nextCursor)}&limit=50`,{headers:{cookie}})).status,200);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/members?q=changed&cursor=${encodeURIComponent(firstMemberPage.nextCursor)}`,{headers:{cookie}})).status,400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/members?cursor=${encodeURIComponent(firstMemberPage.nextCursor)}`,{headers:{cookie:`asl_session=${memberSession}`}})).status,400);
+    const memberFilter=await requestJson("GET",`/api/v1/projects/${projectId}/members?q=MEMBER%20DISPLAY&role=viewer`);
+    assert.deepEqual(memberFilter.items.map((item:{userId:string})=>item.userId),["user_member"]);
     const ownerSelectedUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage?userId=user_member`,{headers:{cookie}});
     assert.equal(ownerSelectedUsage.status,200);
     const selectedSandbox=(await ownerSelectedUsage.json() as {sandbox:{selectedUserId:string;summaryStartedAt:string;measuredAt:string;unreleasedCount:number;launches:number;totalDurationSeconds:string;cpuRequestSeconds:string;memoryRequestByteSeconds:string;liveRuns:unknown[]}}).sandbox;
     assert.deepEqual({...selectedSandbox,summaryStartedAt:"scope",measuredAt:"scope"},{selectedUserId:"user_member",summaryStartedAt:"scope",measuredAt:"scope",unreleasedCount:0,launches:0,totalDurationSeconds:"0",cpuRequestSeconds:"0",memoryRequestByteSeconds:"0",liveRuns:[]});
-    const memberSelfUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage`,{headers:{cookie:`asl_session=${memberSession}`}});assert.equal(memberSelfUsage.status,200);assert.equal((await memberSelfUsage.json() as {sandbox:{selectedUserId:string}}).sandbox.selectedUserId,"user_member");
+    const memberSelfUsage=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage`,{headers:{cookie:`asl_session=${memberSession}`}});assert.equal(memberSelfUsage.status,200);const memberSelfUsageBody=await memberSelfUsage.json() as {canSelectMemberUsage:boolean;sandbox:{selectedUserId:string}};assert.equal(memberSelfUsageBody.sandbox.selectedUserId,"user_member");assert.equal(memberSelfUsageBody.canSelectMemberUsage,false);
     const memberStorageRefresh=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/usage/file-storage/refresh`,{method:"POST",headers:{cookie:`asl_session=${memberSession}`,"x-csrf-token":"member-csrf-token","content-type":"application/json"},body:"{}"});
     assert.equal(memberStorageRefresh.status,200);
     assert.equal((await memberStorageRefresh.json() as {projectId:string}).projectId,projectId);
@@ -225,13 +233,16 @@ describe("v1 project membership API", () => {
       subject: "member-subject",
       role: "viewer"
     });
+    const candidates=await requestJson("GET",`/api/v1/projects/${projectId}/members/candidates?q=OIDC-MEMBER`);
+    assert.deepEqual(candidates.items,[{userId:"user_oidc_member",displayName:null,email:"oidc-member@example.test"}]);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/members/candidates`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
     const oidcMember = await requestJson("POST", `/api/v1/projects/${projectId}/members`, {
       userId: "user_oidc_member",
       role: "viewer"
     });
     assert.equal(oidcMember.userId, "user_oidc_member");
 
-    const members = await requestJson("GET", `/api/v1/projects/${projectId}/members`);
+    const members = (await requestJson("GET", `/api/v1/projects/${projectId}/members`)).items;
     assert.deepEqual(members.map((member: { userId: string; role: string }) => [member.userId, member.role]), [
       [ownerUserId, "owner"],
       ["user_member", "member"],
@@ -254,7 +265,7 @@ describe("v1 project membership API", () => {
     assert.equal(ownerUpdate.response.status, 409);
     const ownerDelete = await request("DELETE", `/api/v1/projects/${projectId}/members`, { userId: ownerUserId, expectedUpdatedAt: ownerMembership.updatedAt });
     assert.equal(ownerDelete.response.status, 409);
-    const workspaceMembers = await requestJson("GET", `/api/v1/workspaces/${workspaceId}/members`);
+    const workspaceMembers = (await requestJson("GET", `/api/v1/workspaces/${workspaceId}/members`)).items;
     const workspaceOwner = workspaceMembers.find((member: { userId: string }) => member.userId === ownerUserId);
     const workspaceOwnerDelete = await request("DELETE", `/api/v1/workspaces/${workspaceId}/members`, { userId: ownerUserId, expectedUpdatedAt: workspaceOwner.updatedAt });
     assert.equal(workspaceOwnerDelete.response.status, 409);

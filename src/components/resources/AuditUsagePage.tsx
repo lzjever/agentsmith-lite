@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   apiClient,
-  type ProjectMember,
+  type ProjectMemberCandidate,
   type ProjectSandboxRunHistoryPage,
   type ProjectUsageOverview,
 } from "../../lib/api/client";
@@ -103,15 +103,12 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
   const [history, setHistory] = useState<UsageHistoryProvenance>();
   const [endpointId, setEndpointId] = useState(() => browserQuery().get("endpointId") || "all");
   const [selectedUserId, setSelectedUserId] = useState<string>();
-  const [members, setMembers] = useState<ProjectMember[]>([]);
-  const [canSelectUser, setCanSelectUser] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string>();
-  const [accessError, setAccessError] = useState<unknown>();
+  const [selectedMember,setSelectedMember]=useState<ProjectMemberCandidate>();
   const [overviewError, setOverviewError] = useState<unknown>();
   const [historyError, setHistoryError] = useState<unknown>();
   const [fileStorageError, setFileStorageError] = useState<unknown>();
   const [scopeNotice, setScopeNotice] = useState<string>();
-  const [accessState, setAccessState] = useState<UsageLoadState>("loading");
   const [overviewState, setOverviewState] = useState<UsageLoadState>("loading");
   const [historyState, setHistoryState] = useState<UsageLoadState>("idle");
   const [historyOperation, setHistoryOperation] = useState<HistoryOperation>("initial");
@@ -121,7 +118,6 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
   const active = useRef(true);
   const overviewRevision = useRef(0);
   const historyRevision = useRef(0);
-  const accessRevision = useRef(0);
   const fileStorageRevision = useRef(0);
   const sandboxScope = selectedUserId ?? "self";
   const visibleUsage = usage?.projectId === projectId && usage.sandboxScope === sandboxScope && usage.endpointId === endpointId ? usage.overview : undefined;
@@ -149,6 +145,7 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
           overview: loaded,
         },
       }));
+      if(!selectedUserId)setCurrentUserId(loaded.sandbox.selectedUserId);
       setOverviewError(undefined);
       setOverviewState("ready");
     } catch (cause) {
@@ -158,6 +155,7 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
         setUsageState((current) => mergeUsageCommit(current, { kind: "clear_overview", projectId: requestedProjectId }));
         setHistory(undefined);
         setSelectedUserId(undefined);
+        setSelectedMember(undefined);
         setHistoryError(undefined);
         setHistoryRetry(undefined);
         setHistoryState("idle");
@@ -177,26 +175,6 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
       setOverviewState("error");
     }
   }, [projectId, endpointId, selectedUserId]);
-
-  const loadAccess = useCallback(async () => {
-    const revision = ++accessRevision.current;
-    const requestedProjectId = projectId;
-    setAccessState("loading");
-    setAccessError(undefined);
-    try {
-      const [identity, listed] = await Promise.all([apiClient.currentIdentity(), apiClient.members(projectId)]);
-      if (!active.current || revision !== accessRevision.current || requestedProjectId !== projectId) return;
-      const current = listed.find((member) => member.userId === identity.user.id);
-      setMembers(listed);
-      setCurrentUserId(identity.user.id);
-      setCanSelectUser(current?.role === "owner" || current?.role === "admin");
-      setAccessState("ready");
-    } catch (cause) {
-      if (!active.current || revision !== accessRevision.current || requestedProjectId !== projectId) return;
-      setAccessError(cause);
-      setAccessState("error");
-    }
-  }, [projectId]);
 
   const loadHistory = useCallback(async ({
     requestedUserId,
@@ -233,6 +211,7 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
         setUsageState((current) => mergeUsageCommit(current, { kind: "clear_overview", projectId: requestedProjectId }));
         setHistory(undefined);
         setSelectedUserId(undefined);
+        setSelectedMember(undefined);
         setOverviewError(undefined);
         setOverviewState("loading");
         setHistoryRetry(undefined);
@@ -274,13 +253,9 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
       active.current = false;
       overviewRevision.current += 1;
       historyRevision.current += 1;
-      accessRevision.current += 1;
       fileStorageRevision.current += 1;
     };
   }, []);
-  useEffect(() => {
-    void loadAccess();
-  }, [loadAccess]);
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
@@ -307,8 +282,8 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
     setEndpointId(nextEndpointId);
   }
 
-  function changeUser(userId: string) {
-    const nextUserId = userId === currentUserId ? undefined : userId;
+  function changeUser(member:ProjectMemberCandidate) {
+    const nextUserId = member.userId === currentUserId ? undefined : member.userId;
     if (nextUserId === selectedUserId) return;
     overviewRevision.current += 1;
     historyRevision.current += 1;
@@ -319,6 +294,7 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
     setHistoryRetry(undefined);
     setHistoryState("idle");
     setScopeNotice(undefined);
+    setSelectedMember(nextUserId?member:undefined);
     setSelectedUserId(nextUserId);
   }
 
@@ -402,12 +378,9 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
         overview={visibleUsage}
         overviewState={overviewState}
         overviewError={overviewError}
-        accessState={accessState}
-        accessError={accessError}
         scopeNotice={scopeNotice}
-        members={members}
         currentUserId={currentUserId}
-        canSelectUser={canSelectUser}
+        selectedMember={selectedMember}
         selectedEndpointId={endpointId}
         selectedSandboxUserId={selectedUserId}
         historyOpen={historyOpen}
@@ -420,7 +393,6 @@ function UsageProjectPage({ projectId }: { projectId: string }) {
         fileStorageError={fileStorageError}
         onEndpointChange={changeEndpoint}
         onSandboxUserChange={changeUser}
-        onRetryAccess={loadAccess}
         onRetryOverview={loadOverview}
         onHistoryOpenChange={setHistoryOpen}
         onHistoryPrevious={previousHistoryPage}

@@ -19,6 +19,7 @@ describe("project Sandbox Usage",()=>{
 
     const overview=await fixture.services.policies.getUsageOverview(fixture.userId,fixture.projectId,undefined,fixture.runnerId);
     assert.equal(overviewReads,1);
+    assert.equal(overview.canSelectMemberUsage,true);
     assert.equal(overview.sandbox.unreleasedCount,3);
     assert.equal("activeCount" in overview.sandbox,false);
     assert.equal(overview.sandbox.launches,1);

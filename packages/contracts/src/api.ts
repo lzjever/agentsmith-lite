@@ -46,6 +46,14 @@ export interface WorkspaceMembership { workspaceId: string; userId: string; role
 export interface MembershipIdentity { displayName: string | null; email: string; }
 export type ProjectMembershipView = ProjectMembership & MembershipIdentity;
 export type WorkspaceMembershipView = WorkspaceMembership & MembershipIdentity;
+export interface MembershipDirectoryQuery<Role extends string> { q?: string; role?: Role; cursor?: string; limit?: number; }
+export interface ProjectMembershipQuery extends MembershipDirectoryQuery<ProjectMembershipRole> {}
+export interface WorkspaceMembershipQuery extends MembershipDirectoryQuery<WorkspaceMembershipRole> {}
+export interface ProjectMembershipPage { items: ProjectMembershipView[]; nextCursor: string | null; }
+export interface WorkspaceMembershipPage { items: WorkspaceMembershipView[]; nextCursor: string | null; }
+export interface ProjectMembershipCandidate extends MembershipIdentity { userId: string; }
+export interface ProjectMembershipCandidateQuery { q?: string; cursor?: string; limit?: number; }
+export interface ProjectMembershipCandidatePage { items: ProjectMembershipCandidate[]; nextCursor: string | null; }
 
 export interface ProjectCapabilities {
   canManageEndpoints: boolean;
@@ -262,6 +270,7 @@ export interface ProjectFileStorageUsage {
 
 export interface ProjectUsageOverview {
   projectId: string;
+  canSelectMemberUsage: boolean;
   limits: ProjectUsageLimit[];
   fileStorage: ProjectFileStorageUsage;
   provider: ProjectProviderUsage;

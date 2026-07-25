@@ -22,7 +22,7 @@ describe("project resource policy", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 3 });
 
-    assert.equal((await services.memberships.listMembers(user.id, project.id)).find((member) => member.userId === user.id)?.role, "owner");
+    assert.equal((await services.memberships.listMembers(user.id, project.id)).items.find((member) => member.userId === user.id)?.role, "owner");
     assert.equal((await services.policies.getPolicy(user.id, project.id)).activeTasksLimit, 3);
     const overview = await services.policies.getUsageOverview(user.id, project.id);
     assert.deepEqual(
@@ -451,7 +451,7 @@ describe("project resource policy", () => {
       });
     }
     await store.appendProjectAuditEvent({id:"audit_other",projectId:otherProject.id,actorId:former.user.id,subjectUserId:user.id,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:"task_other",createdAt:tiedAt});
-    store.listProjectMemberships=async()=>{throw new Error("Audit reads must not list memberships")};
+    store.listProjectMembershipsForFanout=async()=>{throw new Error("Audit reads must not list memberships")};
     store.findUserById=async()=>{throw new Error("Audit reads must not fetch full users")};
     store.findUserProfilePreferences=async()=>{throw new Error("Audit reads must not perform identity N+1 queries")};
 

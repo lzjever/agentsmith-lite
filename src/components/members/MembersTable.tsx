@@ -2,7 +2,6 @@
 
 import { Badge, Banner, Button, IconButton, Selector, Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow, Text } from "@astryxdesign/core";
 import { Trash2, X } from "lucide-react";
-import { useMemo, useState } from "react";
 import type { MemberRole, ProjectMember } from "../../lib/api/client";
 import { formatLocalDate } from "../../lib/format/date";
 import { memberIdentityLabel, memberRoleLabel } from "./members-page-utils";
@@ -10,11 +9,6 @@ import { memberIdentityLabel, memberRoleLabel } from "./members-page-utils";
 const editableRoles: Exclude<MemberRole, "owner">[] = ["admin", "member", "viewer"];
 
 export function MembersTable({ members, canManage, busyUserId, roleError, onDismissRoleError, onChangeRole, onRemove, onView }: { members: ProjectMember[]; canManage: boolean; busyUserId: string | undefined; roleError: { userId: string; message: string } | undefined; onDismissRoleError: () => void; onChangeRole: (member: ProjectMember, role: Exclude<MemberRole, "owner">) => void; onRemove: (member: ProjectMember) => void; onView: (member: ProjectMember) => void }) {
-  const [page, setPage] = useState(1);
-  const pageSize = 20;
-  const pageCount = Math.max(1, Math.ceil(members.length / pageSize));
-  const currentPage = Math.min(page, pageCount);
-  const visible = useMemo(() => members.slice((currentPage - 1) * pageSize, currentPage * pageSize), [currentPage, members]);
   const mutationBusy = busyUserId !== undefined;
 
   return <section aria-label="Project members" className="space-y-3">
@@ -29,7 +23,7 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visible.map((member) => <TableRow key={member.userId}>
+          {members.map((member) => <TableRow key={member.userId}>
             <TableCell><MemberIdentity member={member} /></TableCell>
             <TableCell><MemberRoleCell member={member} canManage={canManage} busy={mutationBusy} roleError={roleError} onDismissRoleError={onDismissRoleError} onChangeRole={onChangeRole} /></TableCell>
             <TableCell><Text type="supporting" color="secondary">{formatLocalDate(member.createdAt)}</Text></TableCell>
@@ -39,7 +33,7 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
       </Table>
     </div>
     <div className="divide-y divide-border rounded-md border border-border md:hidden">
-      {visible.map((member) => <article className="space-y-4 p-4" key={member.userId}>
+      {members.map((member) => <article className="space-y-4 p-4" key={member.userId}>
         <MemberIdentity member={member} />
         <div className="grid grid-cols-2 gap-4">
           <div><Text as="p" type="supporting" color="secondary" display="block">Access</Text><div className="mt-1"><MemberRoleControl member={member} canManage={canManage} busy={mutationBusy} onChangeRole={onChangeRole} /></div></div>
@@ -49,7 +43,6 @@ export function MembersTable({ members, canManage, busyUserId, roleError, onDism
         <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3"><MemberActions member={member} canManage={canManage} busy={mutationBusy} onRemove={onRemove} onView={onView} /></div>
       </article>)}
     </div>
-    {pageCount > 1 ? <div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="md" isDisabled={currentPage === 1} onClick={() => setPage(currentPage - 1)} /><Text type="supporting" color="secondary">Page {currentPage} of {pageCount}</Text><Button label="Next" variant="secondary" size="md" isDisabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)} /></div> : null}
   </section>;
 }
 

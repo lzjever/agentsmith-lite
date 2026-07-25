@@ -128,14 +128,14 @@ export class WorkspaceService {
 
   async projectOverview(userId: string, projectId: string): Promise<ProjectOverviewProjection> {
     const project = await this.authorization.requireProject(userId, projectId, "view");
-    const [capabilities, memberships, endpoints, workspace] = await Promise.all([
+    const [capabilities, membership, owner, endpoints, workspace] = await Promise.all([
       this.authorization.projectCapabilities(userId, projectId),
-      this.store.listProjectMemberships(projectId),
+      this.store.findProjectMembershipView(projectId,userId),
+      this.store.findProjectMembershipView(projectId,project.ownerUserId),
       this.store.listEndpointsForProject(projectId),
       this.store.findWorkspace(project.workspaceId)
     ]);
     if (!workspace) throw new NotFoundError("Workspace not found");
-    const membership = memberships.find((candidate) => candidate.userId === userId);
     if (!membership) throw new ProductError("Project membership changed while loading the overview", 409);
 
     const taskReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls")).length;
@@ -144,7 +144,6 @@ export class WorkspaceService {
     if (capabilities.canManageEndpoints && taskReadyEndpointCount === 0) recommendedActions.push("configure_endpoint");
     if (capabilities.canManageMembers) recommendedActions.push("add_collaborator");
 
-    const owner = memberships.find((candidate) => candidate.role === "owner");
     return {
       project,
       workspaceLifecycleStatus: workspace.lifecycleStatus ?? "active",

@@ -19,7 +19,7 @@ import {
 } from "@astryxdesign/core";
 import { useId, useState } from "react";
 import type {
-  ProjectMember,
+  ProjectMemberCandidate,
   ProjectSandboxRunHistoryPage,
   ProjectUsageOverview,
   ProjectUsageWindow,
@@ -29,6 +29,7 @@ import {
   formatLocalDateTime,
   formatLocalTime,
 } from "../../lib/format/date";
+import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 
 const labels = {
   activeTasks: "Active tasks",
@@ -50,12 +51,9 @@ export function UsageView({
   overview,
   overviewState,
   overviewError,
-  accessState,
-  accessError,
   scopeNotice,
-  members,
   currentUserId,
-  canSelectUser,
+  selectedMember,
   selectedEndpointId,
   selectedSandboxUserId,
   historyOpen,
@@ -68,7 +66,6 @@ export function UsageView({
   fileStorageError,
   onEndpointChange,
   onSandboxUserChange,
-  onRetryAccess,
   onRetryOverview,
   onHistoryOpenChange,
   onHistoryPrevious,
@@ -81,12 +78,9 @@ export function UsageView({
   overview: ProjectUsageOverview | undefined;
   overviewState: LoadState;
   overviewError: unknown;
-  accessState: LoadState;
-  accessError: unknown;
   scopeNotice: string | undefined;
-  members: ProjectMember[];
   currentUserId: string | undefined;
-  canSelectUser: boolean;
+  selectedMember: ProjectMemberCandidate | undefined;
   selectedEndpointId: string;
   selectedSandboxUserId: string | undefined;
   historyOpen: boolean;
@@ -98,8 +92,7 @@ export function UsageView({
   fileStorageState: "idle" | "loading" | "error";
   fileStorageError: unknown;
   onEndpointChange: (endpointId: string) => void;
-  onSandboxUserChange: (userId: string) => void;
-  onRetryAccess: () => Promise<void>;
+  onSandboxUserChange: (member: ProjectMemberCandidate) => void;
   onRetryOverview: () => Promise<void>;
   onHistoryOpenChange: (open: boolean) => void;
   onHistoryPrevious: () => void;
@@ -108,18 +101,9 @@ export function UsageView({
   onHistoryRetry: () => void;
   onMeasureFileStorage: () => Promise<void>;
 }) {
-  const accessCopy = accessErrorCopy(accessError);
   const overviewCopy = usageErrorCopy(overviewError);
   return (
     <div className="space-y-6">
-      {accessState === "error" ? (
-        <Banner
-          status="error"
-          title={accessCopy.title}
-          description={accessCopy.message}
-          endContent={<Button label="Retry member lookup" variant="ghost" onClick={() => void onRetryAccess()} />}
-        />
-      ) : null}
       {scopeNotice ? <Banner status="warning" title="Usage scope changed" description={scopeNotice} /> : null}
       {overviewState === "loading" && !overview ? (
         <div className="grid min-h-64 place-items-center" role="status">
@@ -163,9 +147,8 @@ export function UsageView({
           <SandboxUsage
             projectId={projectId}
             overview={overview}
-            members={members}
             currentUserId={currentUserId}
-            canSelectUser={canSelectUser}
+            selectedMember={selectedMember}
             selectedSandboxUserId={selectedSandboxUserId}
             historyOpen={historyOpen}
             history={history}
@@ -451,9 +434,8 @@ function ProviderDailyTrend({
 function SandboxUsage({
   projectId,
   overview,
-  members,
   currentUserId,
-  canSelectUser,
+  selectedMember,
   selectedSandboxUserId,
   historyOpen,
   history,
@@ -470,9 +452,8 @@ function SandboxUsage({
 }: {
   projectId: string;
   overview: ProjectUsageOverview;
-  members: ProjectMember[];
   currentUserId: string | undefined;
-  canSelectUser: boolean;
+  selectedMember: ProjectMemberCandidate | undefined;
   selectedSandboxUserId: string | undefined;
   historyOpen: boolean;
   history: ProjectSandboxRunHistoryPage | undefined;
@@ -480,7 +461,7 @@ function SandboxUsage({
   historyState: LoadState;
   historyError: unknown;
   historyOperation: HistoryOperation;
-  onSandboxUserChange: (userId: string) => void;
+  onSandboxUserChange: (member: ProjectMemberCandidate) => void;
   onHistoryOpenChange: (open: boolean) => void;
   onHistoryPrevious: () => void;
   onHistoryNext: () => void;
@@ -488,7 +469,6 @@ function SandboxUsage({
   onHistoryRetry: () => void;
 }) {
   const sandbox = overview.sandbox;
-  const selectedMember = members.find((member) => member.userId === sandbox.selectedUserId);
   const memberScope = selectedMember
     ? memberLabel(selectedMember)
     : !selectedSandboxUserId || sandbox.selectedUserId === currentUserId
@@ -503,16 +483,7 @@ function SandboxUsage({
             {memberScope} · summary from {formatLocalDateTime(sandbox.summaryStartedAt)} through {formatLocalDateTime(sandbox.measuredAt)}
           </Text>
         </div>
-        {canSelectUser && currentUserId ? (
-          <Selector
-            label="Sandbox member"
-            options={members.map((member) => ({ value: member.userId, label: memberLabel(member) }))}
-            value={selectedSandboxUserId ?? currentUserId}
-            onChange={onSandboxUserChange}
-            size="lg"
-            className="w-72 max-w-full"
-          />
-        ) : null}
+        {overview.canSelectMemberUsage&&currentUserId?<div className="w-72 max-w-full"><MemberDirectoryPicker kind="project" scopeId={projectId} label="Sandbox member" value={selectedSandboxUserId??currentUserId} onChange={onSandboxUserChange} pinned={[{userId:currentUserId,displayName:"You",email:currentUserId},...(selectedMember?[selectedMember]:[])]}/></div>:null}
       </div>
       <dl className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 xl:grid-cols-5">
         <SandboxTotal label="Unreleased runs" value={formatInteger(String(sandbox.unreleasedCount))} />
@@ -797,11 +768,6 @@ function usageErrorCopy(error: unknown): { title: string; message: string } {
   return { title: "Usage unavailable", message: "Usage could not be loaded." };
 }
 
-function accessErrorCopy(error: unknown): { title: string; message: string } {
-  if (isApiError(error, 403)) return { title: "Member lookup not permitted", message: "Your usage is available, but project member access could not be loaded." };
-  return { title: "Member lookup unavailable", message: "Project members and Sandbox member selection could not be loaded." };
-}
-
 function historyErrorCopy(error: unknown): string {
   if (isApiError(error, 400)) return "The run history cursor is no longer valid.";
   if (isApiError(error, 503, "sandbox_usage_unavailable")) return "Sandbox accounting is temporarily unavailable.";
@@ -817,7 +783,7 @@ function isApiError(error: unknown, status: number, code?: string): boolean {
   return !!error && typeof error === "object" && "status" in error && error.status === status && (code === undefined || ("code" in error && error.code === code));
 }
 
-function memberLabel(member: ProjectMember): string {
+function memberLabel(member: ProjectMemberCandidate): string {
   return member.displayName ? `${member.displayName} (${member.email})` : member.email;
 }
 

@@ -70,7 +70,7 @@ export class ProjectPolicyService {
 
   async getPolicy(userId: string, projectId: string): Promise<ProjectResourcePolicy> { await this.authorization.requireProject(userId, projectId); return this.requirePolicy(projectId); }
   async getUsageOverview(userId: string, projectId: string, endpointId?: string, selectedUserId = userId): Promise<ProjectUsageOverview> {
-    await this.requireUsageScope(userId,projectId,selectedUserId);
+    const access=await this.requireUsageScope(userId,projectId,selectedUserId);
     const measuredAt=nowIso(),today=new Date(measuredAt);today.setUTCHours(0,0,0,0);
     const firstDay = new Date(today); firstDay.setUTCDate(firstDay.getUTCDate() - 29);
     const periodStart=firstDay.toISOString(),periodEnd=new Date(today.getTime()+24*60*60_000).toISOString();
@@ -82,7 +82,7 @@ export class ProjectPolicyService {
         const dailyByDate = new Map(daily.map((day) => [day.date, day]));
         for(const aggregate of read.value.provider.daily){const day=dailyByDate.get(aggregate.date);if(day)Object.assign(day,aggregate)}
         const {projectCreatedAt,policy,provider,sandbox}=read.value,usage=read.value.usage??zeroUsage(projectId);
-        return{projectId,limits:usageLimits(policy,usage,projectCreatedAt),fileStorage:fileStorageUsage(policy,usage),provider:{userId,periodStart,periodEnd,selectedEndpointId:endpointId??null,daily,totals:provider.totals,endpoints:provider.endpoints},sandbox:{selectedUserId,summaryStartedAt:projectCreatedAt,measuredAt,unreleasedCount:sandbox.unreleasedCount,launches:sandbox.launches,totalDurationSeconds:formatDecimal(BigInt(sandbox.totalDurationMilliseconds),3),cpuRequestSeconds:formatDecimal(BigInt(sandbox.cpuRequestMillisMilliseconds),6),memoryRequestByteSeconds:formatDecimal(BigInt(sandbox.memoryRequestByteMilliseconds),3),liveRuns:sandbox.liveRuns}};
+        return{projectId,canSelectMemberUsage:access.canAdmin,limits:usageLimits(policy,usage,projectCreatedAt),fileStorage:fileStorageUsage(policy,usage),provider:{userId,periodStart,periodEnd,selectedEndpointId:endpointId??null,daily,totals:provider.totals,endpoints:provider.endpoints},sandbox:{selectedUserId,summaryStartedAt:projectCreatedAt,measuredAt,unreleasedCount:sandbox.unreleasedCount,launches:sandbox.launches,totalDurationSeconds:formatDecimal(BigInt(sandbox.totalDurationMilliseconds),3),cpuRequestSeconds:formatDecimal(BigInt(sandbox.cpuRequestMillisMilliseconds),6),memoryRequestByteSeconds:formatDecimal(BigInt(sandbox.memoryRequestByteMilliseconds),3),liveRuns:sandbox.liveRuns}};
       }
       case "project_not_found":throw new ProductError("Project not found",404);
       case "policy_not_found":throw new ProductError("Project policy not found",409);
@@ -96,18 +96,18 @@ export class ProjectPolicyService {
     }
   }
   async getSandboxRunHistory(userId:string,projectId:string,query:Readonly<{selectedUserId?:string;cursor?:string;limit?:number}>={}):Promise<ProjectSandboxRunHistoryPage>{
-    const selectedUserId=query.selectedUserId??userId,project=await this.requireUsageScope(userId,projectId,selectedUserId),limit=query.limit??20;
+    const selectedUserId=query.selectedUserId??userId,access=await this.requireUsageScope(userId,projectId,selectedUserId),limit=query.limit??20;
     if(!Number.isSafeInteger(limit)||limit<1||limit>50)throw new ProductError("Sandbox Run history limit must be between 1 and 50");
     const decoded=query.cursor?decodeSandboxRunCursor(query.cursor,projectId,selectedUserId):null,scopeMeasuredAt=decoded?.scopeMeasuredAt??nowIso();
     const page=await this.store.querySandboxUsageSettlements({projectId,selectedUserId,scopeMeasuredAt,...(decoded?{after:decoded.key}:{}),limit});
     const last=page.items.at(-1);
-    return{projectId,selectedUserId,summaryStartedAt:project.createdAt,scopeMeasuredAt,items:page.items,nextCursor:page.hasMore&&last?encodeSandboxRunCursor({v:1,projectId,selectedUserId,scopeMeasuredAt,key:{releasedAt:last.releasedAt,runId:last.runId}}):null};
+    return{projectId,selectedUserId,summaryStartedAt:access.project.createdAt,scopeMeasuredAt,items:page.items,nextCursor:page.hasMore&&last?encodeSandboxRunCursor({v:1,projectId,selectedUserId,scopeMeasuredAt,key:{releasedAt:last.releasedAt,runId:last.runId}}):null};
   }
   private async requireUsageScope(userId:string,projectId:string,selectedUserId:string){
     const access=await this.authorization.projectAccess(userId,projectId);
     if(selectedUserId!==userId&&!access.canAdmin)throw new ProductError("Project admin permission is required to view another member's sandbox usage",403);
     if(selectedUserId!==userId&&!await this.store.findProjectMembership(projectId,selectedUserId))throw new ProductError("Project member not found",404);
-    return access.project;
+    return access;
   }
   async alerts(userId:string,projectId:string,query:import("../../contracts/src/api.js").ProjectAlertQuery={}):Promise<import("../../contracts/src/api.js").ProjectAlertPage>{
     await this.authorization.requireProject(userId, projectId);
@@ -375,7 +375,7 @@ export class ProjectPolicyService {
   }
   private async recoverEndpointQuotaFallbacks(projectId:string,type:Limit,endpointId:string):Promise<void>{
     await recoverProjectAlerts(this.store,projectId,type,{endpointId,subjectActorId:null,unconfiguredFallback:true});
-    for(const member of await this.store.listProjectMemberships(projectId)){
+    for(const member of await this.store.listProjectMembershipsForFanout(projectId)){
       await recoverProjectAlerts(this.store,projectId,type,{endpointId,subjectActorId:member.userId,unconfiguredFallback:true});
     }
   }

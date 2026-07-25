@@ -41,7 +41,8 @@ test("usage overview returns project limits and authenticated-user provider aggr
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 1 }, now);
 
     const all = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage`, cookie);
-    assert.deepEqual(Object.keys(all).sort(), ["fileStorage", "limits", "projectId", "provider", "sandbox"]);
+    assert.deepEqual(Object.keys(all).sort(), ["canSelectMemberUsage", "fileStorage", "limits", "projectId", "provider", "sandbox"]);
+    assert.equal(all.canSelectMemberUsage,true);
     assert.equal(all.sandbox.unreleasedCount,0);
     assert.equal("activeCount" in all.sandbox,false);
     assert.equal(all.provider.userId, user.id);

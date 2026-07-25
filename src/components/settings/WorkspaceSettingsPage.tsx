@@ -1,14 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Archive, RefreshCw, Save, Trash2 } from "lucide-react";
-import { Banner, Button, Heading, Selector, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
+import { Archive, Save, Trash2 } from "lucide-react";
+import { Banner, Button, Heading, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type CurrentUser, type WorkspaceMember, type WorkspaceSettings } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, notifyDirectoryChanged, type CurrentUser, type ProjectMemberCandidate, type WorkspaceSettings } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/Dialog";
+import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 import { SettingsLoadError } from "./SettingsRouteState";
 
 export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) {
@@ -21,7 +22,6 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
   const showToast = useToast();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
-  const memberRequest = useRef(0);
   const [data, setData] = useState<WorkspaceSettings>();
   const [user, setUser] = useState<CurrentUser>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -36,20 +36,7 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
   const [deleteError, setDeleteError] = useState("");
   const [ownerError, setOwnerError] = useState("");
   const [actionError, setActionError] = useState("");
-  const [members,setMembers]=useState<WorkspaceMember[]>([]); const [memberState,setMemberState]=useState<"loading"|"ready"|"error">("loading"); const [ownerTarget,setOwnerTarget]=useState(""); const [ownerOpen,setOwnerOpen]=useState(false); const [ownerBusy,setOwnerBusy]=useState(false); const [lifecycleBusy,setLifecycleBusy]=useState(false);
-  const loadMembers = useCallback(async () => {
-    const request = ++memberRequest.current;
-    setMemberState("loading");
-    try {
-      const listed = await apiClient.workspaceMembers(workspaceId);
-      if (!mounted.current || request !== memberRequest.current) return;
-      setMembers(listed);
-      setMemberState("ready");
-    } catch {
-      if (!mounted.current || request !== memberRequest.current) return;
-      setMemberState("error");
-    }
-  }, [workspaceId]);
+  const [ownerTarget,setOwnerTarget]=useState<ProjectMemberCandidate>(); const [ownerOpen,setOwnerOpen]=useState(false); const [ownerBusy,setOwnerBusy]=useState(false); const [lifecycleBusy,setLifecycleBusy]=useState(false);
   const load = useCallback(async () => {
     const request = ++loadRequest.current;
     setState("loading");
@@ -61,13 +48,12 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
       setWorkspaceName(settings.workspace.name);
       setUser(identity.user);
       setState("ready");
-      if(settings.workspace.ownerUserId===identity.user.id)await loadMembers();else{setMembers([]);setMemberState("ready");}
     } catch (reason) {
       if (!mounted.current || request !== loadRequest.current) return;
       setLoadError(settingsErrorMessage(reason, "Workspace settings could not be loaded."));
       setState("error");
     }
-  }, [loadMembers,workspaceId]);
+  }, [workspaceId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -111,14 +97,6 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
   const canRestore=isOwner&&archived;
   const mutationBusy=saving||lifecycleBusy||ownerBusy||deleting;
   const settingsDirty = data !== undefined && workspaceName.trim() !== data.workspace.name;
-  const ownerCandidates = members.filter((member) => member.userId !== user?.id);
-  const ownerTargetEligible = !ownerTarget || ownerCandidates.some((member) => member.userId === ownerTarget);
-  useEffect(() => {
-    if (memberState !== "ready" || !ownerTarget || ownerTargetEligible) return;
-    setOwnerOpen(false);
-    setOwnerTarget("");
-    mutationKeys.clear("workspace-owner-transfer");
-  }, [memberState, ownerTarget, ownerTargetEligible]);
   function setArchiveDialogOpen(open: boolean) {
     if (lifecycleBusy && !open) return;
     setArchiveOpen(open);
@@ -157,17 +135,18 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
     setOwnerBusy(true);
     setOwnerError("");
     try {
-      await apiClient.transferWorkspaceOwner(workspaceId,ownerTarget,mutationKeys.key("workspace-owner-transfer",ownerTarget));
-      mutationKeys.complete("workspace-owner-transfer",ownerTarget);
+      if(!ownerTarget)return;
+      await apiClient.transferWorkspaceOwner(workspaceId,ownerTarget.userId,mutationKeys.key("workspace-owner-transfer",ownerTarget.userId));
+      mutationKeys.complete("workspace-owner-transfer",ownerTarget.userId);
       if(!mounted.current)return;
-      setData({...data,workspace:{...data.workspace,ownerUserId:ownerTarget}});
       notifyDirectoryChanged();
       setOwnerOpen(false);
-      setOwnerTarget("");
+      setOwnerTarget(undefined);
       setOwnerError("");
+      await load();
       showToast({ body: "Workspace ownership transferred." });
     } catch (reason) {
-      if (reason instanceof ApiError) mutationKeys.complete("workspace-owner-transfer",ownerTarget);
+      if (reason instanceof ApiError&&ownerTarget) mutationKeys.complete("workspace-owner-transfer",ownerTarget.userId);
       if (mounted.current) setOwnerError(settingsErrorMessage(reason, "Workspace ownership could not be transferred."));
     } finally { if(mounted.current)setOwnerBusy(false); }
   }
@@ -214,8 +193,8 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
       <form onSubmit={submit} className="mt-5 space-y-5 border-y border-border py-5"><TextInput label="Workspace name" htmlName="name" value={workspaceName} onChange={(value) => setWorkspaceName(value.slice(0, 160))} isRequired isDisabled={mutationBusy||!data.capabilities.canManageSettings||!isActive} width="100%" /><Text as="p" type="supporting" color="secondary" display="block">Project access is managed from each project.</Text>{data.capabilities.canManageSettings&&isActive ? <div className="flex justify-end"><Button type="submit" label={saving ? "Saving..." : "Save workspace"} variant="primary" icon={<Save size={16} />} isDisabled={mutationBusy || !settingsDirty || !workspaceName.trim()} isLoading={saving} /></div> : <Text as="p" type="supporting" color="secondary" display="block">Read-only access.</Text>}</form>
       {canArchive||canRestore?<section className="mt-8 border-t border-border pt-6"><Heading level={3}>Lifecycle</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Archived workspaces remain available for viewing. Only the workspace owner can restore one.</Text><Button className="mt-4" label={archived?"Unarchive workspace":"Archive workspace"} variant="secondary" icon={<Archive size={16}/>} isDisabled={mutationBusy} onClick={()=>archived?void setArchive():setArchiveDialogOpen(true)} /></section>:null}
       {canArchive?<ConfirmationDialog isOpen={archiveOpen} onOpenChange={setArchiveDialogOpen} title="Archive workspace" description={<Text as="p" display="block" color="secondary">Projects and workspace data remain available for viewing, but changes are disabled until the owner restores this workspace.</Text>} actionLabel={lifecycleBusy?"Archiving":"Archive workspace"} actionForm="workspace-archive-form" busy={lifecycleBusy}><form id="workspace-archive-form" onSubmit={(event)=>{event.preventDefault();void setArchive();}}>{archiveError?<Banner status="error" title="Workspace could not be archived" description={archiveError}/>:null}</form></ConfirmationDialog>:null}
-      {isOwner?<section className="mt-8 border-t border-border pt-6"><Heading level={3}>Transfer ownership</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">The new owner must already be a workspace member.</Text>{memberState==="loading"?<Text as="p" type="supporting" color="secondary" display="block" className="mt-4" role="status">Loading eligible workspace members...</Text>:null}{memberState==="error"?<Banner className="mt-4" status="error" title="Workspace members unavailable" description="Workspace members could not be loaded." endContent={<Button label="Retry" variant="ghost" size="sm" aria-label="Retry member loading" icon={<RefreshCw size={14}/>} isDisabled={mutationBusy} onClick={()=>void loadMembers()} />}/>:null}{memberState==="ready"&&ownerCandidates.length===0?<Text as="p" type="supporting" color="secondary" display="block" className="mt-4" role="status">There are no other workspace members eligible to become owner.</Text>:null}{memberState==="ready"&&ownerCandidates.length>0?<div className="mt-4 flex flex-wrap items-end gap-2"><Selector id="workspace-owner-target" label="New workspace owner" options={ownerCandidates.map((member) => ({ value: member.userId, label: memberLabel(member) }))} value={ownerTargetEligible?ownerTarget:""} onChange={setOwnerTarget} placeholder="Select a member" isDisabled={!isActive||mutationBusy} size="lg" width={256} /><Button label="Transfer ownership" variant="secondary" isDisabled={!ownerTarget||!ownerTargetEligible||!isActive||mutationBusy} onClick={()=>{setOwnerError("");setOwnerOpen(true);}} /></div>:null}</section>:null}
-      {isOwner?<ConfirmationDialog isOpen={ownerOpen&&ownerTargetEligible} onOpenChange={(open)=>{if(ownerBusy&&!open)return;setOwnerOpen(open);if(!open){setOwnerError("");mutationKeys.clear("workspace-owner-transfer");}}} title="Transfer workspace ownership" description={<Text as="p" display="block" color="secondary">The current owner becomes an administrator.</Text>} actionLabel="Transfer ownership" actionVariant="primary" busy={ownerBusy} isActionDisabled={!ownerTarget||!ownerTargetEligible||mutationBusy} onAction={()=>void transferOwner()}>{ownerError?<Banner status="error" title="Ownership could not be transferred" description={ownerError}/>:null}</ConfirmationDialog>:null}
+      {isOwner?<section className="mt-8 border-t border-border pt-6"><Heading level={3}>Transfer ownership</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">The new owner must already be a workspace member.</Text><div className="mt-4 grid max-w-md gap-2"><MemberDirectoryPicker kind="workspace" scopeId={workspaceId} label="New workspace owner" value={ownerTarget?.userId??""} onChange={setOwnerTarget} {...(user?{excludeUserId:user.id}:{})} disabled={!isActive||mutationBusy} pinned={ownerTarget?[ownerTarget]:[]}/><Button label="Transfer ownership" variant="secondary" isDisabled={!ownerTarget||!isActive||mutationBusy} onClick={()=>{setOwnerError("");setOwnerOpen(true)}}/></div></section>:null}
+      {isOwner?<ConfirmationDialog isOpen={ownerOpen&&Boolean(ownerTarget)} onOpenChange={(open)=>{if(ownerBusy&&!open)return;setOwnerOpen(open);if(!open){setOwnerError("");mutationKeys.clear("workspace-owner-transfer");}}} title="Transfer workspace ownership" description={<Text as="p" display="block" color="secondary">The current owner becomes an administrator.</Text>} actionLabel="Transfer ownership" actionVariant="primary" busy={ownerBusy} isActionDisabled={!ownerTarget||mutationBusy} onAction={()=>void transferOwner()}>{ownerError?<Banner status="error" title="Ownership could not be transferred" description={ownerError}/>:null}</ConfirmationDialog>:null}
       {canDelete ? <section className="mt-8 border-t border-error pt-6" aria-label="Danger zone"><Heading level={3}>{lifecycleStatus==="deleting"?"Continue workspace deletion":"Delete workspace"}</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">{lifecycleStatus==="deleting"?"Previous cleanup did not finish. Continue deleting the remaining workspace-owned data.":"This permanently removes this workspace and all of its projects."}</Text><Button className="mt-4" label={lifecycleStatus==="deleting"?"Continue deletion":"Delete workspace"} variant="destructive" aria-label={lifecycleStatus==="deleting"?"Continue workspace deletion":"Open workspace deletion confirmation"} icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDialogOpen(true)} /></section> : null}
       {canDelete ? <ConfirmationDialog isOpen={deleteOpen} onOpenChange={(open)=>{if(deleting&&!open)return;setDialogOpen(open);}} title={lifecycleStatus==="deleting"?"Continue workspace deletion":"Delete workspace"} description={<Text as="p" display="block" color="secondary">This action permanently removes the workspace and its projects. Type <Text weight="semibold">{data.workspace.name}</Text> to continue.</Text>} actionLabel={deleting ? "Deleting" : lifecycleStatus==="deleting"?"Continue deletion":"Delete workspace"} actionForm="workspace-delete-form" busy={deleting} isActionDisabled={mutationBusy || deleteName !== data.workspace.name}><form id="workspace-delete-form" className="grid gap-4" onSubmit={(event)=>{event.preventDefault();void deleteWorkspace();}}><TextInput label="Workspace name" value={deleteName} onChange={setDeleteName} isDisabled={mutationBusy} width="100%" />{deleteError?<Banner status="error" title="Workspace could not be deleted" description={deleteError}/>:null}</form></ConfirmationDialog> : null}
     </> : null}
@@ -231,5 +210,4 @@ function settingsErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : error instanceof Error ? error.message : fallback;
 }
 
-function memberLabel(member: WorkspaceMember): string { return member.displayName || member.email || member.userId; }
 function lifecycleMessage(kind:"project"|"workspace",status:"active"|"archived"|"deleting"){return status==="active"?`${kind[0]!.toUpperCase()+kind.slice(1)} status: Active.`:status==="archived"?`This ${kind} is archived and read-only.`:`This ${kind} is being deleted. Changes are unavailable.`;}

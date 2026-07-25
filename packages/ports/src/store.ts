@@ -11,6 +11,8 @@ import type {
   ManagedProjectMembershipRole,
   ProjectMembership,
   ProjectMembershipView,
+  ProjectMembershipCandidate,
+  ProjectMembershipRole,
   ProjectAlert,
   ProjectAuditEvent,
   ProjectAuditEventView,
@@ -34,6 +36,7 @@ import type {
   WorkspaceMembership,
   ManagedWorkspaceMembershipRole,
   WorkspaceMembershipView,
+  WorkspaceMembershipRole,
   TaskListArchivedFilter,
   TaskListSort,
   TaskArtifactKind,
@@ -106,6 +109,23 @@ export interface ProjectDirectoryStoreQuery {
 export interface ProjectDirectoryStorePage {
   items: ProjectDirectoryItem[];
   total: number;
+}
+
+export interface MembershipDirectoryStoreQuery<Role extends string> {
+  q: string;
+  role: Role | null;
+  after?: { createdAt: string; userId: string };
+  limit: number;
+}
+
+export interface ProjectMembershipCandidateStoreQuery {
+  q: string;
+  after?: { createdAt: string; userId: string };
+  limit: number;
+}
+
+export interface ProjectMembershipCandidateStoreItem extends ProjectMembershipCandidate {
+  createdAt: string;
 }
 
 export interface ProjectAuditStoreQuery {
@@ -556,7 +576,8 @@ export interface ProductStore {
   transferWorkspaceOwner(workspaceId: string, fromUserId: string, toUserId: string, updatedAt: string): Promise<Workspace | null>;
   deleteWorkspaceAfterProjects(id: string): Promise<boolean>;
   findWorkspaceMembership(workspaceId: string, userId: string): Promise<WorkspaceMembership | null>;
-  listWorkspaceMemberships(workspaceId: string): Promise<WorkspaceMembershipView[]>;
+  findWorkspaceMembershipView(workspaceId: string, userId: string): Promise<WorkspaceMembershipView | null>;
+  listWorkspaceMembershipDirectoryPage(workspaceId: string, query: MembershipDirectoryStoreQuery<WorkspaceMembershipRole>): Promise<WorkspaceMembershipView[]>;
   upsertWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership>;
   createWorkspaceMembership(membership: WorkspaceMembership): Promise<CreateWorkspaceMembershipResult>;
   updateWorkspaceMembership(membership: WorkspaceMembership): Promise<WorkspaceMembership | null>;
@@ -593,7 +614,11 @@ export interface ProductStore {
   updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
-  listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]>;
+  findProjectMembershipView(projectId: string, userId: string): Promise<ProjectMembershipView | null>;
+  listProjectMembershipDirectoryPage(projectId: string, query: MembershipDirectoryStoreQuery<ProjectMembershipRole>): Promise<ProjectMembershipView[]>;
+  listProjectMembershipCandidatesPage(projectId: string, query: ProjectMembershipCandidateStoreQuery): Promise<ProjectMembershipCandidateStoreItem[]>;
+  findProjectMembershipIdentities(projectId: string, userIds: string[]): Promise<ProjectMembershipCandidate[]>;
+  listProjectMembershipsForFanout(projectId: string): Promise<ProjectMembership[]>;
   upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership>;
   upsertProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<ProjectMembership | null>;
   createProjectMembershipForWorkspaceMember(membership: ProjectMembership): Promise<CreateProjectMembershipResult>;

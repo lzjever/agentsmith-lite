@@ -257,7 +257,16 @@ export class InMemoryProductStore implements ProductStore {
   async transferWorkspaceOwner(workspaceId:string,fromUserId:string,toUserId:string,updatedAt:string){const workspace=this.workspaces.get(workspaceId),target=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,toUserId));if(!workspace||workspace.ownerUserId!==fromUserId||fromUserId===toUserId||!target||workspace.lifecycleStatus!==undefined&&workspace.lifecycleStatus!=="active")return null;const from=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,fromUserId));if(!from)return null;this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,fromUserId),clone({...from,role:"admin",updatedAt}));this.workspaceMemberships.set(workspaceMembershipKey(workspaceId,toUserId),clone({...target,role:"owner",updatedAt}));const updated={...workspace,ownerUserId:toUserId,updatedAt};this.workspaces.set(workspaceId,clone(updated));return clone(updated)}
   async deleteWorkspaceAfterProjects(id:string){const workspace=this.workspaces.get(id);if(!workspace||workspace.lifecycleStatus!=="deleting"||[...this.projects.values()].some((project)=>project.workspaceId===id))return false;for(const [key,entry] of this.contexts)if(entry.workspaceId===id)this.contexts.delete(key);for(const [key,membership] of this.workspaceMemberships)if(membership.workspaceId===id)this.workspaceMemberships.delete(key);return this.workspaces.delete(id)}
   async findWorkspaceMembership(workspaceId:string,userId:string){return clone(this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,userId))??null)}
-  async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return [...this.workspaceMemberships.values()].filter((member)=>member.workspaceId===workspaceId).map((member)=>this.workspaceMembershipView(member))}
+  async findWorkspaceMembershipView(workspaceId:string,userId:string):Promise<WorkspaceMembershipView|null>{const member=this.workspaceMemberships.get(workspaceMembershipKey(workspaceId,userId));return member?this.workspaceMembershipView(member):null}
+  async listWorkspaceMembershipDirectoryPage(workspaceId:string,query:import("../../ports/src/store.js").MembershipDirectoryStoreQuery<WorkspaceMembership["role"]>):Promise<WorkspaceMembershipView[]>{
+    return [...this.workspaceMemberships.values()]
+      .filter((member)=>member.workspaceId===workspaceId&&(!query.role||member.role===query.role))
+      .map((member)=>this.workspaceMembershipView(member))
+      .filter((member)=>membershipMatchesQuery(member,query.q))
+      .sort(compareMembershipDirectoryItems)
+      .filter((member)=>!query.after||compareMembershipToCursor(member,query.after)>0)
+      .slice(0,query.limit);
+  }
   async upsertWorkspaceMembership(value:WorkspaceMembership){this.workspaceMemberships.set(workspaceMembershipKey(value.workspaceId,value.userId),clone(value));return clone(value)}
   async createWorkspaceMembership(value:WorkspaceMembership):Promise<CreateWorkspaceMembershipResult>{const key=workspaceMembershipKey(value.workspaceId,value.userId);if(this.workspaceMemberships.has(key))return "already_exists";this.workspaceMemberships.set(key,clone(value));return clone(value)}
   async updateWorkspaceMembership(value:WorkspaceMembership){const key=workspaceMembershipKey(value.workspaceId,value.userId);if(!this.workspaceMemberships.has(key))return null;this.workspaceMemberships.set(key,clone(value));return clone(value)}
@@ -442,9 +451,33 @@ export class InMemoryProductStore implements ProductStore {
     return clone(this.memberships.get(membershipKey(projectId, userId)) ?? null);
   }
 
-  async listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]> {
-    return [...this.memberships.values()].filter((membership) => membership.projectId === projectId).map((membership) => this.projectMembershipView(membership));
+  async findProjectMembershipView(projectId:string,userId:string):Promise<ProjectMembershipView|null>{const member=this.memberships.get(membershipKey(projectId,userId));return member?this.projectMembershipView(member):null}
+  async listProjectMembershipDirectoryPage(projectId:string,query:import("../../ports/src/store.js").MembershipDirectoryStoreQuery<ProjectMembership["role"]>):Promise<ProjectMembershipView[]>{
+    return [...this.memberships.values()]
+      .filter((member)=>member.projectId===projectId&&(!query.role||member.role===query.role))
+      .map((member)=>this.projectMembershipView(member))
+      .filter((member)=>membershipMatchesQuery(member,query.q))
+      .sort(compareMembershipDirectoryItems)
+      .filter((member)=>!query.after||compareMembershipToCursor(member,query.after)>0)
+      .slice(0,query.limit);
   }
+  async listProjectMembershipCandidatesPage(projectId:string,query:import("../../ports/src/store.js").ProjectMembershipCandidateStoreQuery):Promise<import("../../ports/src/store.js").ProjectMembershipCandidateStoreItem[]>{
+    const project=this.projects.get(projectId);
+    if(!project)return[];
+    return [...this.workspaceMemberships.values()]
+      .filter((member)=>member.workspaceId===project.workspaceId&&!this.memberships.has(membershipKey(projectId,member.userId)))
+      .map((member)=>{const identity=this.workspaceMembershipView(member);return{userId:identity.userId,displayName:identity.displayName,email:identity.email,createdAt:identity.createdAt}})
+      .filter((member)=>membershipMatchesQuery(member,query.q))
+      .sort(compareMembershipDirectoryItems)
+      .filter((member)=>!query.after||compareMembershipToCursor(member,query.after)>0)
+      .slice(0,query.limit);
+  }
+  async findProjectMembershipIdentities(projectId:string,userIds:string[]):Promise<import("../../contracts/src/api.js").ProjectMembershipCandidate[]>{
+    if(userIds.length>200)throw new Error("Project membership identity batch exceeds 200 users");
+    const wanted=new Set(userIds);
+    return [...this.memberships.values()].filter((member)=>member.projectId===projectId&&wanted.has(member.userId)).map((member)=>{const view=this.projectMembershipView(member);return{userId:view.userId,displayName:view.displayName,email:view.email}});
+  }
+  async listProjectMembershipsForFanout(projectId:string):Promise<ProjectMembership[]>{return[...this.memberships.values()].filter((member)=>member.projectId===projectId).map(clone)}
 
   async upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership> {
     const key = membershipKey(membership.projectId, membership.userId);
@@ -1877,6 +1910,9 @@ function compareProjectDirectoryItemToCursor(item:ProjectDirectoryItem,cursor:{p
     || compareC(item.name, cursor.name)
     || compareC(item.id, cursor.id);
 }
+function membershipMatchesQuery(member:{userId:string;displayName:string|null;email:string},query:string):boolean{return query===""||member.userId.toLowerCase().includes(query)||member.email.toLowerCase().includes(query)||(member.displayName?.toLowerCase().includes(query)??false)}
+function compareMembershipDirectoryItems(left:{createdAt:string;userId:string},right:{createdAt:string;userId:string}):number{return compareOrdinal(left.createdAt,right.createdAt)||compareC(left.userId,right.userId)}
+function compareMembershipToCursor(item:{createdAt:string;userId:string},cursor:{createdAt:string;userId:string}):number{return compareOrdinal(item.createdAt,cursor.createdAt)||compareC(item.userId,cursor.userId)}
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {
   if(type==="provider_failure")return event.action==="provider.request"&&event.status==="rejected"&&event.resourceKind==="provider"&&event.detail?.errorCategory!==undefined;

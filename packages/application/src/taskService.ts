@@ -1860,7 +1860,7 @@ export class TaskService {
   private async presentTaskInteractions(userId:string,projectId:string,items:TaskInteractionItem[]):Promise<TaskInteractionItem[]>{
     const actorIds=[...new Set(items.flatMap((item)=>item.kind==="user_message"&&item.actorId?[item.actorId]:[]))];
     if(actorIds.length===0)return items;
-    const members=await this.store.listProjectMemberships(projectId);
+    const members=await this.store.findProjectMembershipIdentities(projectId,actorIds);
     const labels=new Map(members.map((member)=>[member.userId,member.displayName?.trim()||member.email||"Project member"]));
     return items.map((item)=>item.kind!=="user_message"||!item.actorId?item:{...item,title:item.actorId===userId?"You":labels.get(item.actorId)??"Project member"});
   }

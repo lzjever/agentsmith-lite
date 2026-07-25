@@ -12,7 +12,7 @@ import {
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput } from "../../contracts/src/api.js";
+import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type ProjectMembershipRole, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput, type WorkspaceMembershipRole } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
@@ -516,7 +516,7 @@ async function routeApi(
   if (segments[0] === "api" && segments[1] === "v1" && segments[2] === "workspaces" && segments[3] && segments[4] === "members") {
     const workspaceId = segments[3];
     if (segments[5] === "transfer-owner" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["userId"]);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,workspaceId,"workspace.owner.transfer",requireIdempotencyKey(req),{workspaceId,userId:target},workspaceId,async()=>{await services.workspaceMemberships.transferOwner(user.id,workspaceId,target);return{transferred:true as const}})); }
-    if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId)); }
+    if (!segments[5] && method === "GET") { assertOnlySearchParams(url,["q","role","cursor","limit"]);const q=url.searchParams.get("q"),role=url.searchParams.get("role"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit");return sendJson(res, 200, await services.workspaceMemberships.list(user.id, workspaceId,{...(q!==null?{q}:{}),...(role!==null?{role:asWorkspaceMembershipFilter(role)}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})})); }
     if (!segments[5] && method === "POST") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["email","issuer","subject","role"]);return sendJson(res, 200, await services.workspaceMemberships.add(user.id, workspaceId, asWorkspaceMemberIdentity(body), asWorkspaceMembershipRole(body.role), requireIdempotencyKey(req))); }
     if (!segments[5] && method === "PATCH") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["userId","role","expectedUpdatedAt"]);return sendJson(res, 200, await services.workspaceMemberships.change(user.id, workspaceId, asUserId(body.userId), asWorkspaceMembershipRole(body.role), asString(body.expectedUpdatedAt), requireIdempotencyKey(req))); }
     if (!segments[5] && method === "DELETE") { assertOnlySearchParams(url,[]);const body = await readJson(req);assertOnlyKeys(body,["userId","expectedUpdatedAt"]);await services.workspaceMemberships.remove(user.id, workspaceId, asUserId(body.userId), asString(body.expectedUpdatedAt), requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
@@ -559,9 +559,15 @@ async function routeApi(
     }
     if (segments[4] === "members") {
       if (segments[5] === "transfer-owner" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["userId"]);const target=asUserId(body.userId);return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.owner.transfer",requireIdempotencyKey(req),{projectId,userId:target},projectId,async()=>{await services.memberships.transferOwner(user.id,projectId,target);await services.settings.auditProjectLifecycle(projectId,user.id,"project.owner.transfer");return{transferred:true as const}})); }
+      if (segments[5] === "candidates" && !segments[6] && method === "GET") {
+        assertOnlySearchParams(url,["q","cursor","limit"]);
+        const q=url.searchParams.get("q"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit");
+        return sendJson(res,200,await services.memberships.listCandidates(user.id,projectId,{...(q!==null?{q}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})}));
+      }
       if (!segments[5] && method === "GET") {
-        assertOnlySearchParams(url,[]);
-        return sendJson(res, 200, await services.memberships.listMembers(user.id, projectId));
+        assertOnlySearchParams(url,["q","role","cursor","limit"]);
+        const q=url.searchParams.get("q"),role=url.searchParams.get("role"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit");
+        return sendJson(res, 200, await services.memberships.listMembers(user.id, projectId,{...(q!==null?{q}:{}),...(role!==null?{role:asProjectMembershipFilter(role)}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})}));
       }
       if (!segments[5] && method === "POST") {
         assertOnlySearchParams(url,[]);
@@ -1047,6 +1053,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/context\/[^/]+$/.test(pathname) ||
     /^\/api\/v1\/workspaces\/[^/]+(?:\/(?:projects|settings|members)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|overview|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/members\/candidates$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/audit\/identities$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/usage\/sandbox-runs$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/usage\/file-storage\/refresh$/.test(pathname) ||
@@ -1479,9 +1486,19 @@ function asProjectMembershipRole(value: unknown): ManagedProjectMembershipRole {
   throw new ProductError("Project membership role must be admin, member, or viewer");
 }
 
+function asProjectMembershipFilter(value: string): ProjectMembershipRole {
+  if (value === "owner" || value === "admin" || value === "member" || value === "viewer") return value;
+  throw new ProductError("Project membership role must be owner, admin, member, or viewer");
+}
+
 function asWorkspaceMembershipRole(value: unknown): ManagedWorkspaceMembershipRole {
   if (value === "admin" || value === "member" || value === "viewer") return value;
   throw new ProductError("Workspace member role must be admin, member, or viewer");
+}
+
+function asWorkspaceMembershipFilter(value: string): WorkspaceMembershipRole {
+  if (value === "owner" || value === "admin" || value === "member" || value === "viewer") return value;
+  throw new ProductError("Workspace membership role must be owner, admin, member, or viewer");
 }
 
 function requiredSearchParam(url: URL, name: string): string {

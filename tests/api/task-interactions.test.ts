@@ -103,6 +103,12 @@ describe("task interactions API", () => {
     const stored = await store.findTask(task.id as string);
     assert.ok(stored);
     await makeTaskRunActive(store, stored, "http://botified.internal");
+    const identityBatches:string[][]=[];
+    const findIdentities=store.findProjectMembershipIdentities.bind(store);
+    store.findProjectMembershipIdentities=async(projectId,userIds)=>{
+      identityBatches.push(userIds);
+      return findIdentities(projectId,userIds);
+    };
     const interactions = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
     const artifactPage = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/artifacts`);
     const artifacts=artifactPage.items;
@@ -116,6 +122,9 @@ describe("task interactions API", () => {
       artifact.sha256
     ]), [["报告\".txt", artifactBytes.byteLength, "6c839ab9cab51908aff7e97713dfeaf25eec58eb99b3ed52b31dfedf4b0699d3"]]);
     assert.equal("fileId" in artifacts[0], false);
+    assert.equal(identityBatches.length,1);
+    assert.deepEqual(identityBatches[0],[...new Set(identityBatches[0])]);
+    assert.ok(identityBatches[0].length>0);
     assert.equal(botified.readTimelineCalls[0]?.serviceKey, task.id);
     assert.equal(botified.downloadFileCalls[0]?.serviceKey, task.id);
     assert.doesNotMatch(leakedJson, /api-service-key|botified\.internal|download_url|\/v1\/files/);
@@ -485,7 +494,7 @@ describe("task interactions API", () => {
     assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
-    const owner = (await store.listProjectMemberships(task.projectId)).find((membership)=>membership.role==="owner"); assert.ok(owner);
+    const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
     await store.updateProjectMembership({...owner,role:"viewer",updatedAt:new Date(Date.parse(owner.updatedAt)+1_000).toISOString()});
     const viewer = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(viewer.items.length,initial.items.length);
@@ -509,7 +518,7 @@ describe("task interactions API", () => {
     const task=await store.findTask(created.task.id as string);assert.ok(task);
     await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const owner=(await store.listProjectMemberships(task.projectId)).find((membership)=>membership.role==="owner");assert.ok(owner);
+    const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
     const content="deliver after request interruption",key="background-message-key",messageId="message_background_replay";
     const requestHash=createHash("sha256").update(JSON.stringify({content,taskId:task.id}),"utf8").digest("base64url");
     const timestamp=new Date().toISOString();

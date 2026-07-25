@@ -1,9 +1,10 @@
-import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembershipView } from "../../contracts/src/api.js";
+import type { ManagedProjectMembershipRole, ProjectAuditAction, ProjectMembershipCandidatePage, ProjectMembershipCandidateQuery, ProjectMembershipPage, ProjectMembershipQuery, ProjectMembershipRole, ProjectMembershipView } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
+import { decodeMembershipCursor, encodeMembershipCursor, membershipDirectoryLimit, normalizeMembershipQuery, type MembershipCursorScope } from "./membershipDirectory.js";
 
 export class MembershipService {
   constructor(
@@ -11,9 +12,26 @@ export class MembershipService {
     private readonly authorization: AuthorizationService
   ) {}
 
-  async listMembers(actorUserId: string, projectId: string): Promise<ProjectMembershipView[]> {
+  async listMembers(actorUserId: string, projectId: string, query: ProjectMembershipQuery = {}): Promise<ProjectMembershipPage> {
     await this.authorization.requireProject(actorUserId, projectId, "view");
-    return this.store.listProjectMemberships(projectId);
+    const q = normalizeMembershipQuery(query.q);
+    const role = membershipRole(query.role);
+    const limit = membershipDirectoryLimit(query.limit);
+    const scope:MembershipCursorScope={actorId:actorUserId,kind:"project-members",scopeId:projectId,q,role};
+    const after=query.cursor?decodeMembershipCursor(query.cursor,scope):undefined;
+    const rows=await this.store.listProjectMembershipDirectoryPage(projectId,{q,role,...(after?{after}:{}),limit:limit+1});
+    const items=rows.slice(0,limit),last=items.at(-1);
+    return{items,nextCursor:rows.length>limit&&last?encodeMembershipCursor(scope,{createdAt:last.createdAt,userId:last.userId}):null};
+  }
+
+  async listCandidates(actorUserId:string,projectId:string,query:ProjectMembershipCandidateQuery={}):Promise<ProjectMembershipCandidatePage>{
+    await this.authorization.requireProject(actorUserId,projectId,"admin");
+    const q=normalizeMembershipQuery(query.q),limit=membershipDirectoryLimit(query.limit);
+    const scope:MembershipCursorScope={actorId:actorUserId,kind:"project-member-candidates",scopeId:projectId,q,role:null};
+    const after=query.cursor?decodeMembershipCursor(query.cursor,scope):undefined;
+    const rows=await this.store.listProjectMembershipCandidatesPage(projectId,{q,...(after?{after}:{}),limit:limit+1});
+    const pageItems=rows.slice(0,limit),last=pageItems.at(-1);
+    return{items:pageItems.map(({createdAt:_createdAt,...candidate})=>candidate),nextCursor:rows.length>limit&&last?encodeMembershipCursor(scope,{createdAt:last.createdAt,userId:last.userId}):null};
   }
 
   async addMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole, idempotencyKey?: string): Promise<ProjectMembershipView> {
@@ -30,13 +48,12 @@ export class MembershipService {
       const membership = await this.store.createProjectMembershipForWorkspaceMember({ projectId, userId: memberId, role, createdAt: timestamp, updatedAt: timestamp });
       if (membership === "not_workspace_member") throw new ProductError("User must be a workspace member before joining a project", 409);
       if (membership === "already_exists") throw new ProductError("Project membership already exists", 409);
-      const view = await this.view(projectId, memberId);
-      await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
-      return view;
     } catch (error) {
       await this.audit(projectId, actorUserId, "membership.add", memberId, "rejected");
       throw error;
     }
+    await this.audit(projectId, actorUserId, "membership.add", memberId, "accepted");
+    return this.view(projectId, memberId!);
   }
 
   async changeMember(actorUserId: string, projectId: string, userId: string, role: ManagedProjectMembershipRole, expectedUpdatedAt: string, idempotencyKey?: string): Promise<ProjectMembershipView> {
@@ -50,13 +67,12 @@ export class MembershipService {
       if (membership === "not_found") throw new NotFoundError("Project membership not found");
       if (membership === "owner") throw new ProductError("Project owner membership cannot be changed or removed", 409);
       if (membership === "conflict") throw membershipChangedElsewhere();
-      const view = await this.view(projectId, memberId);
-      await this.audit(projectId, actorUserId, "membership.change", memberId, "accepted");
-      return view;
     } catch (error) {
       await this.audit(projectId, actorUserId, "membership.change", memberId, "rejected");
       throw error;
     }
+    await this.audit(projectId, actorUserId, "membership.change", memberId, "accepted");
+    return this.view(projectId, memberId!);
     };
     if (!idempotencyKey) return change();
     return runIdempotentMutation({ store:this.store, actorId:actorUserId, scopeId:projectId, operation:"project.member.change", key:idempotencyKey, request:{projectId,userId:userId.trim(),role,expectedUpdatedAt}, resourceId:userId.trim() || "member", failureMessage:"Project member role could not be changed", run:change });
@@ -98,7 +114,7 @@ export class MembershipService {
   }
 
   private async view(projectId: string, userId: string): Promise<ProjectMembershipView> {
-    const member = (await this.store.listProjectMemberships(projectId)).find((candidate) => candidate.userId === userId);
+    const member = await this.store.findProjectMembershipView(projectId,userId);
     if (!member) throw new NotFoundError("Project membership not found");
     return member;
   }
@@ -121,3 +137,8 @@ function expectedTimestamp(value: string): string {
 }
 function nextTimestamp(previous: string): string { return new Date(Math.max(Date.now(), Date.parse(previous) + 1)).toISOString(); }
 function membershipChangedElsewhere(): ProductError { return new ProductError("Project membership changed elsewhere. Reload and try again.", 409); }
+function membershipRole(value:ProjectMembershipRole|undefined):ProjectMembershipRole|null{
+  if(value===undefined)return null;
+  if(value!=="owner"&&value!=="admin"&&value!=="member"&&value!=="viewer")throw new ProductError("Project membership role must be owner, admin, member, or viewer",400);
+  return value;
+}

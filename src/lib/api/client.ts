@@ -5,6 +5,7 @@ import {
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
 import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
@@ -85,9 +86,13 @@ export type WorkspaceDetail = ApiWorkspaceDetail;
 export type WorkspaceDirectoryItem = ApiWorkspaceDirectoryItem;
 export type WorkspaceDirectoryPage = ApiWorkspaceDirectoryPage;
 export type MemberRole = "owner" | "admin" | "member" | "viewer";
-export interface ProjectMember { projectId: string; userId: string; role: MemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
+export type ProjectMember = ProjectMembershipView;
+export type ProjectMemberPage = ProjectMembershipPage;
+export type ProjectMemberCandidate = ProjectMembershipCandidate;
+export type ProjectMemberCandidatePage = ProjectMembershipCandidatePage;
 export type WorkspaceMemberRole = "owner" | "admin" | "member" | "viewer";
-export interface WorkspaceMember { workspaceId: string; userId: string; role: WorkspaceMemberRole; displayName: string | null; email: string; createdAt: string; updatedAt: string; }
+export type WorkspaceMember = WorkspaceMembershipView;
+export type WorkspaceMemberPage = WorkspaceMembershipPage;
 export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMembers: boolean; canManagePolicy: boolean; canWriteFiles: boolean; canCreateTasks: boolean; }
 export type ProjectOverviewAction = "configure_endpoint" | "create_task" | "add_collaborator";
 export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
@@ -212,9 +217,10 @@ function jsonIdempotent<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DEL
   return request<T>(path, { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
-function directoryQuery(query:{q?:string;cursor?:string;limit?:number}):string {
+function directoryQuery(query:{q?:string;role?:string;cursor?:string;limit?:number}):string {
   const params=new URLSearchParams();
   if(query.q)params.set("q",query.q);
+  if(query.role)params.set("role",query.role);
   if(query.cursor)params.set("cursor",query.cursor);
   if(query.limit!==undefined)params.set("limit",String(query.limit));
   const encoded=params.toString();
@@ -247,7 +253,7 @@ export const apiClient = {
   workspaceProjects: (workspaceId:string,query:{q?:string;cursor?:string;limit?:number}={}) => request<ProjectDirectoryPage>(`/workspaces/${encodeURIComponent(workspaceId)}/projects${directoryQuery(query)}`),
   project: (projectId:string) => request<ProjectDetail>(`/projects/${encodeURIComponent(projectId)}`),
   setProjectPinned: (projectId:string,pinned:boolean) => json<Project>(`/projects/${encodeURIComponent(projectId)}/pin`,"PUT",{pinned}),
-  workspaceMembers: (workspaceId: string) => request<WorkspaceMember[]>(`/workspaces/${encodeURIComponent(workspaceId)}/members`),
+  workspaceMembers: (workspaceId: string, query: { q?:string;role?:WorkspaceMemberRole;cursor?:string;limit?:number } = {}) => request<WorkspaceMemberPage>(`/workspaces/${encodeURIComponent(workspaceId)}/members${directoryQuery(query)}`),
   addWorkspaceMember: (workspaceId: string, email: string, role: Exclude<WorkspaceMemberRole, "owner">, idempotencyKey: string) => jsonIdempotent<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "POST", idempotencyKey, { email, role }),
   changeWorkspaceMember: (workspaceId: string, userId: string, role: Exclude<WorkspaceMemberRole, "owner">, expectedUpdatedAt: string, idempotencyKey: string) => jsonIdempotent<WorkspaceMember>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "PATCH", idempotencyKey, { userId, role, expectedUpdatedAt }),
   removeWorkspaceMember: (workspaceId: string, userId: string, expectedUpdatedAt: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/workspaces/${encodeURIComponent(workspaceId)}/members`, "DELETE", idempotencyKey, { userId, expectedUpdatedAt }),
@@ -259,7 +265,8 @@ export const apiClient = {
   archiveProject:(projectId:string,idempotencyKey:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/archive`,"POST",idempotencyKey),
   unarchiveProject:(projectId:string,idempotencyKey:string)=>jsonIdempotent<Project>(`/projects/${encodeURIComponent(projectId)}/settings/unarchive`,"POST",idempotencyKey),
   deleteProject: (projectId: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}`, "DELETE", idempotencyKey),
-  members: (projectId: string) => request<ProjectMember[]>(`/projects/${encodeURIComponent(projectId)}/members`),
+  members: (projectId: string, query: { q?:string;role?:MemberRole;cursor?:string;limit?:number } = {}) => request<ProjectMemberPage>(`/projects/${encodeURIComponent(projectId)}/members${directoryQuery(query)}`),
+  memberCandidates: (projectId:string,query:{q?:string;cursor?:string;limit?:number}={}) => request<ProjectMemberCandidatePage>(`/projects/${encodeURIComponent(projectId)}/members/candidates${directoryQuery(query)}`),
   addMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, idempotencyKey: string) =>
     jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "POST", idempotencyKey, { userId, role }),
   changeMember: (projectId: string, userId: string, role: Exclude<MemberRole, "owner">, expectedUpdatedAt: string, idempotencyKey: string) =>

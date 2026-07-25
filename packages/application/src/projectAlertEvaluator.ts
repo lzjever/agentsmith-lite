@@ -21,7 +21,7 @@ export async function evaluateProjectAlertRules(
   if(configured.length>50)throw new Error("Project alert rule evaluation exceeds 50 rules");
   if (!configured.length) return 0;
   const [members, project] = await Promise.all([
-    store.listProjectMemberships(projectId),
+    store.listProjectMembershipsForFanout(projectId),
     store.findProject(projectId),
   ]);
   for (const rule of configured) {

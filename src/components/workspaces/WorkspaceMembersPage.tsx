@@ -2,239 +2,70 @@
 
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { Badge, Banner, Button, EmptyState, IconButton, Selector, Spinner, Text, TextInput } from "@astryxdesign/core";
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type WorkspaceDetail, type WorkspaceMember, type WorkspaceMemberRole } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
+import { useMemberDirectory } from "../members/useMemberDirectory";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 
-type MutationError = { message: string; retry?: () => void };
+type MutationError={message:string;retry?:()=>void};
 
-export function WorkspaceMembersPage({ workspaceId }: { workspaceId: string }) {
-  return <WorkspaceMembers key={workspaceId} workspaceId={workspaceId} />;
+export function WorkspaceMembersPage({workspaceId}:{workspaceId:string}){return <WorkspaceMembers key={workspaceId} workspaceId={workspaceId}/>}
+
+function WorkspaceMembers({workspaceId}:{workspaceId:string}){
+  const mutationKeys=useMutationKeys(),mounted=useRef(true),workspaceRequest=useRef(0);
+  const fetchMembers=useCallback((query:{q?:string;role?:string;cursor?:string;limit:number})=>apiClient.workspaceMembers(workspaceId,{...(query.q?{q:query.q}:{}),...(query.role?{role:query.role as WorkspaceMemberRole}:{}),...(query.cursor?{cursor:query.cursor}:{}),limit:query.limit}),[workspaceId]);
+  const directory=useMemberDirectory<WorkspaceMember>(fetchMembers,workspaceId);
+  const [workspace,setWorkspace]=useState<WorkspaceDetail>();
+  const [workspaceState,setWorkspaceState]=useState<"loading"|"ready"|"error">("loading");
+  const [open,setOpen]=useState(false),[email,setEmail]=useState(""),[role,setRole]=useState<Exclude<WorkspaceMemberRole,"owner">>("member");
+  const [busyUserId,setBusyUserId]=useState<string>(),[mutationError,setMutationError]=useState<MutationError>();
+  const [selected,setSelected]=useState<WorkspaceMember>(),[memberToRemove,setMemberToRemove]=useState<WorkspaceMember>();
+
+  const loadWorkspace=useCallback(async()=>{const request=++workspaceRequest.current;setWorkspaceState("loading");try{const found=await apiClient.workspace(workspaceId);if(!mounted.current||request!==workspaceRequest.current)return;setWorkspace(found);setWorkspaceState("ready");}catch{if(mounted.current&&request===workspaceRequest.current)setWorkspaceState("error");}},[workspaceId]);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;}},[]);
+  useEffect(()=>{void loadWorkspace()},[loadWorkspace]);
+  useEffect(()=>{if(!open)mutationKeys.clear("workspace-member.add")},[open]);
+
+  const canManage=workspace?.capabilities.canManageMembers===true,mutationBusy=busyUserId!==undefined;
+  async function reload(){await Promise.allSettled([loadWorkspace(),directory.reloadFirst()]);}
+  async function recover(reason:unknown,retry:()=>void){
+    const stale=reason instanceof ApiError&&(reason.status===404||reason.status===409);
+    const access=isReadOnlyMutationError(reason)||reason instanceof ApiError&&reason.status===403;
+    if(stale||access){setSelected(undefined);setMemberToRemove(undefined);if(access)setOpen(false);await reload();}
+    if(reason instanceof ApiError&&reason.status===404&&reason.message==="Workspace not found"){setWorkspace(undefined);setWorkspaceState("error");return;}
+    setMutationError({message:errorMessage(reason),...(!stale&&!access?{retry}:{})});
+  }
+  async function add(event?:FormEvent<HTMLFormElement>){event?.preventDefault();if(!canManage||mutationBusy||!email.trim())return;setBusyUserId("new");setMutationError(undefined);try{await apiClient.addWorkspaceMember(workspaceId,email.trim(),role,mutationKeys.requestKey("workspace-member.add",workspaceId,{email:email.trim(),role}));mutationKeys.complete("workspace-member.add",workspaceId);if(!mounted.current)return;setOpen(false);setEmail("");setRole("member");await reload();}catch(reason){if(reason instanceof ApiError)mutationKeys.complete("workspace-member.add",workspaceId);if(mounted.current)await recover(reason,()=>void add());}finally{if(mounted.current)setBusyUserId(undefined)}}
+  async function change(member:WorkspaceMember,next:Exclude<WorkspaceMemberRole,"owner">){if(!canManage||mutationBusy)return;setBusyUserId(member.userId);setMutationError(undefined);const identity=`${member.userId}:${next}`;try{await apiClient.changeWorkspaceMember(workspaceId,member.userId,next,member.updatedAt,mutationKeys.key("workspace-member.change",identity));mutationKeys.complete("workspace-member.change",identity);if(mounted.current){setSelected(undefined);await reload();}}catch(reason){if(reason instanceof ApiError)mutationKeys.complete("workspace-member.change",identity);if(mounted.current)await recover(reason,()=>void change(member,next));}finally{if(mounted.current)setBusyUserId(undefined)}}
+  async function remove(member:WorkspaceMember){if(!canManage||mutationBusy)return;setBusyUserId(member.userId);setMutationError(undefined);try{await apiClient.removeWorkspaceMember(workspaceId,member.userId,member.updatedAt,mutationKeys.key("workspace-member.remove",member.userId));mutationKeys.complete("workspace-member.remove",member.userId);if(mounted.current){setMemberToRemove(undefined);await reload();}}catch(reason){if(reason instanceof ApiError)mutationKeys.complete("workspace-member.remove",member.userId);if(mounted.current)await recover(reason,()=>void remove(member));}finally{if(mounted.current)setBusyUserId(undefined)}}
+
+  const initialLoading=workspaceState==="loading"||directory.state==="loading";
+  const loadError=workspaceState==="error"||directory.state==="error";
+  return <PageLayout header={<PageHeader title="Workspace members" subtitle="People with access to this workspace." actions={canManage?<Button label="Add member" icon={<Plus size={16}/>} variant="primary" size="lg" isDisabled={mutationBusy} onClick={()=>{setMutationError(undefined);setOpen(true)}}/>:undefined}/>}>
+    {initialLoading?<div className="flex min-h-48 items-center justify-center"><Spinner label="Loading workspace members..."/></div>:null}
+    {loadError?<Banner status="error" title="Workspace members unavailable" description={directory.error||"The workspace members could not be loaded."} endContent={<Button label="Try again" variant="secondary" onClick={()=>void reload()}/>} />:null}
+    {workspaceState==="ready"&&directory.state==="ready"?<section className="space-y-4" aria-label="Workspace members" aria-busy={directory.refreshing}>
+      {mutationError&&!open&&!memberToRemove?<MutationNotice error={mutationError} onDismiss={()=>setMutationError(undefined)}/>:null}
+      {directory.refreshError?<Banner status="error" title="Members could not be refreshed" description={directory.refreshError} endContent={<Button label="Retry" variant="ghost" onClick={()=>void directory.retry()}/>} />:null}
+      <div className="flex flex-wrap items-center gap-3"><TextInput label="Search workspace members" isLabelHidden startIcon={<Search size={16}/>} value={directory.query} onChange={directory.setSearch} className="max-w-sm" placeholder="Search members" size="lg"/><Selector label="Workspace role" isLabelHidden options={[{value:"all",label:"All roles"},{value:"owner",label:"Owner"},{value:"admin",label:"Admin"},{value:"member",label:"Member"},{value:"viewer",label:"Viewer"}]} value={directory.role??"all"} onChange={(value)=>directory.setRole(value==="all"?undefined:value)} size="sm" width={144}/></div>
+      {directory.page.items.length===0?<EmptyState title="No workspace members match these filters"/>:<div className="divide-y divide-border border-y border-border">{directory.page.items.map((member)=><WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={mutationBusy} onChange={change} onRemove={(next)=>{setMutationError(undefined);setMemberToRemove(next)}} onView={setSelected}/>)}</div>}
+      {directory.page.items.length>0||directory.history.length>0?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={directory.refreshing||directory.history.length===0} onClick={directory.previous}/><Text type="supporting" color="secondary">Page {directory.history.length+1}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={directory.refreshing||!directory.page.nextCursor} onClick={directory.next}/></div>:null}
+      {!canManage?<Text type="supporting" color="secondary">Your workspace access is read-only.</Text>:null}
+    </section>:null}
+    <Dialog isOpen={open} onOpenChange={(next)=>{if(!mutationBusy)setOpen(next)}} title="Add workspace member" subtitle="Grant an existing identity access to this workspace." busy={mutationBusy} primaryAction={<Button label={busyUserId==="new"?"Adding...":"Add member"} type="submit" form="workspace-member-add-form" variant="primary" size="lg" isDisabled={!email.trim()||!canManage||mutationBusy} isLoading={busyUserId==="new"}/>}>
+      <form id="workspace-member-add-form" onSubmit={add}><div className="grid gap-4">{mutationError?<MutationNotice error={mutationError} onDismiss={()=>setMutationError(undefined)}/>:null}<TextInput label="Email" value={email} onChange={setEmail} type="email" isDisabled={mutationBusy} width="100%"/><Selector label="Workspace member role" options={[{value:"admin",label:"Admin"},{value:"member",label:"Member"},{value:"viewer",label:"Viewer"}]} value={role} onChange={(value)=>setRole(value as Exclude<WorkspaceMemberRole,"owner">)} isDisabled={mutationBusy} size="lg"/></div></form>
+    </Dialog>
+    <Dialog isOpen={Boolean(selected)} onOpenChange={(next)=>!next&&setSelected(undefined)} mode="info" title="Member details" subtitle="Workspace membership identity.">{selected?<MemberDetails member={selected}/>:null}</Dialog>
+    <ConfirmationDialog isOpen={Boolean(memberToRemove)} onOpenChange={(next)=>{if(mutationBusy)return;if(!next){setMemberToRemove(undefined);setMutationError(undefined)}}} title="Remove workspace member" description={<Text as="p" display="block" color="secondary">{memberToRemove?`Remove ${memberLabel(memberToRemove)} from this workspace? They will lose access to its projects.`:"This member is no longer available."}</Text>} actionLabel="Remove member" busy={mutationBusy} isActionDisabled={!memberToRemove} onAction={()=>{if(memberToRemove)void remove(memberToRemove)}}>{mutationError?<MutationNotice error={mutationError} onDismiss={()=>setMutationError(undefined)}/>:null}</ConfirmationDialog>
+  </PageLayout>
 }
 
-function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
-  const mutationKeys = useMutationKeys();
-  const mounted = useRef(true);
-  const loadRequest = useRef(0);
-  const refreshRequest = useRef(0);
-  const workspaceRequest = useRef(0);
-  const [workspace, setWorkspace] = useState<WorkspaceDetail>();
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [open, setOpen] = useState(false);
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState<Exclude<WorkspaceMemberRole, "owner">>("member");
-  const [busyUserId, setBusyUserId] = useState<string>();
-  const [mutationError, setMutationError] = useState<MutationError>();
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<WorkspaceMember>();
-  const [memberToRemove, setMemberToRemove] = useState<WorkspaceMember>();
-
-  const refreshWorkspace = useCallback(async () => {
-    const request = ++workspaceRequest.current;
-    const found = await apiClient.workspace(workspaceId);
-    if (!mounted.current || request !== workspaceRequest.current) return;
-    setWorkspace(found);
-  }, [workspaceId]);
-
-  const refresh = useCallback(async () => {
-    const request = ++refreshRequest.current;
-    const [, listed] = await Promise.all([refreshWorkspace(), apiClient.workspaceMembers(workspaceId)]);
-    if (!mounted.current || request !== refreshRequest.current) return;
-    setMembers(listed);
-    setState("ready");
-    return listed;
-  }, [refreshWorkspace, workspaceId]);
-
-  const load = useCallback(async () => {
-    const request = ++loadRequest.current;
-    setState("loading");
-    setMutationError(undefined);
-    try {
-      await refresh();
-    } catch {
-      if (!mounted.current || request !== loadRequest.current) return;
-      setState("error");
-    }
-  }, [refresh]);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (!open) mutationKeys.clear("workspace-member.add"); }, [open]);
-
-  const canManage = workspace?.capabilities.canManageMembers === true;
-  const mutationBusy = busyUserId !== undefined;
-  const handleMemberOpenChange = (next: boolean) => {
-    if (!mutationBusy) setOpen(next);
-  };
-  const filtered = useMemo(() => members.filter((member) => `${member.displayName ?? ""} ${member.email} ${member.role}`.toLowerCase().includes(query.trim().toLowerCase())), [members, query]);
-
-  async function recoverMutation(reason: unknown, retry: () => void) {
-    const accessDenied = isReadOnlyMutationError(reason);
-    let refreshed: WorkspaceMember[] | undefined;
-    if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace not found") {
-      setWorkspace(undefined);
-      setMembers([]);
-      setSelected(undefined);
-      setOpen(false);
-      setMemberToRemove(undefined);
-      setMutationError(undefined);
-      setState("error");
-      return;
-    }
-    if (reason instanceof ApiError && reason.status === 403) {
-      setWorkspace(undefined);
-      setMembers([]);
-      setSelected(undefined);
-      setOpen(false);
-      setMemberToRemove(undefined);
-      setMutationError(undefined);
-      setState("loading");
-      try {
-        await refresh();
-      } catch {
-        if (mounted.current) setState("error");
-        return;
-      }
-      if (!mounted.current) return;
-      setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
-      setMutationError({ message: errorMessage(reason) });
-      return;
-    }
-    try {
-      refreshed = await refresh();
-    } catch (refreshReason) {
-      if (refreshReason instanceof ApiError && (refreshReason.status === 403 || (refreshReason.status === 404 && refreshReason.message === "Workspace not found"))) {
-        setWorkspace(undefined);
-        setMembers([]);
-        setSelected(undefined);
-        setOpen(false);
-        setMemberToRemove(undefined);
-        setMutationError(undefined);
-        setState("error");
-        return;
-      }
-      // Preserve the original mutation error while the page remains usable.
-    }
-    if (!mounted.current) return;
-    if (refreshed) {
-      setSelected((current) => current ? refreshed!.find((member) => member.userId === current.userId) : undefined);
-      setMemberToRemove((current) => current ? refreshed!.find((member) => member.userId === current.userId) : undefined);
-    }
-    if (accessDenied) {
-      setWorkspace((current) => current ? { ...current, capabilities: { ...current.capabilities, canManageMembers: false } } : current);
-      setOpen(false);
-      setMemberToRemove(undefined);
-    }
-    const stale = reason instanceof ApiError && reason.status === 409 && reason.message === "Workspace membership changed elsewhere. Reload and try again.";
-    setMutationError({ message: errorMessage(reason), ...(!accessDenied && !stale && { retry }) });
-  }
-
-  async function add(event?: FormEvent<HTMLFormElement>) {
-    event?.preventDefault();
-    if (!canManage || mutationBusy || !email.trim()) return;
-    setBusyUserId("new");
-    setMutationError(undefined);
-    try {
-      const added = await apiClient.addWorkspaceMember(workspaceId, email.trim(), role, mutationKeys.requestKey("workspace-member.add", workspaceId, { email: email.trim(), role }));
-      mutationKeys.complete("workspace-member.add", workspaceId);
-      if (!mounted.current) return;
-      setMembers((current) => [...current.filter((member) => member.userId !== added.userId), added]);
-      setOpen(false);
-      setEmail("");
-      setRole("member");
-      void refreshWorkspace().catch(() => undefined);
-    } catch (reason) {
-      if (!mounted.current) return;
-      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.add", workspaceId);
-      await recoverMutation(reason, () => void add());
-    } finally {
-      if (mounted.current) setBusyUserId(undefined);
-    }
-  }
-
-  async function change(member: WorkspaceMember, next: Exclude<WorkspaceMemberRole, "owner">) {
-    if (!canManage || mutationBusy) return;
-    setBusyUserId(member.userId);
-    setMutationError(undefined);
-    const requestIdentity = `${member.userId}:${next}`;
-    try {
-      const changed = await apiClient.changeWorkspaceMember(workspaceId, member.userId, next, member.updatedAt, mutationKeys.key("workspace-member.change", requestIdentity));
-      mutationKeys.complete("workspace-member.change", requestIdentity);
-      if (!mounted.current) return;
-      setMembers((current) => current.map((item) => item.userId === changed.userId ? changed : item));
-      void refreshWorkspace().catch(() => undefined);
-    } catch (reason) {
-      if (!mounted.current) return;
-      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.change", requestIdentity);
-      await recoverMutation(reason, () => void change(member, next));
-      if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace membership not found") {
-        setMutationError(undefined);
-      }
-    } finally {
-      if (mounted.current) setBusyUserId(undefined);
-    }
-  }
-
-  async function remove(member: WorkspaceMember) {
-    if (!canManage || mutationBusy) return;
-    setBusyUserId(member.userId);
-    setMutationError(undefined);
-    try {
-      await apiClient.removeWorkspaceMember(workspaceId, member.userId, member.updatedAt, mutationKeys.key("workspace-member.remove", member.userId));
-      mutationKeys.complete("workspace-member.remove", member.userId);
-      if (!mounted.current) return;
-      setMembers((current) => current.filter((item) => item.userId !== member.userId));
-      setMemberToRemove(undefined);
-      setMutationError(undefined);
-      void refreshWorkspace().catch(() => undefined);
-    } catch (reason) {
-      if (!mounted.current) return;
-      if (reason instanceof ApiError) mutationKeys.complete("workspace-member.remove", member.userId);
-      await recoverMutation(reason, () => void remove(member));
-      if (reason instanceof ApiError && reason.status === 404 && reason.message === "Workspace membership not found") {
-        setMutationError(undefined);
-        setMemberToRemove(undefined);
-        return;
-      }
-    } finally {
-      if (mounted.current) setBusyUserId(undefined);
-    }
-  }
-
-  return <PageLayout header={<PageHeader title="Workspace members" subtitle="People with access to this workspace." actions={canManage ? <Button label="Add member" icon={<Plus size={16} />} variant="primary" size="lg" isDisabled={mutationBusy} onClick={() => { setMutationError(undefined); setOpen(true); }} /> : undefined} />}>
-    {state === "loading" ? <div className="flex min-h-48 items-center justify-center"><Spinner label="Loading workspace members..." /></div> : null}
-    {state === "error" ? <Banner status="error" title="Workspace members unavailable" description="The workspace members could not be loaded." endContent={<Button label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
-    {state === "ready" ? <section className="space-y-4" aria-label="Workspace members">
-      {mutationError && !open && !memberToRemove ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}
-      <TextInput label="Search workspace members" isLabelHidden startIcon={<Search size={16} />} value={query} onChange={setQuery} className="max-w-sm" placeholder="Search members" size="lg" />
-      {filtered.length === 0 ? <EmptyState title="No workspace members match this search" /> : <div className="divide-y divide-border border-y border-border">{filtered.map((member) => <WorkspaceMemberRow key={member.userId} member={member} canManage={canManage} busy={mutationBusy} onChange={change} onRemove={(next) => { setMutationError(undefined); setMemberToRemove(next); }} onView={setSelected} />)}</div>}
-      {!canManage ? <Text type="supporting" color="secondary">Your workspace access is read-only.</Text> : null}
-    </section> : null}
-    <Dialog isOpen={open} onOpenChange={handleMemberOpenChange} title="Add workspace member" subtitle="Grant an existing identity access to this workspace." busy={mutationBusy} primaryAction={<Button label={busyUserId === "new" ? "Adding..." : "Add member"} type="submit" form="workspace-member-add-form" variant="primary" size="lg" isDisabled={!email.trim() || !canManage || mutationBusy} isLoading={busyUserId === "new"} />}><form id="workspace-member-add-form" onSubmit={add}><div className="grid gap-4">{mutationError ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}<TextInput label="Email" value={email} onChange={setEmail} type="email" isDisabled={mutationBusy} width="100%" /><Selector label="Workspace member role" options={[{ value: "admin", label: "Admin" }, { value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }]} value={role} onChange={(value) => setRole(value as Exclude<WorkspaceMemberRole, "owner">)} isDisabled={mutationBusy} size="lg" /></div></form></Dialog>
-    <Dialog isOpen={Boolean(selected)} onOpenChange={(next) => !next && setSelected(undefined)} mode="info" title="Member details" subtitle="Workspace membership identity.">{selected ? <dl className="grid gap-4 sm:grid-cols-[8rem_1fr]"><dt><Text color="secondary">Name</Text></dt><dd><Text wordBreak="break-all">{memberLabel(selected)}</Text></dd><dt><Text color="secondary">Email</Text></dt><dd><Text wordBreak="break-all">{selected.email}</Text></dd><dt><Text color="secondary">Role</Text></dt><dd><Text>{selected.role}</Text></dd><dt><Text color="secondary">Joined</Text></dt><dd><Text>{formatLocalDateTime(selected.createdAt)}</Text></dd></dl> : null}</Dialog>
-    <ConfirmationDialog isOpen={Boolean(memberToRemove)} onOpenChange={(next) => { if (mutationBusy) return; if (!next) { setMemberToRemove(undefined); setMutationError(undefined); } }} title="Remove workspace member" description={<Text as="p" display="block" color="secondary">{memberToRemove ? `Remove ${memberLabel(memberToRemove)} from this workspace? They will lose access to its projects.` : "This member is no longer available."}</Text>} actionLabel="Remove member" busy={mutationBusy} isActionDisabled={!memberToRemove} onAction={() => { if (memberToRemove) void remove(memberToRemove); }}>{mutationError ? <MutationNotice error={mutationError} onDismiss={() => setMutationError(undefined)} /> : null}</ConfirmationDialog>
-  </PageLayout>;
-}
-
-function WorkspaceMemberRow({ member, canManage, busy, onChange, onRemove, onView }: { member: WorkspaceMember; canManage: boolean; busy: boolean; onChange: (member: WorkspaceMember, role: Exclude<WorkspaceMemberRole, "owner">) => void; onRemove: (member: WorkspaceMember) => void; onView: (member: WorkspaceMember) => void }) {
-  const label = memberLabel(member);
-  return <div className="flex flex-wrap items-center justify-between gap-3 py-3"><button type="button" className="min-w-0 text-left" onClick={() => onView(member)}><div className="flex flex-wrap items-center gap-2"><Text maxLines={1}>{label}</Text>{member.role === "owner" ? <Badge variant="neutral" label="Owner" /> : null}</div>{member.displayName ? <Text type="supporting" color="secondary" display="block" maxLines={1}>{member.email}</Text> : null}{member.role !== "owner" ? <Text type="supporting" color="secondary" display="block" className="mt-1">{roleLabel(member.role)}</Text> : null}</button>{canManage && member.role !== "owner" ? <div className="flex gap-2"><Selector label={`Role for ${label}`} isLabelHidden options={[{ value: "admin", label: "Admin" }, { value: "member", label: "Member" }, { value: "viewer", label: "Viewer" }]} value={member.role} onChange={(value) => onChange(member, value as Exclude<WorkspaceMemberRole, "owner">)} isDisabled={busy} size="lg" className="w-28" /><IconButton label={`Remove ${label}`} icon={<Trash2 size={15} />} variant="destructive" size="lg" isDisabled={busy} onClick={() => void onRemove(member)} /></div> : null}</div>;
-}
-
-function MutationNotice({ error, onDismiss }: { error: MutationError; onDismiss: () => void }) {
-  return <Banner status="error" title="Member update failed" description={error.message} endContent={<span className="flex gap-2">{error.retry ? <Button label="Retry" size="md" variant="ghost" onClick={error.retry} /> : null}<IconButton label="Dismiss member error" icon={<X size={15} />} size="lg" variant="ghost" onClick={onDismiss} /></span>} />;
-}
-
-function memberLabel(member: WorkspaceMember): string { return member.displayName || member.email || "Workspace member"; }
-function roleLabel(role: Exclude<WorkspaceMemberRole, "owner">): string { return role[0]!.toUpperCase() + role.slice(1); }
-function errorMessage(reason: unknown): string { return reason instanceof ApiError ? reason.message : "The member request could not be completed."; }
+function WorkspaceMemberRow({member,canManage,busy,onChange,onRemove,onView}:{member:WorkspaceMember;canManage:boolean;busy:boolean;onChange:(member:WorkspaceMember,role:Exclude<WorkspaceMemberRole,"owner">)=>void;onRemove:(member:WorkspaceMember)=>void;onView:(member:WorkspaceMember)=>void}){const label=memberLabel(member);return <div className="flex flex-wrap items-center justify-between gap-3 py-3"><button type="button" className="min-w-0 text-left" onClick={()=>onView(member)}><div className="flex flex-wrap items-center gap-2"><Text maxLines={1}>{label}</Text>{member.role==="owner"?<Badge variant="neutral" label="Owner"/>:null}</div>{member.displayName?<Text type="supporting" color="secondary" display="block" maxLines={1}>{member.email}</Text>:null}</button>{canManage&&member.role!=="owner"?<div className="flex gap-2"><Selector label={`Role for ${label}`} isLabelHidden options={[{value:"admin",label:"Admin"},{value:"member",label:"Member"},{value:"viewer",label:"Viewer"}]} value={member.role} onChange={(value)=>onChange(member,value as Exclude<WorkspaceMemberRole,"owner">)} isDisabled={busy} size="lg" className="w-28"/><IconButton label={`Remove ${label}`} icon={<Trash2 size={15}/>} variant="destructive" size="lg" isDisabled={busy} onClick={()=>onRemove(member)}/></div>:null}</div>}
+function MemberDetails({member}:{member:WorkspaceMember}){return <dl className="grid gap-4 sm:grid-cols-[8rem_1fr]"><dt><Text color="secondary">Name</Text></dt><dd><Text wordBreak="break-all">{memberLabel(member)}</Text></dd><dt><Text color="secondary">Email</Text></dt><dd><Text wordBreak="break-all">{member.email}</Text></dd><dt><Text color="secondary">Role</Text></dt><dd><Text>{member.role}</Text></dd><dt><Text color="secondary">Joined</Text></dt><dd><Text>{formatLocalDateTime(member.createdAt)}</Text></dd></dl>}
+function MutationNotice({error,onDismiss}:{error:MutationError;onDismiss:()=>void}){return <Banner status="error" title="Member update failed" description={error.message} endContent={<span className="flex gap-2">{error.retry?<Button label="Retry" size="md" variant="ghost" onClick={error.retry}/>:null}<IconButton label="Dismiss member error" icon={<X size={15}/>} size="lg" variant="ghost" onClick={onDismiss}/></span>}/>}
+function memberLabel(member:WorkspaceMember):string{return member.displayName||member.email||"Workspace member"}
+function errorMessage(reason:unknown):string{return reason instanceof ApiError?reason.message:"The member request could not be completed."}

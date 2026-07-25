@@ -98,6 +98,9 @@ import type {
   PersistTaskInteractionMutationInput,
   PersistTaskInteractionMutationResult,
   PersistedTaskInteractionChange,
+  MembershipDirectoryStoreQuery,
+  ProjectMembershipCandidateStoreQuery,
+  ProjectMembershipCandidateStoreItem,
   TaskInteractionChangeInput,
   TaskInteractionCorrelation,
   TaskInteractionPageAnchor,
@@ -287,7 +290,15 @@ export class PostgresProductStore implements ProductStore {
   async transferWorkspaceOwner(workspaceId:string,fromUserId:string,toUserId:string,updatedAt:string):Promise<Workspace|null>{return transaction(this.pool,async(client)=>{if(fromUserId===toUserId)return null;const target=await client.query("select 1 from workspace_memberships where workspace_id=$1 and user_id=$2 for update",[workspaceId,toUserId]);if(!target.rowCount)return null;const workspace=await client.query<WorkspaceRow>("update workspaces set owner_user_id=$3,updated_at=$4 where id=$1 and owner_user_id=$2 and lifecycle_status='active' returning *",[workspaceId,fromUserId,toUserId,updatedAt]);if(!workspace.rows[0])return null;await client.query("update workspace_memberships set role='admin',updated_at=$3 where workspace_id=$1 and user_id=$2",[workspaceId,fromUserId,updatedAt]);await client.query("update workspace_memberships set role='owner',updated_at=$3 where workspace_id=$1 and user_id=$2",[workspaceId,toUserId,updatedAt]);return mapWorkspace(workspace.rows[0])})}
   async deleteWorkspaceAfterProjects(id:string):Promise<boolean>{return transaction(this.pool,async(client)=>{const ready=await client.query("select 1 from workspaces where id=$1 and lifecycle_status='deleting' and not exists (select 1 from projects where workspace_id=$1) for update",[id]);if(ready.rowCount!==1)return false;await client.query("delete from project_context_entries where workspace_id=$1",[id]);return (await client.query("delete from workspaces where id=$1 and lifecycle_status='deleting'",[id])).rowCount===1})}
   async findWorkspaceMembership(workspaceId:string,userId:string):Promise<WorkspaceMembership|null>{const rows=await this.queryRows<WorkspaceMembershipRow>("select * from workspace_memberships where workspace_id=$1 and user_id=$2",[workspaceId,userId]);return rows[0]?mapWorkspaceMembership(rows[0]):null}
-  async listWorkspaceMemberships(workspaceId:string):Promise<WorkspaceMembershipView[]>{return (await this.queryRows<WorkspaceMembershipRow>("select wm.*, u.email, p.display_name from workspace_memberships wm join users u on u.id=wm.user_id left join user_profile_preferences p on p.user_id=u.id where wm.workspace_id=$1 order by wm.created_at,wm.user_id",[workspaceId])).map(mapWorkspaceMembershipView)}
+  async findWorkspaceMembershipView(workspaceId:string,userId:string):Promise<WorkspaceMembershipView|null>{const rows=await this.queryRows<WorkspaceMembershipRow>("select wm.*,u.email,p.display_name from workspace_memberships wm join users u on u.id=wm.user_id left join user_profile_preferences p on p.user_id=u.id where wm.workspace_id=$1 and wm.user_id=$2",[workspaceId,userId]);return rows[0]?mapWorkspaceMembershipView(rows[0]):null}
+  async listWorkspaceMembershipDirectoryPage(workspaceId:string,query:MembershipDirectoryStoreQuery<WorkspaceMembership["role"]>):Promise<WorkspaceMembershipView[]>{
+    const values:unknown[]=[workspaceId],where=["wm.workspace_id=$1"];
+    if(query.q){values.push(query.q);const q=`$${values.length}`;where.push(`(position(${q} in lower(coalesce(p.display_name,'')))>0 or position(${q} in lower(u.email))>0 or position(${q} in lower(wm.user_id))>0)`)}
+    if(query.role){values.push(query.role);where.push(`wm.role=$${values.length}`)}
+    if(query.after){values.push(query.after.createdAt,query.after.userId);const created=`$${values.length-1}`,userId=`$${values.length}`;where.push(`(wm.created_at>${created} or (wm.created_at=${created} and wm.user_id collate "C">${userId} collate "C"))`)}
+    values.push(query.limit);
+    return(await this.queryRows<WorkspaceMembershipRow>(`select wm.*,u.email,p.display_name from workspace_memberships wm join users u on u.id=wm.user_id left join user_profile_preferences p on p.user_id=u.id where ${where.join(" and ")} order by wm.created_at,wm.user_id collate "C" limit $${values.length}`,values)).map(mapWorkspaceMembershipView);
+  }
   async upsertWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership>{const rows=await this.queryRows<WorkspaceMembershipRow>("insert into workspace_memberships (workspace_id,user_id,role,created_at,updated_at) values ($1,$2,$3,$4,$5) on conflict (workspace_id,user_id) do update set role=excluded.role,updated_at=excluded.updated_at returning *",[value.workspaceId,value.userId,value.role,value.createdAt,value.updatedAt]);return mapWorkspaceMembership(rows[0]!)}
   async createWorkspaceMembership(value:WorkspaceMembership):Promise<CreateWorkspaceMembershipResult>{const rows=await this.queryRows<WorkspaceMembershipRow>("insert into workspace_memberships (workspace_id,user_id,role,created_at,updated_at) values ($1,$2,$3,$4,$5) on conflict (workspace_id,user_id) do nothing returning *",[value.workspaceId,value.userId,value.role,value.createdAt,value.updatedAt]);return rows[0]?mapWorkspaceMembership(rows[0]):"already_exists"}
   async updateWorkspaceMembership(value:WorkspaceMembership):Promise<WorkspaceMembership|null>{const rows=await this.queryRows<WorkspaceMembershipRow>("update workspace_memberships set role=$3,updated_at=$4 where workspace_id=$1 and user_id=$2 returning *",[value.workspaceId,value.userId,value.role,value.updatedAt]);return rows[0]?mapWorkspaceMembership(rows[0]):null}
@@ -515,13 +526,30 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapProjectMembership(rows[0]) : null;
   }
 
-  async listProjectMemberships(projectId: string): Promise<ProjectMembershipView[]> {
-    const rows = await this.queryRows<ProjectMembershipRow>(
-      `select pm.*, u.email, p.display_name from project_memberships pm join users u on u.id = pm.user_id left join user_profile_preferences p on p.user_id = u.id where pm.project_id = $1 order by pm.created_at, pm.user_id`,
-      [projectId]
-    );
-    return rows.map(mapProjectMembershipView);
+  async findProjectMembershipView(projectId:string,userId:string):Promise<ProjectMembershipView|null>{const rows=await this.queryRows<ProjectMembershipRow>("select pm.*,u.email,p.display_name from project_memberships pm join users u on u.id=pm.user_id left join user_profile_preferences p on p.user_id=u.id where pm.project_id=$1 and pm.user_id=$2",[projectId,userId]);return rows[0]?mapProjectMembershipView(rows[0]):null}
+  async listProjectMembershipDirectoryPage(projectId:string,query:MembershipDirectoryStoreQuery<ProjectMembership["role"]>):Promise<ProjectMembershipView[]>{
+    const values:unknown[]=[projectId],where=["pm.project_id=$1"];
+    if(query.q){values.push(query.q);const q=`$${values.length}`;where.push(`(position(${q} in lower(coalesce(p.display_name,'')))>0 or position(${q} in lower(u.email))>0 or position(${q} in lower(pm.user_id))>0)`)}
+    if(query.role){values.push(query.role);where.push(`pm.role=$${values.length}`)}
+    if(query.after){values.push(query.after.createdAt,query.after.userId);const created=`$${values.length-1}`,userId=`$${values.length}`;where.push(`(pm.created_at>${created} or (pm.created_at=${created} and pm.user_id collate "C">${userId} collate "C"))`)}
+    values.push(query.limit);
+    return(await this.queryRows<ProjectMembershipRow>(`select pm.*,u.email,p.display_name from project_memberships pm join users u on u.id=pm.user_id left join user_profile_preferences p on p.user_id=u.id where ${where.join(" and ")} order by pm.created_at,pm.user_id collate "C" limit $${values.length}`,values)).map(mapProjectMembershipView);
   }
+  async listProjectMembershipCandidatesPage(projectId:string,query:ProjectMembershipCandidateStoreQuery):Promise<ProjectMembershipCandidateStoreItem[]>{
+    const values:unknown[]=[projectId],where=["project.id=$1","not exists (select 1 from project_memberships pm where pm.project_id=project.id and pm.user_id=wm.user_id)"];
+    if(query.q){values.push(query.q);const q=`$${values.length}`;where.push(`(position(${q} in lower(coalesce(profile.display_name,'')))>0 or position(${q} in lower(u.email))>0 or position(${q} in lower(wm.user_id))>0)`)}
+    if(query.after){values.push(query.after.createdAt,query.after.userId);const created=`$${values.length-1}`,userId=`$${values.length}`;where.push(`(wm.created_at>${created} or (wm.created_at=${created} and wm.user_id collate "C">${userId} collate "C"))`)}
+    values.push(query.limit);
+    const rows=await this.queryRows<{user_id:string;email:string;display_name:string|null;created_at:unknown}>(`select wm.user_id,u.email,profile.display_name,wm.created_at from projects project join workspace_memberships wm on wm.workspace_id=project.workspace_id join users u on u.id=wm.user_id left join user_profile_preferences profile on profile.user_id=u.id where ${where.join(" and ")} order by wm.created_at,wm.user_id collate "C" limit $${values.length}`,values);
+    return rows.map((row)=>({userId:row.user_id,displayName:row.display_name??null,email:row.email,createdAt:toIso(row.created_at)}));
+  }
+  async findProjectMembershipIdentities(projectId:string,userIds:string[]):Promise<import("../../contracts/src/api.js").ProjectMembershipCandidate[]>{
+    if(userIds.length>200)throw new Error("Project membership identity batch exceeds 200 users");
+    if(userIds.length===0)return[];
+    const rows=await this.queryRows<ProjectMembershipRow>("select pm.*,u.email,p.display_name from project_memberships pm join users u on u.id=pm.user_id left join user_profile_preferences p on p.user_id=u.id where pm.project_id=$1 and pm.user_id=any($2::text[])",[projectId,userIds]);
+    return rows.map((row)=>({userId:row.user_id,displayName:row.display_name??null,email:row.email??row.user_id}));
+  }
+  async listProjectMembershipsForFanout(projectId:string):Promise<ProjectMembership[]>{return(await this.queryRows<ProjectMembershipRow>("select * from project_memberships where project_id=$1 order by created_at,user_id collate \"C\"",[projectId])).map(mapProjectMembership)}
 
   async upsertProjectMembership(membership: ProjectMembership): Promise<ProjectMembership> {
     const result = await this.pool.query<ProjectMembershipRow>(
