@@ -7,6 +7,9 @@ import {
   isInlinePreviewAvailable
 } from "../../src/components/media/inline-preview.js";
 
+const filePreviewByteLimits = { text: 512_000, image: 512_000 } as const;
+const artifactPreviewByteLimits = { text: 512 * 1024, image: 8 * 1024 * 1024 } as const;
+
 describe("inline media preview policy", () => {
   it("classifies only the supported text and raster image media types", () => {
     for (const mediaType of [
@@ -53,21 +56,31 @@ describe("inline media preview policy", () => {
     }
   });
 
-  it("uses one bounded policy for text and raster image previews", () => {
-    assert.deepEqual(inlinePreviewPolicy("text/plain"), {
+  it("applies the byte limits selected by each preview surface", () => {
+    assert.deepEqual(inlinePreviewPolicy("text/plain", filePreviewByteLimits), {
+      kind: "text",
+      maxBytes: 512_000,
+      maxCharacters: 16_000
+    });
+    assert.deepEqual(inlinePreviewPolicy("text/plain", artifactPreviewByteLimits), {
       kind: "text",
       maxBytes: 512 * 1024,
       maxCharacters: 16_000
     });
-    assert.deepEqual(inlinePreviewPolicy("image/png"), {
+    assert.deepEqual(inlinePreviewPolicy("image/png", filePreviewByteLimits), {
+      kind: "image",
+      maxBytes: 512_000
+    });
+    assert.deepEqual(inlinePreviewPolicy("image/png", artifactPreviewByteLimits), {
       kind: "image",
       maxBytes: 8 * 1024 * 1024
     });
-    assert.equal(inlinePreviewPolicy("image/svg+xml"), null);
+    assert.equal(inlinePreviewPolicy("image/svg+xml", filePreviewByteLimits), null);
 
-    assert.equal(isInlinePreviewAvailable({ mediaType: "image/png", bytes: 8 * 1024 * 1024 }), true);
-    assert.equal(isInlinePreviewAvailable({ mediaType: "image/png", bytes: 8 * 1024 * 1024 + 1 }), false);
-    assert.equal(isInlinePreviewAvailable({ mediaType: "text/plain", bytes: 600_000, previewText: "bounded excerpt" }), true);
+    assert.equal(isInlinePreviewAvailable({ mediaType: "image/png", bytes: 512_001 }, filePreviewByteLimits), false);
+    assert.equal(isInlinePreviewAvailable({ mediaType: "image/png", bytes: 512_001 }, artifactPreviewByteLimits), true);
+    assert.equal(isInlinePreviewAvailable({ mediaType: "image/png", bytes: 8 * 1024 * 1024 + 1 }, artifactPreviewByteLimits), false);
+    assert.equal(isInlinePreviewAvailable({ mediaType: "text/plain", bytes: 600_000, previewText: "bounded excerpt" }, artifactPreviewByteLimits), true);
   });
 
   it("validates the response MIME and truncates text through the shared request", async () => {
@@ -75,6 +88,7 @@ describe("inline media preview policy", () => {
     const request = createInlinePreviewRequest({
       mediaType: "text/plain",
       bytes: 20_000,
+      byteLimits: artifactPreviewByteLimits,
       load: async (signal) => {
         receivedSignal = signal;
         return new Blob(["a".repeat(20_000)], { type: "text/plain; charset=utf-8" });
@@ -89,6 +103,7 @@ describe("inline media preview policy", () => {
     const mismatched = createInlinePreviewRequest({
       mediaType: "image/png",
       bytes: 10,
+      byteLimits: artifactPreviewByteLimits,
       load: async () => new Blob(["not an image"], { type: "text/plain" })
     });
     await assert.rejects(mismatched.result, /does not match its preview metadata/i);
@@ -99,6 +114,7 @@ describe("inline media preview policy", () => {
       mediaType: "text/markdown",
       bytes: 900_000,
       previewText: "b".repeat(20_000),
+      byteLimits: artifactPreviewByteLimits,
       load: async () => {
         loadedExcerpt = true;
         return new Blob();
@@ -111,6 +127,7 @@ describe("inline media preview policy", () => {
     const oversizedResponse = createInlinePreviewRequest({
       mediaType: "text/plain",
       bytes: 1,
+      byteLimits: artifactPreviewByteLimits,
       load: async () => new Blob([new Uint8Array(512 * 1024 + 1)], { type: "text/plain" })
     });
     await assert.rejects(oversizedResponse.result, /too large to preview/i);
@@ -122,6 +139,7 @@ describe("inline media preview policy", () => {
     const image = createInlinePreviewRequest({
       mediaType: "image/png",
       bytes: 4,
+      byteLimits: artifactPreviewByteLimits,
       load: async () => new Blob([Uint8Array.of(137, 80, 78, 71)], { type: "image/png" }),
       objectUrls: {
         create: () => "blob:preview",
@@ -138,6 +156,7 @@ describe("inline media preview policy", () => {
     const pending = createInlinePreviewRequest({
       mediaType: "text/plain",
       bytes: 1,
+      byteLimits: artifactPreviewByteLimits,
       load: (signal) => new Promise<Blob>((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       })

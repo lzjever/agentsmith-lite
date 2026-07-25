@@ -1,17 +1,9 @@
 import { classifyPreviewMediaType } from "../../../packages/contracts/src/api.js";
 
-const textPolicy = {
-  kind: "text",
-  maxBytes: 512 * 1024,
-  maxCharacters: 16_000
-} as const;
-
-const imagePolicy = {
-  kind: "image",
-  maxBytes: 8 * 1024 * 1024
-} as const;
-
-export type InlinePreviewPolicy = typeof textPolicy | typeof imagePolicy;
+export type InlinePreviewByteLimits = Readonly<Record<"text" | "image", number>>;
+export type InlinePreviewPolicy =
+  | { kind: "text"; maxBytes: number; maxCharacters: 16_000 }
+  | { kind: "image"; maxBytes: number };
 export type InlinePreviewContent =
   | { kind: "text"; text: string }
   | { kind: "image"; url: string };
@@ -23,6 +15,7 @@ type PreviewMetadata = {
 };
 
 type InlinePreviewRequestOptions = PreviewMetadata & {
+  byteLimits: InlinePreviewByteLimits;
   load: (signal: AbortSignal) => Promise<Blob>;
   objectUrls?: {
     create: (blob: Blob) => string;
@@ -36,13 +29,17 @@ export type InlinePreviewRequest = {
   dispose: () => void;
 };
 
-export function inlinePreviewPolicy(mediaType: string | null | undefined): InlinePreviewPolicy | null {
+export function inlinePreviewPolicy(mediaType: string | null | undefined, byteLimits: InlinePreviewByteLimits): InlinePreviewPolicy | null {
   const kind = classifyPreviewMediaType(mediaType);
-  return kind === "text" ? textPolicy : kind === "image" ? imagePolicy : null;
+  return kind === "text"
+    ? { kind, maxBytes: byteLimits.text, maxCharacters: 16_000 }
+    : kind === "image"
+      ? { kind, maxBytes: byteLimits.image }
+      : null;
 }
 
-export function isInlinePreviewAvailable(metadata: PreviewMetadata): boolean {
-  const policy = inlinePreviewPolicy(metadata.mediaType);
+export function isInlinePreviewAvailable(metadata: PreviewMetadata, byteLimits: InlinePreviewByteLimits): boolean {
+  const policy = inlinePreviewPolicy(metadata.mediaType, byteLimits);
   if (!policy || !Number.isFinite(metadata.bytes) || metadata.bytes < 0) return false;
   return policy.kind === "text" && metadata.previewText != null
     ? true
@@ -90,19 +87,19 @@ async function resolveInlinePreview(
   createObjectUrl: (blob: Blob) => string
 ): Promise<InlinePreviewContent> {
   signal.throwIfAborted();
-  const policy = inlinePreviewPolicy(options.mediaType);
+  const policy = inlinePreviewPolicy(options.mediaType, options.byteLimits);
   if (!policy) throw new Error("This file type cannot be previewed safely.");
 
   if (policy.kind === "text" && options.previewText != null) {
     return { kind: "text", text: options.previewText.slice(0, policy.maxCharacters) };
   }
-  if (!isInlinePreviewAvailable(options)) {
+  if (!isInlinePreviewAvailable(options, options.byteLimits)) {
     throw new Error("This file is too large to preview. Download it to inspect the complete content.");
   }
 
   const blob = await options.load(signal);
   signal.throwIfAborted();
-  const responsePolicy = inlinePreviewPolicy(blob.type);
+  const responsePolicy = inlinePreviewPolicy(blob.type, options.byteLimits);
   if (!responsePolicy || responsePolicy.kind !== policy.kind) {
     throw new Error("The downloaded file type does not match its preview metadata. Download the file to inspect it safely.");
   }

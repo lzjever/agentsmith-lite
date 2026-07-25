@@ -7,10 +7,13 @@ import { ApiError, apiClient } from "../../lib/api/client";
 import {
   createInlinePreviewRequest,
   inlinePreviewPolicy,
-  isInlinePreviewAvailable
+  isInlinePreviewAvailable,
+  type InlinePreviewByteLimits
 } from "../media/inline-preview";
 import { Dialog } from "../ui/Dialog";
 import { formatArtifactBytes } from "./task-ui";
+
+const artifactPreviewByteLimits = { text: 512 * 1024, image: 8 * 1024 * 1024 } satisfies InlinePreviewByteLimits;
 
 export type PreviewableTaskArtifact = {
   id: string;
@@ -23,8 +26,8 @@ export type PreviewableTaskArtifact = {
 export function TaskArtifactActions({ taskId, artifact, available = true, className }: { taskId: string; artifact: PreviewableTaskArtifact; available?: boolean; className?: string }) {
   const [textOpen, setTextOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
-  const previewPolicy = inlinePreviewPolicy(artifact.mediaType);
-  const previewAvailable = isInlinePreviewAvailable(artifact);
+  const previewPolicy = inlinePreviewPolicy(artifact.mediaType, artifactPreviewByteLimits);
+  const previewAvailable = isInlinePreviewAvailable(artifact, artifactPreviewByteLimits);
   const safeText = previewPolicy?.kind === "text" && previewAvailable;
   const safeImage = previewPolicy?.kind === "image" && previewAvailable;
 
@@ -50,6 +53,7 @@ function ArtifactTextPreview({ taskId, artifact }: { taskId: string; artifact: P
       mediaType: artifact.mediaType,
       bytes: artifact.bytes,
       previewText: artifact.previewText,
+      byteLimits: artifactPreviewByteLimits,
       load: (signal) => apiClient.downloadTaskArtifact(taskId, artifact.id, signal)
     });
     void request.result.then((preview) => {
@@ -78,6 +82,7 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     const request = createInlinePreviewRequest({
       mediaType: artifact.mediaType,
       bytes: artifact.bytes,
+      byteLimits: artifactPreviewByteLimits,
       load: (signal) => apiClient.downloadTaskArtifact(taskId, artifact.id, signal)
     });
     void request.result.then((preview) => {
