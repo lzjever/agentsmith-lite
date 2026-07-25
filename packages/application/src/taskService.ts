@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { chmod, chown, lstat, mkdir, rm, rmdir, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { chmod, chown, lstat, mkdir, open, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -23,18 +24,19 @@ import type {
   TaskCurrentTurnProjection,
   TaskRuntimeReachability,
   TaskSandboxReleaseReceipt,
+  TaskTerminalStartReceipt,
   TaskArtifactKind,
   TaskArtifactListPage,
   TaskArtifactListQuery,
   TaskListPage,
-  TaskListQuery
+  TaskListQuery,
+  SandboxRetryableErrorEnvelope
 } from "../../contracts/src/api.js";
-import { classifyPreviewMediaType } from "../../contracts/src/api.js";
+import { classifyPreviewMediaType, sandboxStartFailedErrorEnvelope } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { normalizeSandboxResources } from "../../domain/src/kubernetesQuantity.js";
-import { DEFAULT_SANDBOX_NAMESPACE_LIMIT } from "../../domain/src/sandboxDefaults.js";
-import { requireNonEmptyString, requirePositiveInteger } from "../../domain/src/validation.js";
+import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
 import type { FileLibraryService } from "./fileLibraryService.js";
@@ -51,6 +53,7 @@ import type {
   ProductStore,
   TaskMessageIdempotencyEnvelope,
   TaskIdempotencyOperation,
+  TaskPreparationOperation,
   TaskInteractionChangeInput,
   TaskInteractionCorrelation,
   TaskInteractionPageAnchor
@@ -81,12 +84,14 @@ import {
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { detectProjectFileMediaType,readRegularFileWithoutFollowingSymlink,withProjectFileLock } from "./fileService.js";
+import { openProjectRootDescriptor } from "./filePathValidationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import type { ProjectPermission } from "./authorizationService.js";
 import type { ContextService } from "./contextService.js";
 
 export interface TaskLiveSandboxConfig {
   port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort & SandboxKubernetesInventoryPort;
+  startupActionTimeoutMs?:number;
   readinessTimeoutMs?: number;
   readinessPollMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -189,19 +194,15 @@ const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home/workspace";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
-const ACTIVE_TASKS_LIMIT_MESSAGE = "Project active tasks limit reached";
-const ACTIVE_TASKS_LIMIT_CODE = "active_tasks_limit_reached";
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
 const DEFAULT_TASK_RETRY_DELAY_MS = 5_000;
 const IDEMPOTENCY_LEASE_MS = 30_000;
+const TERMINAL_START_LEASE_MS = IDEMPOTENCY_LEASE_MS;
 const INTERACTION_HISTORY_PAGE_LIMIT = 100;
 const INTERACTION_SYNC_PAGE_LIMIT = 200;
 
-function activeTasksLimitError(): ProductError {
-  return new ProductError(ACTIVE_TASKS_LIMIT_MESSAGE, 409, ACTIVE_TASKS_LIMIT_CODE);
-}
 const INTERACTION_LOOKUP_LIMIT = 1_000;
 
 function requireTaskEndpointCapabilities(endpoint: ModelEndpoint): void {
@@ -246,12 +247,24 @@ export class BotifiedTaskPortError extends ProductError {
   }
 }
 
+export class SandboxRetryableProductError extends ProductError {
+  constructor(
+    statusCode:number,
+    readonly envelope:SandboxRetryableErrorEnvelope
+  ){
+    super(envelope.error.message,statusCode,envelope.error.code);
+  }
+}
+
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
   private readonly occupiedTerminalTaskIds = new Set<string>();
   private readonly abortingTaskIds = new Set<string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
-  private readonly taskSandboxStarts = new Map<string, Promise<void>>();
+  private readonly startupOperationsByRunId = new Map<string, Promise<PersistedAgentTask>>();
+  private readonly startupExternalActionsByRunId = new Map<string,Promise<unknown>>();
+  private readonly terminalStartupOperations = new Map<string,{runId:string;promise:Promise<PersistedAgentTask>}>();
+  private readonly terminalStartReservations = new Map<string,Promise<void>>();
 
   constructor(
     private readonly store: ProductStore,
@@ -262,6 +275,10 @@ export class TaskService {
     private readonly policies: ProjectPolicyService,
     private readonly fileLibraries:FileLibraryService
   ) {}
+
+  hasLocalStartupOperation(runId:string):boolean{
+    return this.startupOperationsByRunId.has(runId)||this.startupExternalActionsByRunId.has(runId);
+  }
 
   async createTask(userId: string, projectId: string, input: CreateTaskInput, idempotencyKey?: string): Promise<TaskPresentation> {
     const endpointId = requireNonEmptyString(input.endpointId, "task.endpointId");
@@ -274,61 +291,78 @@ export class TaskService {
       operation: "create",
       key: idempotencyKey,
       request: { endpointId, prompt, title, fileLibrary:input.fileLibrary }
-    }, newId("task"), async (id) => {
+    }, newId("task"), async (id,ownership) => {
       const existing = await this.store.findTask(id);
-      if (existing) return this.taskPresentation(userId,existing);
+      if (existing) {
+        const existingLibrary=existing.fileLibraryId?await this.store.findFileLibrary(existing.fileLibraryId):null;
+        if(!existingLibrary)throw new Error("Admitted Task File Library is unavailable during preparation recovery");
+        const existingRun=existing.currentRunId?await this.store.sandboxRuns.get(existing.currentRunId):null;
+        const marker=taskPreparationMarker(project.id,existing.id,existingRun,ownership);
+        await this.promoteTaskPreparation(project.rootPath,existingLibrary,existing.id,input.fileLibrary.mode==="create_new",marker);
+        await this.markCurrentTaskRunReady(existing);
+        return this.taskPresentation(userId,existing);
+      }
       const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
       requireTaskEndpointCapabilities(endpoint);
-      if (this.config.liveSandbox) await this.requireNamespaceSandboxCapacity();
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
       const timestamp=nowIso();
       const selection=input.fileLibrary.mode==="create_new"?{prepare:true,library:{
         id:`library_${id.slice("task_".length)}`,workspaceId:project.workspaceId,projectId,name:requireNonEmptyString(input.fileLibrary.name,"task.fileLibrary.name",160),rootSubPath:`libraries/library_${id.slice("task_".length)}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp
       }}:await this.taskLibraryCandidate(project.workspaceId,projectId,input.fileLibrary.id,userId,timestamp);
       const library=selection.library;
-      const preparedDirectory=selection.prepare&&await this.prepareLibraryWorkspace(project.rootPath,library);
-      const preparedTaskArtifactDirectory=selection.prepare&&await this.prepareTaskArtifactDirectory(project.rootPath,library,id);
-      const ownsDirectory=input.fileLibrary.mode==="create_new"&&preparedDirectory;
-      let create: AtomicTaskCreateInput;
-      try {
-        create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library,agentContext,createdByUserId:userId});
-        if(input.fileLibrary.mode==="create_new")create.newFileLibrary=library;
-        create.auditEvent={
-          id:`audit_task_create_${id}`,
+      const create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library,agentContext,createdByUserId:userId});
+      if(create.initialMessage){
+        const initialProjection=await this.prepareProductInteractionChange(messageProductSource(create.initialMessage),create.task);
+        if(!initialProjection)throw new ProductError("Initial Task interaction projection is unavailable",409);
+        create.initialInteractionChange=initialProjection.change;
+      }
+      const marker=taskPreparationMarker(project.id,id,create.sandboxRun??null,ownership);
+      await this.prepareTaskStaging(project.rootPath,id,marker);
+      if(input.fileLibrary.mode==="create_new")create.newFileLibrary=library;
+      if(create.reserveActive){
+        create.idempotency=ownership;
+        create.rejectionPresentation=null;
+        create.rejectedAuditEvent={
+          id:`audit_task_create_rejected_${id}`,
           projectId,
           actorId:userId,
           action:"task.create",
-          status:"accepted",
+          status:"rejected",
           resourceKind:"task",
           resourceId:id,
-          detail:{taskId:id},
+          detail:{taskId:id,trigger:"task_create"},
           createdAt:timestamp
         };
-      } catch (error) {
-        if(preparedTaskArtifactDirectory)await this.removeTaskArtifactDirectory(project.rootPath,library,id);
-        if(ownsDirectory)await this.compensateLibraryWorkspace(project.rootPath,library);
-        throw error;
       }
+      create.auditEvent={
+        id:`audit_task_create_${id}`,
+        projectId,
+        actorId:userId,
+        action:"task.create",
+        status:"accepted",
+        resourceKind:"task",
+        resourceId:id,
+        detail:{taskId:id},
+        createdAt:timestamp
+      };
       let persisted:PersistedAgentTask;
-      try {
-        const created=await this.store.createTaskAtomically(create);
-        if(created.kind!=="created"){
-          if(created.kind==="project_unavailable")throw new ProductError("Project is not active",409,"project_not_active");
-          if(created.kind==="library_not_found")throw new ProductError("File Library not found",404,"file_library_not_found");
-          if(created.kind==="already_bound")throw new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
-          if(created.kind==="library_name_conflict")throw new ProductError("File Library name already exists",409,"file_library_name_conflict");
-          await this.policies.recordTaskReservationRejected(projectId,userId,id);
-          throw activeTasksLimitError();
-        }
-        persisted=created.task;
-        if(create.reserveActive)await this.refreshActiveTaskAlerts(projectId);
-      } catch (error) {
-        if(preparedTaskArtifactDirectory)await this.removeTaskArtifactDirectory(project.rootPath,library,id);
-        if(ownsDirectory)await this.compensateLibraryWorkspace(project.rootPath,library);
-        throw error;
+      const created=await this.store.createTaskAtomically(create);
+      if(created.kind!=="created"){
+        if(created.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+        if(created.kind==="in_progress")throw idempotencyInProgressError();
+        if(created.kind==="replay")return replayTaskOperationResponse<TaskPresentation>(created.responseStatus,created.responseBody);
+        if(created.kind==="project_unavailable")throw new ProductError("Project is not active",409,"project_not_active");
+        if(created.kind==="library_not_found")throw new ProductError("File Library not found",404,"file_library_not_found");
+        if(created.kind==="already_bound")throw new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
+        if(created.kind==="library_name_conflict")throw new ProductError("File Library name already exists",409,"file_library_name_conflict");
+        await this.bestEffortRemoveTaskStaging(project.rootPath,id);
+        if(created.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(projectId);
+        throw new SandboxRetryableProductError(created.responseStatus,created.responseBody);
       }
-      const initialMessage=(await this.store.listTaskMessages(persisted.id))[0];
-      if(initialMessage)await this.persistMessageInteraction(initialMessage);
+      persisted=created.task;
+      if(create.reserveActive)await this.refreshActiveTaskAlerts(projectId);
+      await this.promoteTaskPreparation(project.rootPath,library,id,input.fileLibrary.mode==="create_new",marker);
+      await this.markCurrentTaskRunReady(persisted);
       return this.taskPresentation(userId,persisted);
     });
     const persisted = await this.store.findTask(result.task.id);
@@ -342,32 +376,83 @@ export class TaskService {
     return{prepare:false,library:{id,workspaceId,projectId,name:"Selected Library",rootSubPath:`libraries/${id}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp}};
   }
 
-  private async prepareLibraryWorkspace(projectRootPath:string,library:FileLibrary):Promise<boolean>{
+  private async prepareTaskStaging(projectRootPath:string,taskId:string,marker:TaskPreparationMarker):Promise<void>{
     const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
-    const root=path.resolve(projectRoot,library.rootSubPath);
-    assertPathInside(projectRoot,root,"File Library root is outside the Project");
-    const created=await mkdir(root,{recursive:true});
-    await mkdir(path.join(root,"workspace",".artifacts"),{recursive:true});
-    return created!==undefined;
+    const staging=path.resolve(projectRoot,".preparations",taskId);
+    assertPathInside(projectRoot,staging,"Task preparation directory is outside the Project");
+    await withProjectRootDescriptor(this.config.dataRoot,projectRoot,true,async(root)=>{
+      const anchoredStaging=path.join(root,".preparations",taskId);
+      await ensureDirectoryWalk(root,[".preparations",taskId,"task","botified"]);
+      await ensureDirectoryWalk(root,[".preparations",taskId,"library","workspace",".artifacts",taskId]);
+      await Promise.all([
+        writeTaskPreparationMarker(anchoredStaging,marker),
+        writeTaskPreparationMarker(path.join(anchoredStaging,"task"),marker)
+      ]);
+      const [projectDevice,stagingDevice]=await Promise.all([stat(root),stat(anchoredStaging)]);
+      if(projectDevice.dev!==stagingDevice.dev)throw new ProductError("Task preparation must stay on the Project volume",500);
+    });
   }
 
-  private async compensateLibraryWorkspace(projectRootPath:string,library:FileLibrary):Promise<void>{
-    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath),root=path.resolve(projectRoot,library.rootSubPath);
-    try{await rmdir(path.join(root,"workspace",".artifacts"));await rmdir(path.join(root,"workspace"));await rmdir(root);}catch(error){if(!isNotFound(error)&&!isDirectoryNotEmpty(error))console.error(`Failed to compensate File Library ${library.id}: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
+  private async promoteTaskPreparation(projectRootPath:string,library:FileLibrary,taskId:string,newLibrary:boolean,marker:TaskPreparationMarker):Promise<void>{
+    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
+    const staging=path.resolve(projectRoot,".preparations",taskId);
+    const taskTarget=path.resolve(projectRoot,"tasks",taskId);
+    const libraryTarget=path.resolve(projectRoot,library.rootSubPath);
+    assertPathInside(projectRoot,staging,"Task preparation directory is outside the Project");
+    assertPathInside(projectRoot,taskTarget,"Task runtime directory is outside the Project");
+    assertPathInside(projectRoot,libraryTarget,"File Library root is outside the Project");
+    await withProjectRootDescriptor(this.config.dataRoot,projectRoot,false,async(root)=>{
+      const anchoredStaging=path.join(root,".preparations",taskId);
+      const anchoredTaskTarget=path.join(root,path.relative(projectRoot,taskTarget));
+      const anchoredLibraryTarget=path.join(root,path.relative(projectRoot,libraryTarget));
+      if(!await pathExists(anchoredStaging)){
+        const taskSegments=["tasks",taskId];
+        const artifactSegments=[...relativeDirectorySegments(projectRoot,libraryTarget),"workspace",".artifacts",taskId];
+        if(await validPromotedTaskPreparation(root,taskSegments,artifactSegments,marker))return;
+        throw new Error("Task preparation staging is unavailable");
+      }
+      await requireTaskPreparationMarker(anchoredStaging,marker);
+      await ensureDirectoryWalk(root,["tasks"]);
+      const taskMarkerSegments=["tasks",taskId];
+      await promoteDirectoryByDescriptor(root,[".preparations",taskId],"task",["tasks"],taskId,taskMarkerSegments,marker);
+      await requireTaskPreparationMarker(anchoredTaskTarget,marker);
+      if(newLibrary){
+        const librarySegments=relativeDirectorySegments(projectRoot,libraryTarget);
+        await ensureDirectoryWalk(root,librarySegments.slice(0,-1));
+        await promoteDirectoryByDescriptor(root,[".preparations",taskId],"library",librarySegments.slice(0,-1),librarySegments.at(-1)!,taskMarkerSegments,marker);
+        if(!await directoryWalkExists(root,[...librarySegments,"workspace",".artifacts",taskId]))throw new Error("Promoted File Library structure is incomplete");
+      }else{
+        const librarySegments=relativeDirectorySegments(projectRoot,libraryTarget);
+        if(!await directoryWalkExists(root,librarySegments))throw new ProductError("File Library root is unavailable or unsafe",409);
+        const artifactParent=[...librarySegments,"workspace",".artifacts"];
+        await ensureDirectoryWalk(root,artifactParent);
+        await promoteDirectoryByDescriptor(root,[".preparations",taskId,"library","workspace",".artifacts"],taskId,artifactParent,taskId,taskMarkerSegments,marker);
+        if(!await directoryWalkExists(root,[...artifactParent,taskId]))throw new Error("Promoted Task artifact structure is incomplete");
+      }
+      await rm(anchoredStaging,{recursive:true,force:true});
+      try{await rmdir(path.dirname(anchoredStaging));}catch(error){if(!isNotFound(error)&&!isDirectoryNotEmpty(error))throw error;}
+    });
   }
 
-  private async prepareTaskArtifactDirectory(projectRootPath:string,library:FileLibrary,taskId:string):Promise<boolean>{
-    const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
-    const root=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts",taskId);
-    assertPathInside(projectRoot,root,"File Library artifact directory is outside the Project");
-    return(await mkdir(root,{recursive:true}))!==undefined;
+  private async markCurrentTaskRunReady(task:PersistedAgentTask):Promise<void>{
+    if(!task.currentRunId)return;
+    const run=await this.store.sandboxRuns.get(task.currentRunId);
+    if(!run||!taskMatchesExactSandboxRun(task,run))throw new Error("Admitted Task Run is unavailable during preparation");
+    if(run.state!=="starting"||run.startupReadyAt!==null)return;
+    if(!await this.store.markTaskSandboxStartupReady({taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,readyAt:nowIso()})){
+      throw new Error("Task startup readiness changed during preparation");
+    }
   }
 
-  private async removeTaskArtifactDirectory(projectRootPath:string,library:FileLibrary,taskId:string):Promise<void>{
+  private async bestEffortRemoveTaskStaging(projectRootPath:string,taskId:string):Promise<void>{
     const projectRoot=path.resolve(this.config.dataRoot,projectRootPath);
-    const root=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts",taskId);
-    assertPathInside(projectRoot,root,"File Library artifact directory is outside the Project");
-    try{await rmdir(root);}catch(error){if(!isNotFound(error)&&!isDirectoryNotEmpty(error))throw error;}
+    const staging=path.resolve(projectRoot,".preparations",taskId);
+    assertPathInside(projectRoot,staging,"Task preparation directory is outside the Project");
+    try{await withProjectRootDescriptor(this.config.dataRoot,projectRoot,false,async(root)=>{
+      const anchoredStaging=path.join(root,".preparations",taskId);
+      await rm(anchoredStaging,{recursive:true,force:true});
+      try{await rmdir(path.dirname(anchoredStaging));}catch{}
+    });}catch{}
   }
 
   private async prepareTaskCreate(input: {
@@ -403,18 +488,19 @@ export class TaskService {
       updatedAt: timestamp
     };
     const initialMessage:PersistedTaskMessage={id:initialMessageId,taskId:input.id,actorId:input.createdByUserId,content:input.prompt,deliveryKey:deliveryKeyForMessage(initialMessageId),requestHash:deliveryRequestHash(input.prompt),claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:live?"pending":"accepted",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null};
-    if (!live) return { task, initialMessage, reserveActive: false };
+    const admission=live?this.sandboxAdmission():this.releasedSandboxAdmission();
+    if (!live) return { task, initialMessage, reserveActive: false, admission };
     const serviceKey = this.serviceKeyForTask(task);
     requireBotifiedServiceKey(serviceKey);
     const runtimeState:Record<string,unknown>={botifiedBaseUrl:this.botifiedBaseUrlForTask(input.id,botifiedPort)};
     const sandboxRun = this.buildLiveSandboxRun({ task, timestamp, botifiedPort, projectSubPath: input.project.rootPath, resourceNames, fileLibraryRootSubPath:input.library.rootSubPath });
-    return { task, initialMessage, reserveActive: true, runtimeState, sandboxRun };
+    return { task, initialMessage, reserveActive: true, admission, runtimeState, sandboxRun };
   }
 
   private async runIdempotentTaskOperation<T>(
     scope: { actorId:string;projectId:string;operation:TaskIdempotencyOperation;key:string|undefined;request:unknown },
     resourceId: string,
-    action: (resourceId:string,ownership:{actorId:string;projectId:string;operation:TaskIdempotencyOperation;key:string;requestHash:string;claimToken:string}) => Promise<T>
+    action: (resourceId:string,ownership:BeginTaskIdempotencyInput) => Promise<T>
   ): Promise<T> {
     const key=normalizeIdempotencyKey(scope.key);
     const requestHash=canonicalRequestHash(scope.request);
@@ -424,20 +510,20 @@ export class TaskService {
     if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
     if(begun.kind==="in_progress")throw idempotencyInProgressError();
     if(begun.kind==="replay"){
-      if(begun.responseStatus>=400){const record=isUnknownRecord(begun.responseBody)?begun.responseBody:{};throw new ProductError(typeof record.error==="string"?record.error:"Task operation failed",begun.responseStatus,typeof record.code==="string"?record.code:undefined);}
+      if(begun.responseStatus>=400)return replayTaskOperationResponse<T>(begun.responseStatus,begun.responseBody);
       const replay=structuredClone(begun.responseBody) as T;
       if(isMessageReceiptOperation(scope.operation)&&isUnknownRecord(replay))return{...replay,duplicate:true} as T;
       return replay;
     }
     try{
-      const response=await action(begun.resourceId,{actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken});
+      const response=await action(begun.resourceId,{actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,resourceId:begun.resourceId,claimToken:begun.claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)});
       if(!await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt:nowIso()})){
         const completed=await this.store.findTaskIdempotencyByResource({actorId:scope.actorId,operation:scope.operation,key,requestHash,resourceId:begun.resourceId});
         if(completed?.kind!=="replay"||completed.responseStatus!==200||canonicalJson(completed.responseBody)!==canonicalJson(response))throw new ProductError("Idempotent task operation lost its claim",409);
       }
       return response;
     }catch(error){
-      if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});
+      if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:scope.actorId,projectId:scope.projectId,operation:scope.operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:taskOperationErrorBody(error),updatedAt:nowIso()});
       throw error;
     }
   }
@@ -494,9 +580,7 @@ export class TaskService {
   }
 
   async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
-    const candidate=await this.requireTaskForUser(userId,taskId,"write");
-    const task=await this.ensureLiveSandbox(userId,candidate);
-    await this.requireTaskTerminalAccess(userId,taskId);
+    const task=await this.requireTaskTerminalAccess(userId,taskId);
     if(this.occupiedTerminalTaskIds.has(task.id))throw new ProductError("Task terminal is already open",409);
     this.occupiedTerminalTaskIds.add(task.id);
     try{
@@ -507,6 +591,153 @@ export class TaskService {
       this.occupiedTerminalTaskIds.delete(task.id);
       throw error;
     }
+  }
+
+  async startTaskTerminal(userId:string,taskId:string,idempotencyKey?:string):Promise<TaskTerminalStartReceipt>{
+    const candidate=await this.requireTaskRecordForUser(userId,taskId,"write");
+    const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId});
+    const operationIdentity=terminalStartOperationIdentity(userId,candidate.projectId,key,requestHash);
+    const localOperation=this.terminalStartupOperations.get(operationIdentity);
+    if(localOperation){
+      const [persistedTask,persistedRun]=await Promise.all([this.store.findTask(candidate.id),this.store.sandboxRuns.get(localOperation.runId)]);
+      if(persistedTask?.currentRunId===localOperation.runId&&persistedRun?.state==="starting"&&taskMatchesExactSandboxRun(persistedTask,persistedRun)){
+        return{status:"in_progress",runId:localOperation.runId,presentation:await this.taskPresentation(userId,persistedTask,{run:persistedRun})};
+      }
+    }
+    const initialGate=await this.store.findTaskIdempotency({actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash});
+    if(initialGate?.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+    if(initialGate?.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(initialGate.responseStatus,initialGate.responseBody);
+    const reservation=await this.serializeTerminalStartReservation(operationIdentity,async()=>{
+      const replayGate=await this.store.findTaskIdempotency({actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash});
+      if(replayGate?.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+      if(replayGate?.kind==="replay")return{replay:replayTaskOperationResponse<TaskTerminalStartReceipt>(replayGate.responseStatus,replayGate.responseBody)};
+      const timestamp=nowIso();
+      const ownership:BeginTaskIdempotencyInput={
+        actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash,
+        resourceId:replayGate?.kind==="in_progress"?replayGate.resourceId:candidate.currentRunId??candidate.id,
+        claimToken:newId("idempotency_claim"),now:timestamp,leaseExpiresAt:deadlineIso(timestamp,TERMINAL_START_LEASE_MS)
+      };
+      let beginInput:import("../../ports/src/store.js").BeginTerminalStartInput;
+      if(replayGate?.kind==="in_progress"){
+        const boundRun=await this.store.sandboxRuns.get(replayGate.resourceId);
+        if(!boundRun||!taskSharesSandboxRunScope(candidate,boundRun))throw new ProductError("Terminal operation Run is unavailable or mismatched",409,"task_sandbox_restart_conflict");
+        const operationTask={...candidate,currentRunId:boundRun.runId};
+        const canonicalPresentation=await this.taskPresentation(userId,operationTask,{
+          run:boundRun,
+          turn:boundRun.state==="starting"?"starting":"ready",
+          reachability:"unreachable"
+        });
+        beginInput={taskId:candidate.id,idempotency:ownership,rejectionPresentation:canonicalPresentation};
+      }else{
+        const currentRun=candidate.currentRunId?await this.store.sandboxRuns.get(candidate.currentRunId):null;
+        const reservingReplacement=!currentRun||currentRun.state==="released";
+        if(reservingReplacement){
+          const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(candidate.projectId,candidate.endpointId);
+          requireTaskEndpointCapabilities(endpoint);
+          this.sandboxAdmission();
+        }
+        const restart=currentRun&&!["released"].includes(currentRun.state)&&!["starting","active"].includes(currentRun.state)
+          ?null
+          :await this.prepareSandboxRestart(userId,candidate);
+        if(reservingReplacement)this.serviceKeyForTask(restart?.task??candidate);
+        ownership.resourceId=restart?.sandboxRun.runId??candidate.currentRunId??candidate.id;
+        const rejectionPresentation=await this.taskPresentation(userId,candidate,{
+          run:currentRun,
+          turn:currentRun?.state==="starting"?"starting":"ready",
+          reachability:"unreachable"
+        });
+        beginInput={
+          taskId:candidate.id,
+          idempotency:ownership,
+          admission:this.sandboxAdmission(),
+          ...(restart?{restart:{expectedReleasedRunId:candidate.currentRunId,...restart}}:{}),
+          rejectionPresentation,
+          rejectedAuditEvent:{id:`audit_sandbox_started_rejected_terminal_${candidate.id}_${key}`,projectId:candidate.projectId,actorId:userId,action:"sandbox.started",status:"rejected",resourceKind:"sandbox",resourceId:candidate.id,detail:{taskId:candidate.id,trigger:"terminal"},createdAt:timestamp}
+        };
+      }
+      return{begun:await this.store.beginTerminalStart(beginInput),ownership,beginInput};
+    });
+    if("replay" in reservation)return reservation.replay;
+    const {begun,ownership,beginInput}=reservation;
+    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+    if(begun.kind==="in_progress")return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
+    if(begun.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(begun.responseStatus,begun.responseBody);
+    if(begun.kind==="capacity_rejected"){
+      if(begun.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(candidate.projectId);
+      throw new SandboxRetryableProductError(begun.responseStatus,begun.responseBody);
+    }
+    if(begun.kind==="conflict")throw new ProductError("Task sandbox changed concurrently; retry",409,"task_sandbox_restart_conflict");
+    ownership.resourceId=begun.run.runId;ownership.claimToken=begun.claimToken;
+    let completionOwnedByStore=false;
+    try{
+      if(begun.run.startupReadyAt===null)return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
+      const startup=this.beginSandboxStartupOperation(begun.task,false,begun.run);
+      this.trackTerminalStartupOperation(operationIdentity,begun.run.runId,startup.promise);
+      if(!startup.owner)return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
+      const response=await (async()=>{
+        let task=begun.task,run=begun.run;
+        try{
+          task=await startup.promise;
+        }catch(error){
+          if(!(error instanceof ProductError&&error.code==="sandbox_startup_failed"))throw error;
+          const currentTask=await this.store.findTask(task.id)??task;
+          const currentRun=currentTask.currentRunId?await this.store.sandboxRuns.get(currentTask.currentRunId):null;
+          if(!currentRun||!taskMatchesExactSandboxRun(currentTask,currentRun)||currentRun.state!=="starting")throw error;
+          const failureAt=nowIso();
+          const projectedFailedRun=this.projectStartupFailedRun(currentRun,failureAt);
+          const presentation=await this.taskPresentation(userId,currentTask,{run:projectedFailedRun,turn:"ready",reachability:"unreachable"});
+          const envelope=sandboxStartFailedErrorEnvelope(presentation);
+          if(!currentRun.startupClaimToken)throw new ProductError("Terminal startup claim is unavailable",409,"task_sandbox_restart_conflict");
+          const terminalized=await this.store.failTaskSandboxStartupAtomically({
+            taskId:currentTask.id,
+            startupClaimToken:currentRun.startupClaimToken,
+            resourceIdentity:currentRun.resourceNames,
+            failure:{
+              runId:currentRun.runId,
+              expectedFencingToken:currentRun.fencingToken,
+              code:"startup_failed",
+              message:"Sandbox startup did not complete. Retry release to remove its resources.",
+              failedAt:failureAt,
+              auditEvent:{id:`audit_sandbox_failed_${currentRun.runId}`,projectId:currentRun.projectId,actorId:null,subjectUserId:currentRun.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:currentRun.taskId,detail:{taskId:currentRun.taskId,runId:currentRun.runId,endpointId:currentTask.endpointId},createdAt:failureAt}
+            },
+            idempotency:{actorId:userId,projectId:currentTask.projectId,operation:"terminal-start",key,requestHash,claimToken:ownership.claimToken,responseStatus:502,responseBody:envelope,updatedAt:failureAt}
+          });
+          if(terminalized.kind==="conflict")throw new ProductError("Terminal startup failure could not be committed",409,"task_sandbox_restart_conflict");
+          completionOwnedByStore=true;
+          if(terminalized.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(terminalized.responseStatus,terminalized.responseBody);
+          await this.refreshSandboxFailureAlerts(currentTask.projectId,currentTask.endpointId);
+          throw new SandboxRetryableProductError(502,envelope);
+        }
+        return this.taskTerminalStartReceipt(userId,task);
+      })();
+      if(response.status==="in_progress")return response;
+      if(!await this.store.completeTaskIdempotency({...ownership,responseStatus:200,responseBody:response,updatedAt:nowIso()})){
+        const completed=await this.store.findTaskIdempotencyByResource({actorId:userId,operation:"terminal-start",key,requestHash,resourceId:ownership.resourceId});
+        if(completed?.kind!=="replay")throw new ProductError("Terminal start idempotency ownership changed before completion",409);
+        return replayTaskOperationResponse<TaskTerminalStartReceipt>(completed.responseStatus,completed.responseBody);
+      }
+      return response;
+    }catch(error){
+      if(error instanceof ProductError&&!completionOwnedByStore){
+        const convergenceAt=nowIso();
+        const converged=await this.store.beginTerminalStart({
+          ...beginInput,
+          idempotency:{...ownership,now:convergenceAt,leaseExpiresAt:deadlineIso(convergenceAt,TERMINAL_START_LEASE_MS)}
+        });
+        if(converged.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(converged.responseStatus,converged.responseBody);
+        if(converged.kind==="in_progress")return{status:"in_progress",runId:converged.run.runId,presentation:await this.taskPresentation(userId,converged.task,{run:converged.run})};
+      }
+      throw error;
+    }
+  }
+
+  private async taskTerminalStartReceipt(userId:string,candidate:PersistedAgentTask):Promise<TaskTerminalStartReceipt>{
+    const task=await this.store.findTask(candidate.id);
+    if(!task||task.deletedAt||task.projectId!==candidate.projectId)throw new ProductError("Task not found",404);
+    const run=await this.activeSandboxRun(task);
+    if(!run)throw idempotencyInProgressError();
+    const status=run.state==="active"?"active" as const:"in_progress" as const;
+    return{status,runId:run.runId,presentation:await this.taskPresentation(userId,task,{run})};
   }
 
   async validateTaskTerminalAccess(userId:string,taskId:string):Promise<void>{
@@ -528,6 +759,7 @@ export class TaskService {
     if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
     if(begun.kind==="in_progress")throw idempotencyInProgressError();
     if(begun.kind==="replay")return this.replayTaskMessage(userId,task,begun);
+    let idempotencyCompleted=false;
     try{
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt || current.projectId!==task.projectId) throw new ProductError("Task not found", 404);
@@ -553,6 +785,16 @@ export class TaskService {
         deletedAt: null
       };
       const restart=await this.prepareSandboxRestart(userId,current);
+      const receiptTask=restart?.task??current;
+      const projected=await this.prepareProductInteractionChange(messageProductSource(message),receiptTask);
+      if(!projected)throw new ProductError("Task message projection is unavailable",409);
+      const queued=[...(await this.store.listTaskMessages(current.id)),message];
+      const acceptedReceipt=await this.messageReceiptFromState(
+        userId,receiptTask,message,false,queued,projected.interaction,
+        restart?{...restart.sandboxRun,startupReadyAt:restart.reservedAt}:undefined
+      );
+      const responseBody=taskMessageIdempotencyEnvelope(message,receiptTask,userId,acceptedReceipt);
+      const rejectionPresentation=await this.taskPresentation(userId,current);
       const created=await this.store.createTaskMessageAtomically({
         taskId:current.id,
         expectedCurrentRunId:current.currentRunId,
@@ -569,28 +811,42 @@ export class TaskService {
           detail:{taskId:task.id,messageId:begun.resourceId,deliveryStatus:"pending"},
           createdAt:timestamp
         },
+        admission:this.sandboxAdmission(),
+        rejectionPresentation,
+        rejectedAuditEvent:{
+          id:`audit_sandbox_started_rejected_message_${begun.resourceId}`,
+          projectId:task.projectId,
+          actorId:userId,
+          action:"sandbox.started",
+          status:"rejected",
+          resourceKind:"sandbox",
+          resourceId:task.id,
+          detail:{taskId:task.id,trigger:"task_message"},
+          createdAt:timestamp
+        },
+        responseStatus:200,
+        responseBody,
+        interactionChange:projected.change,
         ...(restart?{restart}: {})
       });
       if(created.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
       if(created.kind==="in_progress")throw idempotencyInProgressError();
       if(created.kind==="replay")return this.replayTaskMessage(userId,task,{kind:"replay",resourceId:begun.resourceId,responseStatus:created.responseStatus,responseBody:created.responseBody});
-      if(created.kind==="capacity_rejected"){await this.policies.recordTaskReservationRejected(task.projectId,userId,task.id);throw activeTasksLimitError();}
-      if(created.kind==="conflict")throw new ProductError("Task message or sandbox changed concurrently",409,"task_message_conflict");
-      if(created.restarted)await this.refreshActiveTaskAlerts(current.projectId);
-      await this.persistMessageInteraction(created.message);
-      await this.ensureLiveSandbox(userId,created.task);
-      const persisted=await this.store.findTaskMessage(created.message.id)??created.message;
-      const dispatched = await this.dispatchTaskMessage(persisted);
-      const response=await this.messageReceipt(userId, dispatched, false);
-      const responseBody=taskMessageIdempotencyEnvelope(dispatched,created.task,userId);
-      if(!await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody,updatedAt:nowIso()})){
-        const replay=await this.store.findTaskIdempotencyByResource({actorId:userId,operation,key,requestHash,resourceId:begun.resourceId});
-        if(replay?.kind!=="replay")throw new ProductError("Task message idempotency ownership changed before completion",409);
-        return this.replayTaskMessage(userId,task,replay);
+      if(created.kind==="capacity_rejected"){
+        if(created.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(task.projectId);
+        throw new SandboxRetryableProductError(created.responseStatus,created.responseBody);
       }
-      return response;
+      if(created.kind==="conflict")throw new ProductError("Task message or sandbox changed concurrently",409,"task_message_conflict");
+      idempotencyCompleted=true;
+      try{
+        if(created.restarted)await this.refreshActiveTaskAlerts(current.projectId);
+        await this.ensureLiveSandbox(userId,created.task);
+        const persisted=await this.store.findTaskMessage(created.message.id)??created.message;
+        await this.dispatchTaskMessage(persisted);
+      }catch{}
+      return structuredClone(acceptedReceipt);
     }catch(error){
-      if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});
+      if(error instanceof ProductError&&!idempotencyCompleted)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:taskOperationErrorBody(error),updatedAt:nowIso()});
       throw error;
     }
   }
@@ -729,6 +985,7 @@ export class TaskService {
       syncedTaskIds: [],
       failedTaskIds: []
     };
+    await this.reconcileTaskPreparations(result.failedTaskIds);
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
     const activeTasks = await this.store.listActiveTasks();
     result.activeTaskCount=activeTasks.length;
@@ -743,6 +1000,40 @@ export class TaskService {
     }
     result.syncedTaskIds=[...new Set(result.syncedTaskIds)];result.failedTaskIds=[...new Set(result.failedTaskIds)];
     return result;
+  }
+
+  private async reconcileTaskPreparations(failedTaskIds:string[]):Promise<void>{
+    for(const run of await this.store.sandboxRuns.list()){
+      if(run.state!=="starting"||run.startupReadyAt!==null)continue;
+      try{
+        const task=await this.store.findTask(run.taskId);
+        const project=await this.store.findProject(run.projectId);
+        const library=task?.fileLibraryId?await this.store.findFileLibrary(task.fileLibraryId):null;
+        if(!task||!project||!library||!taskMatchesExactSandboxRun(task,run))throw new Error("Task preparation ownership is unavailable");
+        const projectRoot=path.resolve(this.config.dataRoot,project.rootPath);
+        const operation=await this.store.findTaskPreparationOperation(task.id);
+        if(!operation)throw new Error("Task preparation operation identity is unavailable");
+        const marker=taskPreparationMarker(project.id,task.id,run,operation);
+        await requireRecoverableTaskPreparationMarker(this.config.dataRoot,projectRoot,marker);
+        const libraryTarget=path.resolve(projectRoot,library.rootSubPath);
+        await this.promoteTaskPreparation(project.rootPath,library,task.id,!await directoryWalkExists(projectRoot,relativeDirectorySegments(projectRoot,libraryTarget)),marker);
+        if(!await this.store.markTaskSandboxStartupReady({taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,readyAt:nowIso()})){
+          throw new Error("Task preparation readiness changed during recovery");
+        }
+      }catch(error){
+        const failedAt=nowIso();
+        const failed=await this.store.failSandboxRun({
+          runId:run.runId,
+          expectedFencingToken:run.fencingToken,
+          code:"startup_failed",
+          message:"Task workspace preparation could not be recovered.",
+          failedAt,
+          auditEvent:{id:`audit_sandbox_failed_preparation_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:failedAt}
+        });
+        if(failed)failedTaskIds.push(run.taskId);
+        else if(!(error instanceof Error&&/readiness changed/.test(error.message)))failedTaskIds.push(run.taskId);
+      }
+    }
   }
 
   private async dispatchTaskMessage(candidate: PersistedTaskMessage, completeIdempotency = false): Promise<PersistedTaskMessage> {
@@ -764,6 +1055,9 @@ export class TaskService {
     }
     let source = await this.store.findTask(message.taskId);
     if (!source) throw new ProductError("Task not found", 404);
+    const pendingRun=await this.exactTaskMessageRun(source);
+    if(pendingRun?.state==="starting"&&pendingRun.startupReadyAt===null)return message;
+    if(pendingRun&&pendingRun.state!=="starting"&&pendingRun.state!=="active")return message;
     if ((message.deliveryStatus ?? "pending") === "pending") {
       const firstWaiting = (await this.store.listTaskMessages(source.id)).find((candidate) => ["pending", "dispatching"].includes(candidate.deliveryStatus ?? "pending"));
       if (firstWaiting?.id !== message.id) return message;
@@ -1081,14 +1375,51 @@ export class TaskService {
   }
 
   private async ensureLiveSandbox(userId:string,task:PersistedAgentTask):Promise<PersistedAgentTask>{
-    const previous=this.taskSandboxStarts.get(task.id)??Promise.resolve();
-    let release!:()=>void;
+    const stored=await this.ensureLiveSandboxCandidate(userId,task.id);
+    return this.beginSandboxStartupOperation(stored,true).promise;
+  }
+
+  private async ensureLiveSandboxCandidate(_userId:string,taskId:string):Promise<PersistedAgentTask>{
+    const stored=await this.store.findTask(taskId);
+    if(!stored||stored.deletedAt)throw new ProductError("Task not found",404);
+    if(stored.archivedAt)throw new ProductError("Task sandbox cannot be started",409);
+    const run=await this.activeSandboxRun(stored);
+    if(!run)throw new ProductError("Task sandbox must be reserved before runtime startup",409,"task_sandbox_not_reserved");
+    return stored;
+  }
+
+  private beginSandboxStartupOperation(task:PersistedAgentTask,persistFailure:boolean,knownRun?:PersistedSandboxRunState):{owner:boolean;promise:Promise<PersistedAgentTask>}{
+    const runId=requireCurrentRunId(task);
+    const existing=this.startupOperationsByRunId.get(runId);
+    if(existing)return{owner:false,promise:existing};
+    const operation=this.startReservedSandbox(task,persistFailure,knownRun);
+    this.startupOperationsByRunId.set(runId,operation);
+    void operation.finally(()=>{
+      if(this.startupOperationsByRunId.get(runId)===operation)this.startupOperationsByRunId.delete(runId);
+    }).catch(()=>undefined);
+    return{owner:true,promise:operation};
+  }
+
+  private trackTerminalStartupOperation(identity:string,runId:string,promise:Promise<PersistedAgentTask>):void{
+    const operation={runId,promise};
+    this.terminalStartupOperations.set(identity,operation);
+    void promise.finally(()=>{
+      if(this.terminalStartupOperations.get(identity)===operation)this.terminalStartupOperations.delete(identity);
+    }).catch(()=>undefined);
+  }
+
+  private async serializeTerminalStartReservation<T>(identity:string,reserve:()=>Promise<T>):Promise<T>{
+    const previous=this.terminalStartReservations.get(identity)??Promise.resolve();
+    let release:()=>void=()=>undefined;
     const current=new Promise<void>((resolve)=>{release=resolve;});
-    this.taskSandboxStarts.set(task.id,current);
+    const tail=previous.then(()=>current);
+    this.terminalStartReservations.set(identity,tail);
     await previous;
-    try{return await this.ensureLiveSandboxUnlocked(userId,task.id);}finally{
+    try{
+      return await reserve();
+    }finally{
       release();
-      if(this.taskSandboxStarts.get(task.id)===current)this.taskSandboxStarts.delete(task.id);
+      if(this.terminalStartReservations.get(identity)===tail)this.terminalStartReservations.delete(identity);
     }
   }
 
@@ -1109,48 +1440,50 @@ export class TaskService {
     };
   }
 
-  private async ensureLiveSandboxUnlocked(userId:string,taskId:string):Promise<PersistedAgentTask>{
-    const stored=await this.store.findTask(taskId);
-    if(!stored||stored.deletedAt)throw new ProductError("Task not found",404);
-    let task:PersistedAgentTask=stored;
-    if(task.archivedAt)throw new ProductError("Task sandbox cannot be started",409);
-    let run=await this.activeSandboxRun(task);
-    if(!run){
-      const restart=await this.prepareSandboxRestart(userId,task);
-      if(!restart){
-        task=await this.store.findTask(task.id)??task;
-        run=await this.activeSandboxRun(task);
-        if(!run)throw new ProductError("Task sandbox changed concurrently",409,"task_sandbox_restart_conflict");
-      }else{
-      const restarted=await this.store.restartTaskSandboxAtomically({expectedReleasedRunId:task.currentRunId,task:restart.task,runtimeState:restart.runtimeState,sandboxRun:restart.sandboxRun,reservedAt:restart.reservedAt});
-      if(restarted.kind==="capacity_rejected"){await this.policies.recordTaskReservationRejected(task.projectId,userId,task.id);throw activeTasksLimitError();}
-      if(restarted.kind==="conflict")throw new ProductError("Task sandbox changed concurrently; retry",409,"task_sandbox_restart_conflict");
-      task=restarted.task;
-      if(restarted.kind==="restarted")await this.refreshActiveTaskAlerts(task.projectId);
-      run=await this.activeSandboxRun(task);
-      if(!run)throw new ProductError("Task sandbox restart did not create an active run",409);
-      }
-    }
+  private async startReservedSandbox(stored:PersistedAgentTask,persistFailure=true,knownRun?:PersistedSandboxRunState):Promise<PersistedAgentTask>{
+    let task=stored;
+    const run=knownRun??await this.activeSandboxRun(task);
+    if(!run)throw new ProductError("Task sandbox must be reserved before runtime startup",409,"task_sandbox_not_reserved");
+    if(!taskMatchesExactSandboxRun(task,run)||!["starting","active"].includes(run.state))throw new ProductError("Task sandbox reservation changed",409,"task_sandbox_not_reserved");
     if(run.state==="starting"){
       let operation="start sandbox";
       try{
-        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(task.projectId,task.endpointId);
-        requireTaskEndpointCapabilities(endpoint);
-        const serviceKey=this.serviceKeyForTask(task);
-        await this.startLiveSandbox({endpoint,task,run,serviceKey});
-        operation="read state";
-        const runtime=await this.readRuntimeState(task,serviceKey);
-        await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
-        operation="activate sandbox";
-        task=await this.confirmLiveRunRunning(task,run.runId);
+        task=await this.startLiveSandbox({task,run})??task;
       }catch(error){
         if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
-        const adopted=await this.persistStartingRunFailureOrAdopt(task,run.runId,operation,error);
+        if(error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??""))return task;
+        const adopted=persistFailure
+          ?await this.persistStartingRunFailureOrAdopt(task,run.runId,operation,error)
+          :await this.adoptConcurrentlyStartedRun(task,run.runId);
         if(adopted)task=adopted;
         else throw new ProductError(safeTaskStageError(error),error instanceof ProductError?error.statusCode:502,"sandbox_startup_failed");
       }
     }
     return task;
+  }
+
+  private async adoptConcurrentlyStartedRun(task:PersistedAgentTask,runId:string):Promise<PersistedAgentTask|null>{
+    const current=await this.store.sandboxRuns.get(runId);
+    if(!current||!taskMatchesExactSandboxRun(task,current)||current.state!=="active")return null;
+    const currentTask=await this.store.findTask(task.id);
+    return currentTask&&taskAllowsActivatedRunAdoption(currentTask,current)?currentTask:null;
+  }
+
+  private projectStartupFailedRun(run:PersistedSandboxRunState,failedAt:string):PersistedSandboxRunState{
+    return{
+      ...run,
+      state:"failed",
+      failureCode:"startup_failed",
+      failureCause:"Sandbox startup did not complete. Retry release to remove its resources.",
+      releaseReason:"failed",
+      failedAt:run.failedAt??failedAt,
+      releaseRequestedAt:run.releaseRequestedAt??failedAt,
+      startupClaimToken:null,
+      startupLeaseExpiresAt:null,
+      cleanupClaimedAt:null,
+      fencingToken:run.fencingToken+1,
+      updatedAt:failedAt
+    };
   }
 
   private async requireTaskTerminalAccess(userId:string,taskId:string):Promise<PersistedAgentTask>{
@@ -1306,10 +1639,12 @@ export class TaskService {
     }
   }
 
-  private async readRuntimeState(task: PersistedAgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {
+  private async readRuntimeState(task: PersistedAgentTask, serviceKey: string, signal?:AbortSignal): Promise<BotifiedTaskRuntimeState> {
+    signal?.throwIfAborted();
     const document = await this.store.jsonDocs.get("sandbox_runtime_state", task.id);
+    signal?.throwIfAborted();
     if (!document) {
-      return this.rebuildRuntimeStateFromBotified(task, serviceKey);
+      return this.rebuildRuntimeStateFromBotified(task, serviceKey, signal);
     }
     const baseUrl = stringDocumentField(document, "botifiedBaseUrl");
     const state:BotifiedTaskRuntimeState={baseUrl};
@@ -1324,15 +1659,18 @@ export class TaskService {
     return state;
   }
 
-  private async rebuildRuntimeStateFromBotified(task: PersistedAgentTask, serviceKey: string): Promise<BotifiedTaskRuntimeState> {
+  private async rebuildRuntimeStateFromBotified(task: PersistedAgentTask, serviceKey: string, signal?:AbortSignal): Promise<BotifiedTaskRuntimeState> {
+    signal?.throwIfAborted();
     const run = task.currentRunId ? await this.store.sandboxRuns.get(task.currentRunId) : null;
+    signal?.throwIfAborted();
     if (!run || run.taskId !== task.id || !Number.isFinite(run.botifiedPort) || run.botifiedPort <= 0) {
       throw new ProductError("Task runtime state not found", 409);
     }
     const baseUrl = this.botifiedBaseUrlForTask(task.id, run.botifiedPort, run.namespace);
-    const snapshot = await this.readVerifiedBotifiedState(task,baseUrl,serviceKey);
+    const snapshot = await this.readVerifiedBotifiedState(task,baseUrl,serviceKey,signal);
+    signal?.throwIfAborted();
     const state = this.runtimeStateFromBotifiedSnapshot(baseUrl, snapshot);
-    await this.writeRuntimeState(task.id, state);
+    await this.writeRuntimeState(task.id, state, signal);
     return state;
   }
 
@@ -1345,7 +1683,7 @@ export class TaskService {
     return state;
   }
 
-  private async writeRuntimeState(taskId: string, state: BotifiedTaskRuntimeState): Promise<void> {
+  private async writeRuntimeState(taskId: string, state: BotifiedTaskRuntimeState, signal?:AbortSignal): Promise<void> {
     const document:Record<string,unknown>={botifiedBaseUrl:state.baseUrl};
     const timelineCursor = safeRuntimeCursor(state.timelineCursor);
     if (timelineCursor !== undefined) {
@@ -1354,6 +1692,7 @@ export class TaskService {
     if (state.lastSyncedAt !== undefined) {
       document.lastSyncedAt = state.lastSyncedAt;
     }
+    signal?.throwIfAborted();
     await this.store.jsonDocs.put("sandbox_runtime_state", taskId, document);
   }
 
@@ -1397,8 +1736,10 @@ export class TaskService {
     }
   }
 
-  private async readVerifiedBotifiedState(task:PersistedAgentTask,baseUrl:string,serviceKey:string):Promise<BotifiedRuntimeStateResult>{
-    const state=await this.callBotified("read state",()=>this.botified.readState(baseUrl,serviceKey));
+  private async readVerifiedBotifiedState(task:PersistedAgentTask,baseUrl:string,serviceKey:string,signal?:AbortSignal):Promise<BotifiedRuntimeStateResult>{
+    signal?.throwIfAborted();
+    const state=await this.callBotified("read state",()=>this.botified.readState(baseUrl,serviceKey,signal));
+    signal?.throwIfAborted();
     if(state.sessionId!==task.id){
       const mismatch=new ProductError("Botified session identity mismatch",409,"botified_session_mismatch");
       await this.persistRuntimeIdentityFailure(task,"read state",mismatch);
@@ -1530,7 +1871,7 @@ export class TaskService {
     resourceNames: SandboxRunState["resourceNames"];
     startedByUserId?: string;
     resumeUnfinished?: boolean;
-  }): SandboxRunState {
+  }): PersistedSandboxRunState {
     const paths = this.taskRuntimePaths(input.task);
     return {
       namespace: this.config.namespace,
@@ -1546,6 +1887,8 @@ export class TaskService {
       fileLibraryId: input.task.fileLibraryId!,
       startedByUserId: input.startedByUserId??input.task.createdByUserId!,
       startedAt: null,
+      startupReadyAt: null,
+      startupActionDeadlineAt: null,
       botifiedPort: input.botifiedPort,
       resourceNames: input.resourceNames,
       serviceKeySecretRef: {
@@ -1583,75 +1926,144 @@ export class TaskService {
   }
 
   private async startLiveSandbox(input: {
-    endpoint: ModelEndpoint;
     task: PersistedAgentTask;
     run: SandboxRunState;
-    serviceKey: string;
-  }): Promise<void> {
+  }): Promise<PersistedAgentTask|null> {
     const live = this.config.liveSandbox;
-    if (!live) {
-      return;
-    }
-    await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
-    const actions = reconcileSandboxRuns({
-      namespace: input.run.namespace,
-      desiredRuns: [input.run],
-      observedResources: [],
-      now: new Date()
-    }).actions;
-    const config = generateBotifiedConfig({
-      endpoint: input.endpoint,
-      task: {
-        taskId: input.task.id,
-        taskHomePath: BOTIFIED_TASK_HOME_PATH,
-        botifiedDataPath: BOTIFIED_DATA_PATH,
-        serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-        providerBaseUrl: this.botifiedBrokerBaseUrlForTask(input.task),
-        servicePort: input.run.botifiedPort,
-        resumeUnfinished:input.run.resumeUnfinished??true
-      }
-    });
-    const materialized = materializeLiveCreateActions(actions, {
-      serviceKey: input.serviceKey,
-      botifiedConfig: serializeBotifiedConfig(config),
-      agentInstructions: taskAgentInstructions(input.task)
-    });
     const startupClaimToken=newId("startup_claim");
-    for(const action of materialized){
-      const claimedAt=nowIso();
-      const applied=await this.store.runSandboxStartupOperation(
-        {taskId:input.task.id,runId:input.run.runId,expectedFencingToken:input.run.fencingToken,claimToken:startupClaimToken,claimedAt,leaseExpiresAt:deadlineIso(claimedAt,120_000)},
-        ()=>applySandboxReconcileActionsToKubernetes(live.port,[action])
-      );
-      if(applied.kind==="conflict")throw new ProductError("Sandbox startup was superseded by release",409,"sandbox_cleanup_intent_conflict");
+    const claimedAt=nowIso();
+    const leaseExpiresAt=deadlineIso(claimedAt,120_000);
+    const claimed=await this.store.claimSandboxStartup({
+      taskId:input.task.id,
+      runId:input.run.runId,
+      expectedFencingToken:input.run.fencingToken,
+      claimToken:startupClaimToken,
+      claimedAt,
+      leaseExpiresAt
+    });
+    if(claimed.kind==="not_ready"||claimed.kind==="in_progress")return null;
+    if(claimed.kind==="stale")throw new ProductError("Sandbox startup was superseded by release",409,"sandbox_cleanup_intent_conflict");
+    const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(input.task.projectId,input.task.endpointId);
+    requireTaskEndpointCapabilities(endpoint);
+    const serviceKey=this.serviceKeyForTask(input.task);
+    await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
+
+    let podAction:Extract<SandboxReconcileAction,{type:"create_resource"|"adopt_resource"}>|undefined;
+    if(live){
+      const actions = reconcileSandboxRuns({
+        namespace: input.run.namespace,
+        desiredRuns: [input.run],
+        observedResources: [],
+        now: new Date()
+      }).actions;
+      const config = generateBotifiedConfig({
+        endpoint,
+        task: {
+          taskId: input.task.id,
+          taskHomePath: BOTIFIED_TASK_HOME_PATH,
+          botifiedDataPath: BOTIFIED_DATA_PATH,
+          serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
+          providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
+          providerBaseUrl: this.botifiedBrokerBaseUrlForTask(input.task),
+          servicePort: input.run.botifiedPort,
+          resumeUnfinished:input.run.resumeUnfinished??true
+        }
+      });
+      const materialized = materializeLiveCreateActions(actions, {
+        serviceKey,
+        botifiedConfig: serializeBotifiedConfig(config),
+        agentInstructions: taskAgentInstructions(input.task)
+      });
+      for(const action of materialized){
+        if(action.type!=="create_resource"&&action.type!=="adopt_resource"){
+          await applySandboxReconcileActionsToKubernetes(live.port,[action]);
+          continue;
+        }
+        if(action.kind==="Pod")podAction=action;
+        const actionStartedAt=nowIso();
+        const actionDeadlineAt=deadlineIso(actionStartedAt,resolveDurationMs(live.startupActionTimeoutMs,120_000));
+        if(!await this.store.beginSandboxStartupAction({
+          taskId:input.task.id,
+          runId:input.run.runId,
+          expectedFencingToken:input.run.fencingToken,
+          claimToken:startupClaimToken,
+          actionDeadlineAt,
+          startedAt:actionStartedAt
+        }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
+        try{
+          await withHardDeadline(
+            (signal)=>this.trackStartupExternalAction(input.run.runId,applySandboxReconcileActionsToKubernetes(live.port,[action],signal)),
+            actionDeadlineAt
+          );
+        }catch{
+          throw new ProductError("Kubernetes startup mutation result is unknown",504,"sandbox_startup_unknown_result");
+        }
+        const completedAt=nowIso();
+        if(!await this.store.completeSandboxStartupAction({
+          taskId:input.task.id,
+          runId:input.run.runId,
+          expectedFencingToken:input.run.fencingToken,
+          claimToken:startupClaimToken,
+          actionDeadlineAt,
+          completedAt,
+          leaseExpiresAt:deadlineIso(completedAt,120_000)
+        }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
+      }
+      if(!podAction)throw new ProductError("Live sandbox pod manifest was not generated",500);
     }
-    const podAction = materialized.find((action) => action.type === "create_resource" && action.kind === "Pod");
-    if (!podAction || podAction.type !== "create_resource") {
-      throw new ProductError("Live sandbox pod manifest was not generated", 500);
-    }
-    await waitForPodReady(live, input.run.namespace, podAction.name, podAction.labels);
-    const startedAt = nowIso();
-    const confirmed = await this.store.confirmSandboxRunStarted({
-      runId: input.run.runId,
-      expectedFencingToken: input.run.fencingToken,
+
+    const readinessStartedAt=nowIso();
+    const readinessDeadlineAt=deadlineIso(readinessStartedAt,resolveDurationMs(live?.startupActionTimeoutMs,120_000));
+    if(!await this.store.beginSandboxStartupAction({
+      taskId:input.task.id,
+      runId:input.run.runId,
+      expectedFencingToken:input.run.fencingToken,
+      claimToken:startupClaimToken,
+      actionDeadlineAt:readinessDeadlineAt,
+      startedAt:readinessStartedAt
+    }))throw new ProductError("Sandbox readiness ownership changed",409,"sandbox_cleanup_intent_conflict");
+    await withHardDeadline(
+      (signal)=>this.trackStartupExternalAction(input.run.runId,(async()=>{
+        if(live&&podAction){
+          await waitForPodReady(live,input.run.namespace,podAction.name,podAction.labels,signal);
+          await waitForBotifiedServiceReady(live,this.botified,this.botifiedBaseUrlForTask(input.task.id,input.run.botifiedPort),signal);
+        }
+        const runtime=await this.readRuntimeState(input.task,serviceKey,signal);
+        await this.readVerifiedBotifiedState(input.task,runtime.baseUrl,serviceKey,signal);
+      })()),
+      readinessDeadlineAt
+    );
+    const activatedAt=nowIso();
+    const activated=await this.store.activateTaskSandboxRun({
+      taskId:input.task.id,
+      runId:input.run.runId,
+      expectedFencingToken:input.run.fencingToken,
       startupClaimToken,
-      startedAt,
-      auditEvent: {
-        id: `audit_sandbox_started_${input.run.runId}`,
-        projectId: input.run.projectId,
-        actorId: null,
-        subjectUserId: input.run.startedByUserId,
-        action: "sandbox.started",
-        status: "accepted",
-        resourceKind: "sandbox",
-        resourceId: input.run.taskId,
-        detail: { taskId:input.run.taskId, runId:input.run.runId },
-        createdAt: startedAt
+      actionDeadlineAt:readinessDeadlineAt,
+      activatedAt,
+      auditEvent:{
+        id:`audit_sandbox_started_${input.run.runId}`,
+        projectId:input.run.projectId,
+        actorId:null,
+        subjectUserId:input.run.startedByUserId,
+        action:"sandbox.started",
+        status:"accepted",
+        resourceKind:"sandbox",
+        resourceId:input.run.taskId,
+        detail:{taskId:input.run.taskId,runId:input.run.runId},
+        createdAt:activatedAt
       }
     });
-    if (confirmed.kind === "conflict") throw new ProductError("Sandbox run state fencing token changed before start confirmation", 409);
-    await waitForBotifiedServiceReady(live, this.botified, this.botifiedBaseUrlForTask(input.task.id, input.run.botifiedPort));
+    if(activated.kind==="conflict")throw new ProductError("Sandbox run state fencing token changed before activation",409);
+    return activated.task;
+  }
+
+  private trackStartupExternalAction<T>(runId:string,operation:Promise<T>):Promise<T>{
+    this.startupExternalActionsByRunId.set(runId,operation);
+    void operation.finally(()=>{
+      if(this.startupExternalActionsByRunId.get(runId)===operation)this.startupExternalActionsByRunId.delete(runId);
+    }).catch(()=>undefined);
+    return operation;
   }
 
   private async prepareLiveRuntimeDirectories(task: PersistedAgentTask, projectRootPath: string): Promise<void> {
@@ -1696,9 +2108,43 @@ export class TaskService {
     if(!current||!taskMatchesExactSandboxRun(task,current)||current.state!=="starting")return null;
     console.error(`Sandbox ${runId} ${operation} failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);
     const failureAt=nowIso();
+    const terminalOperation=error instanceof ProductError&&error.code==="botified_session_mismatch"
+      ?await this.store.findInProgressTerminalStartOperation(runId)
+      :null;
+    if(terminalOperation){
+      if(terminalOperation.projectId!==current.projectId||terminalOperation.resourceId!==runId||!current.startupClaimToken){
+        throw new ProductError("Terminal startup failure ownership is unavailable",409,"task_sandbox_restart_conflict");
+      }
+      const projectedFailedRun=this.projectStartupFailedRun(current,failureAt);
+      const presentation=await this.taskPresentation(terminalOperation.actorId,task,{run:projectedFailedRun,turn:"ready",reachability:"unreachable"});
+      const envelope=sandboxStartFailedErrorEnvelope(presentation);
+      const terminalized=await this.store.failTaskSandboxStartupAtomically({
+        taskId:task.id,
+        startupClaimToken:current.startupClaimToken,
+        resourceIdentity:current.resourceNames,
+        failure:{
+          runId,
+          expectedFencingToken:current.fencingToken,
+          code:"startup_failed",
+          message:"Sandbox startup did not complete. Retry release to remove its resources.",
+          failedAt:failureAt,
+          auditEvent:{id:`audit_sandbox_failed_${runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId,endpointId:task.endpointId},createdAt:failureAt}
+        },
+        idempotency:{
+          ...terminalOperation,
+          responseStatus:502,
+          responseBody:envelope,
+          updatedAt:failureAt
+        }
+      });
+      if(terminalized.kind==="conflict")throw new ProductError("Terminal startup failure could not be committed",409,"task_sandbox_restart_conflict");
+      if(terminalized.kind==="failed")await this.refreshSandboxFailureAlerts(current.projectId,task.endpointId);
+      return null;
+    }
     const failed=await this.store.failSandboxRun({
       runId,
       expectedFencingToken:current.fencingToken,
+      ...(current.startupClaimToken?{startupClaimToken:current.startupClaimToken}:{}),
       code:"startup_failed",
       message:"Sandbox startup did not complete. Retry release to remove its resources.",
       failedAt:failureAt,
@@ -1715,7 +2161,7 @@ export class TaskService {
   ):Promise<void>{
     const runId=requireCurrentRunId(task);
     const current=await this.store.sandboxRuns.get(runId);
-    if(!current||!taskMatchesExactSandboxRun(task,current)||!["starting","active"].includes(current.state))return;
+    if(!current||!taskMatchesExactSandboxRun(task,current)||current.state!=="active")return;
     console.error(`Sandbox ${runId} ${operation} failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);
     const failureAt=nowIso();
     const failed=await this.store.failSandboxRun({
@@ -1727,22 +2173,6 @@ export class TaskService {
       auditEvent:{id:`audit_sandbox_failed_${runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId,endpointId:task.endpointId},createdAt:failureAt}
     });
     if(failed)await this.refreshSandboxFailureAlerts(current.projectId,task.endpointId);
-  }
-
-  private async confirmLiveRunRunning(task:PersistedAgentTask,runId: string): Promise<PersistedAgentTask> {
-    const current = await this.store.sandboxRuns.get(runId);
-    if (
-      !current ||
-      current.taskId!==task.id ||
-      current.runId!==task.currentRunId
-    ) {
-      throw new ProductError("Sandbox run is no longer eligible to start",409);
-    }
-    const activated=await this.store.activateTaskSandboxRun({taskId:task.id,runId,expectedFencingToken:current.fencingToken,activatedAt:nowIso()});
-    if(activated.kind==="conflict"){
-      throw new ProductError("Sandbox run state fencing token changed", 409);
-    }
-    return activated.task;
   }
 
   private async ensureTaskConversation(task: PersistedAgentTask): Promise<void> {
@@ -1823,8 +2253,7 @@ export class TaskService {
     replay:Extract<Awaited<ReturnType<ProductStore["beginTaskIdempotency"]>>,{kind:"replay"}>
   ):Promise<TaskMessageReceipt>{
     if(replay.responseStatus>=400){
-      const body=isUnknownRecord(replay.responseBody)?replay.responseBody:{};
-      throw new ProductError(typeof body.error==="string"?body.error:"Task message operation failed",replay.responseStatus,typeof body.code==="string"?body.code:undefined);
+      return replayTaskOperationResponse<TaskMessageReceipt>(replay.responseStatus,replay.responseBody);
     }
     const envelope=requireTaskMessageIdempotencyEnvelope(replay.responseBody);
     if(envelope.messageId!==replay.resourceId||envelope.taskId!==authorizedTask.id||envelope.projectId!==authorizedTask.projectId||envelope.actorId!==userId)throw invalidTaskMessageIdempotencyError();
@@ -1832,7 +2261,7 @@ export class TaskService {
     if(!message||message.id!==envelope.messageId||message.taskId!==envelope.taskId||message.actorId!==envelope.actorId)throw invalidTaskMessageIdempotencyError();
     const canonicalTask=await this.store.findTask(message.taskId);
     if(!canonicalTask||canonicalTask.id!==authorizedTask.id||canonicalTask.projectId!==envelope.projectId)throw invalidTaskMessageIdempotencyError();
-    return this.messageReceipt(userId,message,true);
+    return structuredClone(envelope.receipt);
   }
 
   private async messageReceipt(userId: string, message: PersistedTaskMessage, duplicate: boolean): Promise<TaskMessageReceipt> {
@@ -1843,7 +2272,7 @@ export class TaskService {
     return this.messageReceiptFromState(userId,task,message,duplicate,queued,interaction);
   }
 
-  private async messageReceiptFromState(userId:string,task:PersistedAgentTask,message:PersistedTaskMessage,duplicate:boolean,queued:PersistedTaskMessage[],interaction:TaskInteractionItem|null):Promise<TaskMessageReceipt>{
+  private async messageReceiptFromState(userId:string,task:PersistedAgentTask,message:PersistedTaskMessage,duplicate:boolean,queued:PersistedTaskMessage[],interaction:TaskInteractionItem|null,run?:PersistedSandboxRunState):Promise<TaskMessageReceipt>{
     const presentedInteraction=interaction?(await this.presentTaskInteractions(userId,task.projectId,[interaction]))[0]!:interaction;
     const disposition = messageDisposition(message, interaction);
     return {
@@ -1852,7 +2281,7 @@ export class TaskService {
       duplicate,
       queuedMessage: isQueuedMessage(message) ? queuedMessage(message) : null,
       interaction: disposition === "queued_for_active_run" ? null : presentedInteraction?.kind === "user_message" ? presentedInteraction : null,
-      presentation: await this.taskPresentation(userId,task,{queued}),
+      presentation: await this.taskPresentation(userId,task,{queued,...(run?{run}:{})}),
       ...(disposition === "failed" ? { safeError:safeMessageFailure(message.safeError) } : {})
     };
   }
@@ -1876,12 +2305,13 @@ export class TaskService {
   private async completeMessageIdempotency(message: PersistedTaskMessage): Promise<void> {
     const task=await this.store.findTask(message.taskId);
     if(!task||!message.actorId)return;
+    const receipt=await this.messageReceipt(message.actorId,message,false);
     await this.store.completeTaskIdempotencyForResource({
       projectId:task.projectId,
       operation:taskOperation("message"),
       resourceId:message.id,
       responseStatus:200,
-      responseBody:taskMessageIdempotencyEnvelope(message,task,message.actorId),
+      responseBody:taskMessageIdempotencyEnvelope(message,task,message.actorId,receipt),
       updatedAt:nowIso()
     });
   }
@@ -1960,7 +2390,7 @@ export class TaskService {
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn: canInteract && turn === "running",
       stopWork:canInteract&&turn==="running",
-      openTerminal: canInteract && (releaseConfirmed||(run?.state==="active"&&(turn==="running"||turn==="ready"))) && !this.occupiedTerminalTaskIds.has(task.id),
+      openTerminal: canWrite&&retained&&executionEligible&&!cleanupPending&&(releaseConfirmed||(run?.state==="active"&&(turn==="running"||turn==="ready")))&&!this.occupiedTerminalTaskIds.has(task.id),
       editTask: canWrite && retained,
       releaseSandbox: canWrite && !task.deletedAt && Boolean(run&&run.state!=="released"),
       archiveTask: canWrite && retained && releaseConfirmed,
@@ -2040,11 +2470,17 @@ export class TaskService {
 
 
   private liveSandboxNamespaceLimit(): number {
-    return requirePositiveInteger(
-      this.config.sandboxNamespaceLimit,
-      "sandbox.namespaceLimit",
-      DEFAULT_SANDBOX_NAMESPACE_LIMIT
-    );
+    const value=this.config.sandboxNamespaceLimit;
+    if(typeof value!=="number"||!Number.isSafeInteger(value)||value<1)throw new ProductError("sandbox.namespaceLimit must be configured as a positive integer",500);
+    return value;
+  }
+
+  private sandboxAdmission():{namespace:string;namespaceLimit:number}{
+    return{namespace:this.config.namespace,namespaceLimit:this.liveSandboxNamespaceLimit()};
+  }
+
+  private releasedSandboxAdmission():{namespace:string;namespaceLimit:number}{
+    return{namespace:this.config.namespace,namespaceLimit:1};
   }
 
   private async refreshActiveTaskAlerts(projectId:string):Promise<void>{
@@ -2052,19 +2488,38 @@ export class TaskService {
     catch(error){console.error(`Active Task alert refresh failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
   }
 
+  private async bestEffortRecordProjectSandboxCapacityRejected(projectId:string):Promise<void>{
+    try{await this.policies.recordProjectSandboxCapacityRejected(projectId);}
+    catch(error){console.error(`Project Sandbox capacity alert failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
+  }
+
   private async refreshSandboxFailureAlerts(projectId:string,endpointId?:string):Promise<void>{
     try{await this.policies.refreshSandboxFailureAlerts(projectId,endpointId);}
     catch(error){console.error(`Sandbox failure alert refresh failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
   }
 
-  private async requireNamespaceSandboxCapacity(): Promise<void> {
-    const limit = this.liveSandboxNamespaceLimit();
-    const activeRuns = await this.store.sandboxRuns.listActive();
-    const namespaceActiveRuns = activeRuns.filter((run) => run.namespace === this.config.namespace);
-    if (namespaceActiveRuns.length >= limit) {
-      throw new ProductError("Namespace sandbox active run limit reached", 409);
-    }
-  }
+}
+
+function taskOperationErrorBody(error:ProductError):unknown{
+  return error instanceof SandboxRetryableProductError
+    ?error.envelope
+    :{error:error.message,...(error.code?{code:error.code}:{})};
+}
+
+function replayTaskOperationResponse<T>(statusCode:number,responseBody:unknown):T{
+  if(statusCode<400)return structuredClone(responseBody) as T;
+  const envelope=sandboxRetryableEnvelope(responseBody);
+  if(envelope)throw new SandboxRetryableProductError(statusCode,envelope);
+  const record=isUnknownRecord(responseBody)?responseBody:{};
+  throw new ProductError(typeof record.error==="string"?record.error:"Task operation failed",statusCode,typeof record.code==="string"?record.code:undefined);
+}
+
+function sandboxRetryableEnvelope(value:unknown):SandboxRetryableErrorEnvelope|null{
+  if(!isUnknownRecord(value)||!isUnknownRecord(value.error))return null;
+  const error=value.error;
+  if(!["project_sandbox_capacity_reached","substrate_sandbox_capacity_reached","sandbox_start_failed"].includes(typeof error.code==="string"?error.code:""))return null;
+  if(typeof error.message!=="string"||error.retryable!==true||!("details" in error)||!("presentation" in error))return null;
+  return value as unknown as SandboxRetryableErrorEnvelope;
 }
 
 function normalizeTaskTitle(value: string | undefined, prompt: string): string {
@@ -2125,13 +2580,14 @@ function invalidTaskMessageIdempotencyError():ProductError {
   return new ProductError("Task message idempotency record is invalid",409,"task_message_idempotency_invalid");
 }
 
-function taskMessageIdempotencyEnvelope(message:PersistedTaskMessage,task:PersistedAgentTask,actorId:string):TaskMessageIdempotencyEnvelope {
+function taskMessageIdempotencyEnvelope(message:PersistedTaskMessage,task:PersistedAgentTask,actorId:string,receipt:TaskMessageReceipt):TaskMessageIdempotencyEnvelope {
   if(message.taskId!==task.id||message.actorId!==actorId)throw invalidTaskMessageIdempotencyError();
-  return{kind:"task_message",messageId:message.id,taskId:task.id,projectId:task.projectId,actorId};
+  if(receipt.messageId!==message.id)throw invalidTaskMessageIdempotencyError();
+  return{kind:"task_message",messageId:message.id,taskId:task.id,projectId:task.projectId,actorId,receipt:structuredClone(receipt)};
 }
 
 function requireTaskMessageIdempotencyEnvelope(value:unknown):TaskMessageIdempotencyEnvelope {
-  if(!isUnknownRecord(value)||Object.keys(value).sort().join(",")!=="actorId,kind,messageId,projectId,taskId"||value.kind!=="task_message"||typeof value.messageId!=="string"||typeof value.taskId!=="string"||typeof value.projectId!=="string"||typeof value.actorId!=="string")throw invalidTaskMessageIdempotencyError();
+  if(!isUnknownRecord(value)||Object.keys(value).sort().join(",")!=="actorId,kind,messageId,projectId,receipt,taskId"||value.kind!=="task_message"||typeof value.messageId!=="string"||typeof value.taskId!=="string"||typeof value.projectId!=="string"||typeof value.actorId!=="string"||!isUnknownRecord(value.receipt)||value.receipt.messageId!==value.messageId)throw invalidTaskMessageIdempotencyError();
   return value as unknown as TaskMessageIdempotencyEnvelope;
 }
 
@@ -2450,7 +2906,8 @@ async function waitForPodReady(
   live: TaskLiveSandboxConfig,
   namespace: string,
   podName: string,
-  labels: Record<string, string>
+  labels: Record<string, string>,
+  signal?:AbortSignal
 ): Promise<void> {
   const timeoutMs = Math.max(0, live.readinessTimeoutMs ?? 60_000);
   const pollMs = Math.max(1, live.readinessPollMs ?? 1000);
@@ -2458,11 +2915,13 @@ async function waitForPodReady(
   let elapsedMs = 0;
 
   while (true) {
+    if(signal?.aborted)throw signal.reason;
     const requestStartedAt = Date.now();
     let readiness: PodReadiness;
     try {
-      readiness = await live.port.getPodReadiness(namespace, podName, labels);
+      readiness = await live.port.getPodReadiness(namespace, podName, labels,signal);
     } catch {
+      if(signal?.aborted)throw signal.reason;
       elapsedMs += Date.now() - requestStartedAt;
       if (elapsedMs >= timeoutMs) {
         throw new ProductError("Timed out waiting for sandbox pod readiness", 504);
@@ -2501,27 +2960,47 @@ async function waitForPodReady(
 async function waitForBotifiedServiceReady(
   live: TaskLiveSandboxConfig,
   botified: BotifiedRuntimeHttpClient,
-  baseUrl: string
+  baseUrl: string,
+  signal?:AbortSignal
 ): Promise<void> {
   const timeoutMs = Math.max(0, live.readinessTimeoutMs ?? 60_000);
   const pollMs = Math.max(1, live.readinessPollMs ?? 1000);
   const sleep = live.sleep ?? defaultSleep;
-  let elapsedMs = 0;
+  const deadline=Date.now()+timeoutMs;
 
   while (true) {
+    if(signal?.aborted)throw signal.reason;
     try {
-      await botified.health(baseUrl);
+      await botified.health(baseUrl,undefined,signal);
       return;
     } catch {
-      if (elapsedMs >= timeoutMs) {
+      if(signal?.aborted)throw signal.reason;
+      const remaining=deadline-Date.now();
+      if (remaining <= 0) {
         throw new ProductError("Timed out waiting for Botified service readiness", 504);
       }
-      const delayMs = Math.min(pollMs, timeoutMs - elapsedMs);
+      const delayMs = Math.min(pollMs,remaining);
       if (delayMs > 0) {
-        await sleep(delayMs);
+        await waitForAbortableDelay(sleep(delayMs),signal);
       }
-      elapsedMs += delayMs;
     }
+  }
+}
+
+async function waitForAbortableDelay(delay:Promise<void>,signal?:AbortSignal):Promise<void>{
+  if(!signal)return delay;
+  if(signal.aborted)throw signal.reason;
+  let abort:()=>void=()=>undefined;
+  try{
+    await Promise.race([
+      delay,
+      new Promise<never>((_resolve,reject)=>{
+        abort=()=>reject(signal.reason);
+        signal.addEventListener("abort",abort,{once:true});
+      })
+    ]);
+  }finally{
+    signal.removeEventListener("abort",abort);
   }
 }
 
@@ -2577,6 +3056,10 @@ function taskMatchesExactSandboxRun(task:PersistedAgentTask,run:PersistedSandbox
     task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId;
 }
 
+function taskSharesSandboxRunScope(task:PersistedAgentTask,run:PersistedSandboxRunState):boolean{
+  return task.id===run.taskId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId;
+}
+
 function requireCurrentRunId(task:PersistedAgentTask):string {
   if(!task.currentRunId)throw new ProductError("Task has no current sandbox Run",409,"task_sandbox_released");
   return task.currentRunId;
@@ -2606,6 +3089,31 @@ function safeRuntimeCursor(cursor: string | null | undefined): string | undefine
 
 function deadlineIso(baseIso: string, durationMs: number): string {
   return new Date(Date.parse(baseIso) + durationMs).toISOString();
+}
+
+function terminalStartOperationIdentity(actorId:string,projectId:string,key:string,requestHash:string):string{
+  return `${actorId}\u0000${projectId}\u0000terminal-start\u0000${key}\u0000${requestHash}`;
+}
+
+async function withHardDeadline<T>(start:(signal:AbortSignal)=>Promise<T>,deadlineAt:string):Promise<T>{
+  const remaining=Math.max(0,Date.parse(deadlineAt)-Date.now());
+  const controller=new AbortController();
+  const operation=start(controller.signal);
+  let timeout:NodeJS.Timeout|undefined;
+  try{
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve,reject)=>{
+        timeout=setTimeout(()=>{
+          const error=new ProductError("Sandbox startup action exceeded its deadline",504,"sandbox_startup_deadline_exceeded");
+          controller.abort(error);
+          reject(error);
+        },remaining);
+      })
+    ]);
+  }finally{
+    if(timeout)clearTimeout(timeout);
+  }
 }
 
 function resolveDurationMs(value: number | undefined, fallback: number): number {
@@ -2695,6 +3203,212 @@ async function taskArtifactDirectoryIsSafeToRemove(projectRoot:string,taskArtifa
     }
   }
   return true;
+}
+
+async function pathExists(target:string):Promise<boolean>{
+  try{await lstat(target);return true;}catch(error){if(isNotFound(error))return false;throw error;}
+}
+
+const TASK_PREPARATION_MARKER=".agentsmith-preparation.json";
+
+interface TaskPreparationMarker {
+  projectId:string;
+  taskId:string;
+  runId:string|null;
+  operationId:string;
+  requestHash:string;
+  fencingToken:number;
+}
+
+function taskPreparationMarker(
+  projectId:string,
+  taskId:string,
+  run:PersistedSandboxRunState|null,
+  ownership:Pick<BeginTaskIdempotencyInput,"actorId"|"projectId"|"operation"|"key"|"requestHash">|TaskPreparationOperation
+):TaskPreparationMarker {
+  if(run&&(run.projectId!==projectId||run.taskId!==taskId))throw new Error("Task preparation Run identity is inconsistent");
+  return{
+    projectId,
+    taskId,
+    runId:run?.runId??null,
+    operationId:createHash("sha256").update(`${ownership.actorId}\0${ownership.projectId}\0${ownership.operation}\0${ownership.key}`).digest("hex"),
+    requestHash:ownership.requestHash,
+    fencingToken:run?.fencingToken??0
+  };
+}
+
+async function writeTaskPreparationMarker(directory:string,marker:TaskPreparationMarker):Promise<void>{
+  const directoryHandle=await openDescriptorAnchoredDirectory(directory);
+  let handle;
+  try{
+    handle=await open(`/proc/self/fd/${directoryHandle.fd}/${TASK_PREPARATION_MARKER}`,fsConstants.O_WRONLY|fsConstants.O_CREAT|fsConstants.O_EXCL|fsConstants.O_NOFOLLOW,0o600);
+    await handle.writeFile(JSON.stringify(marker));
+  }catch(error){
+    if(!isAlreadyExists(error))throw error;
+    await requireTaskPreparationMarker(directory,marker);
+  }finally{
+    await handle?.close();
+    await directoryHandle.close();
+  }
+}
+
+async function requireTaskPreparationMarker(directory:string,expected:TaskPreparationMarker):Promise<void>{
+  const marker=await readTaskPreparationMarker(directory);
+  if(canonicalJson(marker)!==canonicalJson(expected))throw new Error("Task preparation marker does not match the admitted operation");
+}
+
+async function readTaskPreparationMarker(directory:string):Promise<TaskPreparationMarker>{
+  const directoryHandle=await openDescriptorAnchoredDirectory(directory);
+  let handle;
+  try{
+    handle=await open(`/proc/self/fd/${directoryHandle.fd}/${TASK_PREPARATION_MARKER}`,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW);
+    const value=JSON.parse(await handle.readFile("utf8")) as Partial<TaskPreparationMarker>;
+    if(
+      typeof value.projectId!=="string"||typeof value.taskId!=="string"||
+      !(value.runId===null||typeof value.runId==="string")||typeof value.operationId!=="string"||
+      typeof value.requestHash!=="string"||!Number.isSafeInteger(value.fencingToken)||
+      Object.keys(value).sort().join(",")!=="fencingToken,operationId,projectId,requestHash,runId,taskId"
+    )throw new Error("Task preparation marker is invalid");
+    return value as TaskPreparationMarker;
+  }catch(error){
+    if(isNotFound(error))throw new Error("Task preparation marker is missing");
+    throw error;
+  }finally{
+    await handle?.close();
+    await directoryHandle.close();
+  }
+}
+
+async function requireRecoverableTaskPreparationMarker(dataRoot:string,projectRoot:string,expected:TaskPreparationMarker):Promise<void>{
+  await withProjectRootDescriptor(dataRoot,projectRoot,false,async(root)=>{
+    const candidates=[
+      path.join(root,".preparations",expected.taskId),
+      path.join(root,"tasks",expected.taskId)
+    ];
+    for(const candidate of candidates){
+      try{
+        const marker=await readTaskPreparationMarker(candidate);
+        if(canonicalJson(marker)!==canonicalJson(expected)){
+          throw new Error("Task preparation marker does not match the reserved Run");
+        }
+        return;
+      }catch(error){
+        if(error instanceof Error&&error.message==="Task preparation marker is missing")continue;
+        throw error;
+      }
+    }
+    throw new Error("Task preparation marker is missing");
+  });
+}
+
+async function validPromotedTaskPreparation(root:string,taskSegments:string[],artifactSegments:string[],marker:TaskPreparationMarker):Promise<boolean>{
+  if(!await directoryWalkExists(root,taskSegments)||!await directoryWalkExists(root,[...taskSegments,"botified"])||!await directoryWalkExists(root,artifactSegments))return false;
+  await requireTaskPreparationMarker(path.join(root,...taskSegments),marker);
+  return true;
+}
+
+async function openDescriptorAnchoredDirectory(directory:string):Promise<Awaited<ReturnType<typeof open>>>{
+  const match=/^\/proc\/self\/fd\/(\d+)(?:\/(.*))?$/.exec(directory);
+  if(!match)throw new Error("Task preparation marker path is not descriptor-anchored");
+  const segments=(match[2]??"").split("/").filter(Boolean);
+  return openDirectoryWalk(`/proc/self/fd/${match[1]}`,segments,false);
+}
+
+async function withProjectRootDescriptor<T>(
+  dataRoot:string,
+  projectRoot:string,
+  create:boolean,
+  operation:(anchoredRoot:string)=>Promise<T>
+):Promise<T>{
+  const handle=await openProjectRootDescriptor(dataRoot,projectRoot,create);
+  try{
+    const anchoredRoot=`/proc/self/fd/${handle.fd}`;
+    const metadata=await stat(anchoredRoot);
+    if(!metadata.isDirectory())throw new Error("Project storage descriptor is not a directory");
+    return await operation(anchoredRoot);
+  }finally{
+    await handle.close();
+  }
+}
+
+async function safeDirectory(target:string):Promise<boolean>{
+  try{return(await lstat(target)).isDirectory();}catch(error){if(isNotFound(error))return false;throw error;}
+}
+
+function relativeDirectorySegments(root:string,target:string):string[]{
+  const relative=path.relative(root,target);
+  if(relative===""||relative.startsWith("..")||path.isAbsolute(relative))throw new Error("Task preparation path is outside the Project");
+  const segments=relative.split(path.sep).filter(Boolean);
+  if(segments.some((segment)=>segment==="."||segment===".."||segment.includes("/")||segment.includes("\0")))throw new Error("Task preparation path is invalid");
+  return segments;
+}
+
+async function openDirectoryWalk(root:string,segments:string[],create=false):Promise<Awaited<ReturnType<typeof open>>>{
+  const rootFlags=fsConstants.O_RDONLY|fsConstants.O_DIRECTORY|(root.startsWith("/proc/self/fd/")?0:fsConstants.O_NOFOLLOW);
+  let current=await open(root,rootFlags);
+  try{
+    for(const segment of segments){
+      if(segment===""||segment==="."||segment===".."||segment.includes("/")||segment.includes("\0"))throw new Error("Task preparation directory segment is invalid");
+      const child=`/proc/self/fd/${current.fd}/${segment}`;
+      let next;
+      try{
+        next=await open(child,fsConstants.O_RDONLY|fsConstants.O_DIRECTORY|fsConstants.O_NOFOLLOW);
+      }catch(error){
+        if(!create||!isNotFound(error))throw error;
+        try{await mkdir(child,{mode:0o700});}catch(mkdirError){if(!isAlreadyExists(mkdirError))throw mkdirError;}
+        next=await open(child,fsConstants.O_RDONLY|fsConstants.O_DIRECTORY|fsConstants.O_NOFOLLOW);
+      }
+      await current.close();
+      current=next;
+    }
+    return current;
+  }catch(error){
+    await current.close();
+    throw error;
+  }
+}
+
+async function ensureDirectoryWalk(root:string,segments:string[]):Promise<void>{
+  const handle=await openDirectoryWalk(root,segments,true);
+  await handle.close();
+}
+
+async function directoryWalkExists(root:string,segments:string[]):Promise<boolean>{
+  try{
+    const handle=await openDirectoryWalk(root,segments,false);
+    await handle.close();
+    return true;
+  }catch(error){
+    if(isNotFound(error))return false;
+    throw error;
+  }
+}
+
+async function promoteDirectoryByDescriptor(
+  root:string,
+  sourceParentSegments:string[],
+  sourceName:string,
+  targetParentSegments:string[],
+  targetName:string,
+  ownershipMarkerSegments:string[],
+  marker:TaskPreparationMarker
+):Promise<void>{
+  const sourceParent=await openDirectoryWalk(root,sourceParentSegments,false);
+  const targetParent=await openDirectoryWalk(root,targetParentSegments,false);
+  try{
+    const source=`/proc/self/fd/${sourceParent.fd}/${sourceName}`;
+    const target=`/proc/self/fd/${targetParent.fd}/${targetName}`;
+    if(await pathExists(target)){
+      if(await pathExists(source))throw new Error("Task preparation existing target is not owned by the admitted operation");
+      if(!await safeDirectory(target))throw new Error("Task preparation destination is not a directory");
+      await requireTaskPreparationMarker(path.join(root,...ownershipMarkerSegments),marker);
+      return;
+    }
+    await rename(source,target);
+    await requireTaskPreparationMarker(path.join(root,...ownershipMarkerSegments),marker);
+  }finally{
+    await Promise.all([sourceParent.close(),targetParent.close()]);
+  }
 }
 
 function isNotFound(error: unknown): boolean {

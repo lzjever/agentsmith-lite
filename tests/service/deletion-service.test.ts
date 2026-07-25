@@ -57,14 +57,14 @@ describe("deletion lifecycle", () => {
     const target=await store.createProject(project("proj_delete_rollback",workspace.id));
     const seeded=await seedProjectDeletionBusinessData(store,target);
     assert.equal((await store.beginProjectDeletion(target.id,"2026-07-23T00:00:00.000Z","owner")).kind,"ready");
-    const deleteRuns=store.sandboxRuns.deleteForProject.bind(store.sandboxRuns);
-    store.sandboxRuns.deleteForProject=()=>{throw new Error("forced in-memory finalize failure");};
+    const deleteDocument=store.jsonDocs.delete.bind(store.jsonDocs);
+    store.jsonDocs.delete=async()=>{throw new Error("forced in-memory finalize failure");};
 
     await assert.rejects(()=>store.finalizeProjectDeletion(target.id),/forced in-memory finalize failure/);
 
     assert.equal((await store.findProject(target.id))?.lifecycleStatus,"deleting");
     await assertProjectDeletionBusinessDataIsPresent(store,target,seeded);
-    store.sandboxRuns.deleteForProject=deleteRuns;
+    store.jsonDocs.delete=deleteDocument;
     assert.equal(await store.finalizeProjectDeletion(target.id),"deleted");
     assert.equal(await store.findProject(target.id),null);
   });
@@ -447,7 +447,7 @@ function sandboxRun(task: PersistedAgentTask, state: "active" | "failed" | "rele
   return {
     namespace: "agentsmith", workspaceId: task.workspaceId, projectId: task.projectId, taskId: task.id, runId: task.currentRunId!,
     state, image: "botified:test", pvcName: "files",
-    projectSubPath: `workspaces/${task.workspaceId}/projects/${task.projectId}`, fileLibraryRootSubPath: `libraries/${task.fileLibraryId}/home`, fileLibraryId:task.fileLibraryId!,startedByUserId:task.createdByUserId??"owner",startedAt:task.createdAt,botifiedPort: 3099,
+    projectSubPath: `workspaces/${task.workspaceId}/projects/${task.projectId}`, fileLibraryRootSubPath: `libraries/${task.fileLibraryId}/home`, fileLibraryId:task.fileLibraryId!,startedByUserId:task.createdByUserId??"owner",startedAt:task.createdAt,startupReadyAt:task.createdAt,startupActionDeadlineAt:null,botifiedPort: 3099,
     resourceNames: { pod: `pod-${task.id}`, service: `service-${task.id}`, configMap: `config-${task.id}`, secret: `secret-${task.id}` },
     serviceKeySecretRef: { name: `secret-${task.id}`, key: "BOTIFIED_SERVICE_KEY" },
     directories: { libraryHome: "/workspace/project/library", botified: "/workspace/project/botified" },
@@ -473,7 +473,12 @@ async function createLiveTask(
       id: task.fileLibraryId!, workspaceId: task.workspaceId, projectId: task.projectId, name: `Library ${task.id}`,
       rootSubPath: `libraries/${task.fileLibraryId}/home`, createdByUserId: "owner", createdAt: task.createdAt, updatedAt: task.updatedAt
     },
-    reserveActive: run.state !== "released",
+    reserveActive: run.state !== "released", admission:{namespace:"agentsmith",namespaceLimit:100},
+    ...(run.state!=="released"?{
+      idempotency:{actorId:"owner",projectId:task.projectId,operation:"create" as const,key:`fixture-${task.id}`,requestHash:`fixture-hash-${task.id}`,resourceId:task.id,claimToken:`fixture-claim-${task.id}`,now:task.createdAt,leaseExpiresAt:"2026-07-19T00:05:00.000Z"},
+      rejectionPresentation:null,
+      rejectedAuditEvent:{id:`audit_fixture_rejected_${task.id}`,projectId:task.projectId,actorId:"owner",action:"task.create" as const,status:"rejected" as const,resourceKind:"task" as const,resourceId:task.id,detail:{taskId:task.id,trigger:"task_create" as const},createdAt:task.createdAt}
+    }:{}),
     sandboxRun: run
   });
   assert.equal(created.kind, "created");
@@ -492,7 +497,7 @@ async function seedProjectDeletionBusinessData(
   };
   assert.equal((await store.createTaskAtomically({
     task,
-    reserveActive:false,
+    reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
     newFileLibrary:{
       id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${task.id}`,
       rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:"owner",createdAt:task.createdAt,updatedAt:task.updatedAt

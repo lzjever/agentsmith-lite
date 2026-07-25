@@ -291,12 +291,10 @@ describe("Task Artifact keyset pagination", () => {
     await setup.createTask(project, task("task_read_only", "Read only", 1, 1));
     const storedTask = await setup.store.findTask("task_read_only");
     assert.ok(storedTask);
-    const activeTask = await setup.store.updateTask({ ...storedTask, currentRunId: "run_read_only" });
-    await setup.store.sandboxRuns.put(activeSandboxRun(activeTask, project, setup.userId));
 
-    assert.deepEqual((await listArtifacts(setup, activeTask.id, { limit: 20 })).items, []);
+    assert.deepEqual((await listArtifacts(setup, storedTask.id, { limit: 20 })).items, []);
     await assert.rejects(
-      setup.services.tasks.downloadTaskArtifact(setup.userId, activeTask.id, "artifact_missing"),
+      setup.services.tasks.downloadTaskArtifact(setup.userId, storedTask.id, "artifact_missing"),
       (error: unknown) => error instanceof ProductError && error.statusCode === 404
     );
     assert.equal(botified.timelineReads, 0);
@@ -328,7 +326,7 @@ async function createSetup(botifiedClient?: DryRunBotifiedRuntimeHttpClient) {
       const libraryId = `library_${value.id}`;
       const created = await store.createTaskAtomically({
         task: { ...value, workspaceId: project.workspaceId, projectId: project.id, fileLibraryId: libraryId },
-        reserveActive: false,
+        reserveActive: false, admission:{namespace:"agentsmith",namespaceLimit:100},
         newFileLibrary: {
           id: libraryId,
           workspaceId: project.workspaceId,
@@ -452,6 +450,8 @@ function activeSandboxRun(task: PersistedAgentTask, project: Project, userId: st
     fileLibraryId: task.fileLibraryId!,
     startedByUserId: userId,
     startedAt: task.createdAt,
+    startupReadyAt: task.createdAt,
+    startupActionDeadlineAt: null,
     botifiedPort: 3099,
     resourceNames: {
       pod: `pod-${runId}`,

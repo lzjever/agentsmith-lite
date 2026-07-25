@@ -1,5 +1,6 @@
 import type {
   TaskInteractionItem,
+  TaskPresentation,
   AuthSession,
   EndpointHealth,
   FileLibrary,
@@ -21,7 +22,7 @@ import type {
   ManagedWorkspaceMembershipRole,
   UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceDirectoryItem, ProjectDirectoryItem
 } from "../../contracts/src/api.js";
-import { classifyPreviewMediaType, isActiveProjectAlert, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
+import { classifyPreviewMediaType, isActiveProjectAlert, sandboxCapacityErrorEnvelope, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
 import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
@@ -51,6 +52,10 @@ import type {
   AtomicTaskMessageEditResult,
   AtomicTaskMessageDeleteInput,
   AtomicTaskMessageDeleteResult,
+  SandboxAdmissionInput,
+  SandboxAdmissionRejection,
+  SandboxCapacityRejected,
+  SandboxRunStore,
   TaskStoreListQuery,
   TaskStoreListPage,
   TaskArtifactStoreListQuery,
@@ -64,15 +69,16 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
+  TaskIdempotencyLookupInput,
   TaskIdempotencyResourceLookupInput,
   TaskSandboxReleaseMutationInput,
   TaskSandboxReleaseMutationResult,
-  ConfirmSandboxRunStartedInput,
-  ConfirmSandboxRunStartedResult,
   ActivateTaskSandboxRunInput,
   ActivateTaskSandboxRunResult,
   CompleteSandboxRunReleaseInput,
   CompleteSandboxRunReleaseResult,
+  FailTaskSandboxStartupAtomicallyInput,
+  FailTaskSandboxStartupAtomicallyResult,
   SandboxRunFailureInput,
   SandboxStartupOperationInput,
   SandboxUsageSettlement,
@@ -115,7 +121,14 @@ export class InMemoryProductStore implements ProductStore {
 
   readonly jsonDocs: PostgresJsonDocStore = new InMemoryJsonDocStore();
   readonly leases: PostgresLeaseStore = new InMemoryLeaseStore();
-  readonly sandboxRuns = new InMemorySandboxRunStore();
+  private readonly sandboxRunRecords = new InMemorySandboxRunStore();
+  readonly sandboxRuns:SandboxRunStore={
+    get:(runId)=>this.sandboxRunRecords.get(runId),
+    list:()=>this.sandboxRunRecords.list(),
+    listActive:()=>this.sandboxRunRecords.listActive(),
+    claimForCleanup:(input)=>this.sandboxRunRecords.claimForCleanup(input),
+    updateWithFencing:(runId,expectedFencingToken,run)=>this.sandboxRunRecords.updateWithFencing(runId,expectedFencingToken,run)
+  };
 
   private readonly users = new Map<string, StoredUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -398,7 +411,7 @@ export class InMemoryProductStore implements ProductStore {
       interactionChanges:this.interactionChanges.map(clone),interactionSync:snapshotMap(this.interactionSync),artifacts:this.artifacts.map(clone),
       taskIdempotency:snapshotMap(this.taskIdempotency),notifications:snapshotMap(this.notifications),
       notificationDedupe:snapshotMap(this.notificationDedupe),credentials:snapshotMap(this.credentials),contexts:snapshotMap(this.contexts),
-      alertRules:snapshotMap(this.alertRules),messages:this.messages.map(clone),sandboxRuns:this.sandboxRuns.snapshot()
+      alertRules:snapshotMap(this.alertRules),messages:this.messages.map(clone),sandboxRuns:this.sandboxRunRecords.snapshot()
     };
     try{
       for(const [collection,documentId] of documents)await this.jsonDocs.delete(collection,documentId);
@@ -410,7 +423,7 @@ export class InMemoryProductStore implements ProductStore {
       for(const [key,value] of this.providerSettlements)if(value.projectId===id)this.providerSettlements.delete(key);
       for(const [key,value] of this.sandboxUsageSettlements)if(value.projectId===id)this.sandboxUsageSettlements.delete(key);
       for(const [key,value] of this.taskIdempotency)if(value.projectId===id&&key!==completionKey)this.taskIdempotency.delete(key);
-      this.sandboxRuns.deleteForProject(id);
+      this.sandboxRunRecords.deleteForProject(id);
       for(const [key,value] of this.alerts)if(value.projectId===id)this.alerts.delete(key);
       for(const [key,value] of this.endpoints)if(value.projectId===id)this.endpoints.delete(key);
       for(const [key,value] of this.memberships)if(value.projectId===id){this.memberships.delete(key);this.projectPins.delete(key);}
@@ -440,7 +453,7 @@ export class InMemoryProductStore implements ProductStore {
       restoreMap(this.taskIdempotency,previous.taskIdempotency);restoreMap(this.notifications,previous.notifications);
       restoreMap(this.notificationDedupe,previous.notificationDedupe);restoreMap(this.credentials,previous.credentials);
       restoreMap(this.contexts,previous.contexts);restoreMap(this.alertRules,previous.alertRules);restoreArray(this.messages,previous.messages);
-      this.sandboxRuns.restore(previous.sandboxRuns);
+      this.sandboxRunRecords.restore(previous.sandboxRuns);
       for(const [collection,documentId,document] of documents)if(document)await this.jsonDocs.put(collection,documentId,document);
       throw error;
     }
@@ -545,12 +558,12 @@ export class InMemoryProductStore implements ProductStore {
     return clone(next);
   }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
+    if(input.delta.activeTasks!==0)throw new Error("active_tasks is an authoritative Sandbox Run projection");
     const policy = this.policies.get(input.projectId);
     const usage = this.usage.get(input.projectId);
     if (!policy || !usage || (input.limit && exceedsLimit(policy, usage, input))) return null;
     const next = {
       ...usage,
-      activeTasks: Math.max(0, usage.activeTasks + input.delta.activeTasks),
       providerRequests: usage.providerRequests + input.delta.providerRequests,
       providerTokens: usage.providerTokens + input.delta.providerTokens,
       providerCost: usage.providerCost + input.delta.providerCost,
@@ -619,7 +632,7 @@ export class InMemoryProductStore implements ProductStore {
     const selectedEndpoint=input.selectedEndpointId===null?null:this.endpoints.get(input.selectedEndpointId);
     if(input.selectedEndpointId!==null&&selectedEndpoint?.projectId!==input.projectId)return{kind:"endpoint_not_found"};
     const providerSettlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId).map(clone);
-    const sandboxRuns=this.sandboxRuns.snapshot().filter((run)=>run.projectId===input.projectId&&run.startedByUserId===input.selectedUserId);
+    const sandboxRuns=this.sandboxRunRecords.snapshot().filter((run)=>run.projectId===input.projectId&&run.startedByUserId===input.selectedUserId);
     const tasks=new Map([...this.tasks.values()].filter((task)=>task.projectId===input.projectId).map((task)=>[task.id,clone(task)] as const));
     const sandboxSettlements=[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.startedByUserId===input.selectedUserId).map(clone);
     const settled=providerSettlements.filter((value)=>value.actorId===input.userId&&value.status==="settled"&&value.settledAt!==null&&value.settledAt>=input.periodStart&&value.settledAt<input.periodEnd);
@@ -729,14 +742,13 @@ export class InMemoryProductStore implements ProductStore {
       });
     return{items:candidates.slice(0,query.limit).map(clone),hasMore:candidates.length>query.limit};
   }
-  async confirmSandboxRunStarted(input:ConfirmSandboxRunStartedInput):Promise<ConfirmSandboxRunStartedResult>{
-    return this.sandboxRuns.confirmStarted(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
-  }
   async activateTaskSandboxRun(input:ActivateTaskSandboxRunInput):Promise<ActivateTaskSandboxRunResult>{
-    return this.sandboxRuns.activateTask(input,()=>this.tasks.get(input.taskId));
+    return this.sandboxRunRecords.activateTask(input,()=>this.tasks.get(input.taskId),(event)=>{
+      if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));
+    });
   }
   async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{
-    try{return await this.sandboxRuns.completeRelease(input,(replay)=>{
+    try{return await this.atomicTaskMessageMutation([],()=>this.sandboxRunRecords.completeRelease(input,(replay)=>{
       const existing=this.sandboxUsageSettlements.get(input.runId);
       if(existing&&!sameSettlement(existing,input.settlement))throw new Error("Sandbox usage settlement conflict");
       if(replay){if(!existing)throw new Error("Sandbox usage settlement conflict");}
@@ -746,15 +758,44 @@ export class InMemoryProductStore implements ProductStore {
         if(!taskMatchesActiveSandboxRun(task,project,input.run))throw new Error("Sandbox usage task conflict");
       }
       if(!existing)this.sandboxUsageSettlements.set(input.runId,clone(input.settlement));
-      if(!replay)this.releaseActiveTask(input.run.projectId,input.run.releasedAt!);
+      if(!replay)this.setAuthoritativeActiveTaskUsage(input.run.projectId,input.run.releasedAt!);
       if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
-    });}catch(error){if(error instanceof Error&&(error.message==="Sandbox usage settlement conflict"||error.message==="Sandbox usage task conflict"))return"conflict";throw error}
+    }));}catch(error){if(error instanceof Error&&(error.message==="Sandbox usage settlement conflict"||error.message==="Sandbox usage task conflict"))return"conflict";throw error}
   }
   async failSandboxRun(input:SandboxRunFailureInput):Promise<PersistedSandboxRunState|null>{
-    return this.sandboxRuns.fail(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
+    return this.sandboxRunRecords.fail(input,(event)=>{if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));});
   }
-  async runSandboxStartupOperation<T>(input:SandboxStartupOperationInput,operation:()=>Promise<T>):Promise<{kind:"applied";value:T}|{kind:"conflict"}>{
-    return this.sandboxRuns.runStartupOperation(input,()=>this.tasks.get(input.taskId),operation);
+  async failTaskSandboxStartupAtomically(input:FailTaskSandboxStartupAtomicallyInput):Promise<FailTaskSandboxStartupAtomicallyResult>{
+    const key=taskIdempotencyKey(input.idempotency);
+    const record=this.taskIdempotency.get(key);
+    if(!record||record.requestHash!==input.idempotency.requestHash)return{kind:"conflict"};
+    if(record.status==="completed")return{kind:"replay",responseStatus:record.responseStatus!,responseBody:clone(record.responseBody)};
+    if(record.claimToken!==input.idempotency.claimToken||record.operation!=="terminal-start"||record.resourceId!==input.failure.runId)return{kind:"conflict"};
+    const current=await this.sandboxRunRecords.get(input.failure.runId);
+    const task=current?this.tasks.get(current.taskId):undefined;
+    if(!current||!task||input.taskId!==task.id||task.currentRunId!==input.failure.runId||task.projectId!==input.idempotency.projectId||current.startupClaimToken!==input.startupClaimToken||!strictStructuralEqual(current.resourceNames,input.resourceIdentity))return{kind:"conflict"};
+    const failed=await this.sandboxRunRecords.fail(input.failure,(event)=>{
+      this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
+      if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));
+    });
+    return failed?{kind:"failed",run:failed}:{kind:"conflict"};
+  }
+  async markTaskSandboxStartupReady(input:import("../../ports/src/store.js").MarkTaskSandboxStartupReadyInput):Promise<PersistedSandboxRunState|null>{
+    return this.sandboxRunRecords.markStartupReady(input,()=>this.tasks.get(input.taskId));
+  }
+  async claimSandboxStartup(input:SandboxStartupOperationInput):Promise<import("../../ports/src/store.js").SandboxStartupClaimResult>{
+    return this.sandboxRunRecords.claimStartup(input,()=>this.tasks.get(input.taskId));
+  }
+  async beginSandboxStartupAction(input:import("../../ports/src/store.js").BeginSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>{
+    return this.sandboxRunRecords.beginStartupAction(input,()=>this.tasks.get(input.taskId));
+  }
+  async completeSandboxStartupAction(input:import("../../ports/src/store.js").CompleteSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>{
+    return this.sandboxRunRecords.completeStartupAction(input,()=>this.tasks.get(input.taskId));
+  }
+  async drainSandboxStartupAction(input:import("../../ports/src/store.js").DrainSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>{
+    return this.sandboxRunRecords.drainStartupAction(input,()=>this.tasks.get(input.taskId),(event)=>{
+      if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));
+    });
   }
   async querySandboxUsageSettlements(query:ProjectSandboxSettlementQuery):Promise<ProjectSandboxSettlementPage>{
     const filtered=[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===query.projectId&&value.startedByUserId===query.selectedUserId&&value.releasedAt<=query.scopeMeasuredAt&&(!query.after||value.releasedAt<query.after.releasedAt||value.releasedAt===query.after.releasedAt&&compareOrdinal(value.runId,query.after.runId)<0)).sort((left,right)=>right.releasedAt.localeCompare(left.releasedAt)||compareOrdinal(right.runId,left.runId));
@@ -905,6 +946,12 @@ export class InMemoryProductStore implements ProductStore {
     return this.atomicTaskMessageMutation([input],async()=>{
     if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
     validateTaskRunReservation(input);
+    const idempotency=input.reserveActive?requiredAdmissionCreateIdempotency(input):null;
+    if(idempotency){
+      const claimed=this.claimAtomicTaskMessageMutation(idempotency);
+      if(claimed.kind!=="claimed")return claimed;
+      if(claimed.resourceId!==input.task.id)throw new Error("Task create idempotency resource is inconsistent");
+    }
     const project=this.projects.get(input.task.projectId);
     if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"project_unavailable" as const};
     let library=input.task.fileLibraryId?this.fileLibraries.get(input.task.fileLibraryId):undefined;
@@ -912,30 +959,38 @@ export class InMemoryProductStore implements ProductStore {
     if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_not_found" as const};}
     if([...this.tasks.values()].some((task)=>task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
     const task = normalizeStoredTask(input.task);
-    if (input.reserveActive && !this.reserveActiveTask(task.projectId, task.updatedAt)) { if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id); return{kind:"capacity_rejected" as const}; }
+    if (input.reserveActive) {
+      const rejected=await this.admitSandboxRun(input.admission,input.sandboxRun!,task.updatedAt,idempotency!,input.rejectionPresentation!,input.rejectedAuditEvent!);
+      if(rejected){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return rejected;}
+    }
     this.tasks.set(task.id, clone(task));
     this.initializeTaskInteractionSync(task.id);
     try {
       if (input.runtimeState) await this.jsonDocs.put("sandbox_runtime_state", task.id, input.runtimeState);
-      if (input.sandboxRun) await this.sandboxRuns.put(input.sandboxRun);
+      if (input.sandboxRun?.state==="released") await this.sandboxRunRecords.put(input.sandboxRun);
       if(input.initialMessage)await this.createTaskMessage(input.initialMessage);
+      if(input.initialInteractionChange)this.appendInteractionChanges(task.id,[input.initialInteractionChange]);
       if(input.auditEvent&&!this.auditEvents.some((event)=>event.id===input.auditEvent!.id))await this.appendProjectAuditEvent(input.auditEvent);
       return{kind:"created" as const,task:clone(task)};
     } catch (error) {
       this.tasks.delete(task.id);
       if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);
       this.interactionSync.delete(task.id);
-      if (input.reserveActive) this.releaseActiveTask(task.projectId, task.updatedAt);
       await this.jsonDocs.delete("sandbox_runtime_state", task.id);
-      if (input.sandboxRun) this.sandboxRuns.delete(input.sandboxRun.runId);
+      if (input.sandboxRun) this.sandboxRunRecords.delete(input.sandboxRun.runId);
       if(input.initialMessage){const index=this.messages.findIndex((message)=>message.id===input.initialMessage!.id);if(index>=0)this.messages.splice(index,1);}
+      if(input.initialInteractionChange)this.interactionChanges.splice(0,this.interactionChanges.length,...this.interactionChanges.filter((change)=>change.interaction.taskId!==task.id));
       throw error;
     }
     });
   }
 
   async restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult> {
-    return this.atomicTaskMessageMutation([{task:input.task,reserveActive:true,runtimeState:input.runtimeState,sandboxRun:input.sandboxRun}],async()=>{
+    return this.atomicTaskMessageMutation([{task:input.task}],async()=>{
+      const receipt=requiredSandboxRestartAdmission(input);
+      const claimed=this.claimAtomicTaskMessageMutation(receipt.idempotency);
+      if(claimed.kind!=="claimed")return claimed;
+      if(claimed.resourceId!==input.task.id)throw new Error("Terminal start idempotency resource is inconsistent");
       const project=this.projects.get(input.task.projectId);
       if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"conflict" as const};
       const current=this.tasks.get(input.task.id);
@@ -946,19 +1001,54 @@ export class InMemoryProductStore implements ProductStore {
         if(!released||!taskRunScopeMatches(current,released)||released.state!=="released")return{kind:"conflict" as const};
       }
       if(!sandboxRestartIdentityMatches(current,input))return{kind:"conflict" as const};
-      if(!this.reserveActiveTask(current.projectId,input.reservedAt))return{kind:"capacity_rejected" as const};
+      const rejected=await this.admitSandboxRun(input.admission,input.sandboxRun,input.reservedAt,receipt.idempotency,receipt.presentation,receipt.auditEvent);
+      if(rejected)return rejected;
       const restarted=normalizeStoredTask({...current,currentRunId:input.sandboxRun.runId,updatedAt:input.reservedAt});
       this.tasks.set(restarted.id,clone(restarted));
       await this.jsonDocs.put("sandbox_runtime_state",restarted.id,input.runtimeState);
-      await this.sandboxRuns.put(input.sandboxRun);
       return{kind:"restarted",task:clone(restarted)};
     });
   }
 
+  async beginTerminalStart(input:import("../../ports/src/store.js").BeginTerminalStartInput):Promise<import("../../ports/src/store.js").BeginTerminalStartResult>{
+    return this.atomicTaskMessageMutation(input.restart?[{task:input.restart.task}]:[],async()=>{
+      const claimed=this.claimAtomicTaskMessageMutation(input.idempotency);
+      if(claimed.kind==="hash_mismatch"||claimed.kind==="replay")return claimed;
+      const key=taskIdempotencyKey(input.idempotency);
+      const record=this.taskIdempotency.get(key);
+      const task=this.tasks.get(input.taskId);
+      if(!record||!task||task.deletedAt||task.archivedAt||task.projectId!==input.idempotency.projectId)return{kind:"conflict"};
+      const persistedRun=await this.sandboxRunRecords.get(record.resourceId);
+      if(claimed.kind==="in_progress"){
+        if(!persistedRun||!taskRunScopeMatches(task,persistedRun))return{kind:"conflict"};
+        if(task.currentRunId===persistedRun.runId&&persistedRun.state==="starting")return{kind:"in_progress",task:clone(task),run:persistedRun};
+        const terminal=terminalBoundRunReceipt(persistedRun,input.rejectionPresentation);
+        this.completeAtomicTaskMessageMutation({...input.idempotency,claimToken:record.claimToken},terminal.responseStatus,terminal.responseBody,input.idempotency.now);
+        return{kind:"replay",...terminal};
+      }
+      if(persistedRun&&taskRunScopeMatches(task,persistedRun)){
+        if(task.currentRunId===persistedRun.runId&&persistedRun.state==="starting")return{kind:"claimed",task:clone(task),run:persistedRun,claimToken:input.idempotency.claimToken};
+        const terminal=terminalBoundRunReceipt(persistedRun,input.rejectionPresentation);
+        this.completeAtomicTaskMessageMutation(input.idempotency,terminal.responseStatus,terminal.responseBody,input.idempotency.now);
+        return{kind:"replay",...terminal};
+      }
+      const current=task.currentRunId?await this.sandboxRunRecords.get(task.currentRunId):null;
+      const restart=input.restart;
+      if(!restart||restart.expectedReleasedRunId!==task.currentRunId||restart.sandboxRun.runId!==record.resourceId||!sandboxRestartIdentityMatches(task,restart))return{kind:"conflict"};
+      if(task.currentRunId!==null&&(!current||current.state!=="released"||!taskRunScopeMatches(task,current)))return{kind:"conflict"};
+      if(!input.admission||!input.rejectedAuditEvent)throw new Error("New Terminal reservation requires admission receipt inputs");
+      const readyRun={...restart.sandboxRun,startupReadyAt:restart.reservedAt};
+      const rejected=await this.admitSandboxRun(input.admission,readyRun,restart.reservedAt,input.idempotency,input.rejectionPresentation,input.rejectedAuditEvent);
+      if(rejected)return rejected;
+      const restarted=normalizeStoredTask({...task,currentRunId:restart.sandboxRun.runId,updatedAt:restart.reservedAt});
+      this.tasks.set(task.id,clone(restarted));
+      await this.jsonDocs.put("sandbox_runtime_state",task.id,restart.runtimeState);
+      return{kind:"claimed",task:clone(restarted),run:(await this.sandboxRunRecords.get(restart.sandboxRun.runId))!,claimToken:input.idempotency.claimToken};
+    });
+  }
+
   async createTaskMessageAtomically(input:AtomicTaskMessageInput):Promise<AtomicTaskMessageResult>{
-    return this.atomicTaskMessageMutation(input.restart?[{task:input.restart.task,reserveActive:true,runtimeState:input.restart.runtimeState,sandboxRun:input.restart.sandboxRun}]:[],async()=>{
-      const project=this.projects.get(input.idempotency.projectId);
-      if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"conflict"};
+    return this.atomicTaskMessageMutation(input.restart?[{task:input.restart.task}]:[],async()=>{
       const key=taskIdempotencyKey(input.idempotency);
       let record=this.taskIdempotency.get(key);
       if(record){
@@ -973,6 +1063,8 @@ export class InMemoryProductStore implements ProductStore {
         record={...input.idempotency,status:"in_progress",responseStatus:null,responseBody:null,updatedAt:input.idempotency.now};
         this.taskIdempotency.set(key,record);
       }
+      const project=this.projects.get(input.idempotency.projectId);
+      if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"conflict"};
       let task=this.tasks.get(input.taskId);
       if(!task||task.deletedAt||task.archivedAt||task.projectId!==input.idempotency.projectId)return{kind:"conflict"};
       const message=canonicalTaskMessage(input.message,record.resourceId);
@@ -987,19 +1079,23 @@ export class InMemoryProductStore implements ProductStore {
         }else if(!run||!taskRunScopeMatches(task,run)||run.state!=="released"){
           return{kind:"conflict"};
         }
-        const restartInput:AtomicTaskSandboxRestartInput={expectedReleasedRunId:input.expectedCurrentRunId,task:input.restart.task,runtimeState:input.restart.runtimeState,sandboxRun:input.restart.sandboxRun,reservedAt:input.restart.reservedAt};
+        const restartInput:SandboxRestartIdentityInput={expectedReleasedRunId:input.expectedCurrentRunId,task:input.restart.task,sandboxRun:input.restart.sandboxRun};
         if(!sandboxRestartIdentityMatches(task,restartInput))return{kind:"conflict"};
-        if(!this.reserveActiveTask(task.projectId,input.restart.reservedAt))return{kind:"capacity_rejected"};
+        const receipt=requiredMessageAdmissionReceipt(input);
+        const readyRun={...input.restart.sandboxRun,startupReadyAt:input.restart.reservedAt};
+        const rejected=await this.admitSandboxRun(input.admission,readyRun,input.restart.reservedAt,input.idempotency,receipt.presentation,receipt.auditEvent);
+        if(rejected)return rejected;
         task=normalizeStoredTask(input.restart.task);
         this.tasks.set(task.id,clone(task));
         await this.jsonDocs.put("sandbox_runtime_state",task.id,input.restart.runtimeState);
-        await this.sandboxRuns.put(input.restart.sandboxRun);
-        run=input.restart.sandboxRun;
+        run=readyRun;
         restarted=true;
       }
       const created=await this.createTaskMessage(message);
+      this.appendInteractionChanges(task.id,[input.interactionChange]);
       const audit=canonicalMessageAuditEvent(input.auditEvent,created,task.projectId);
       if(!this.auditEvents.some((event)=>event.id===audit.id))await this.appendProjectAuditEvent(audit);
+      this.completeAtomicTaskMessageMutation(input.idempotency,input.responseStatus,input.responseBody,created.updatedAt??created.createdAt);
       return{kind:"created",task:clone(task),message:created,restarted};
     });
   }
@@ -1140,7 +1236,7 @@ export class InMemoryProductStore implements ProductStore {
       this.interactionChanges.splice(0, this.interactionChanges.length, ...this.interactionChanges.filter((change) => change.interaction.taskId !== taskId));
       this.interactionSync.delete(taskId);
       await this.jsonDocs.delete("sandbox_runtime_state", taskId);
-      this.sandboxRuns.deleteForTask(taskId);
+      this.sandboxRunRecords.deleteForTask(taskId);
       this.tasks.delete(taskId);
       if(idempotency&&idempotencyKey&&idempotencyRecord)this.taskIdempotency.set(idempotencyKey,{...idempotencyRecord,status:"completed",responseStatus:idempotency.responseStatus,responseBody:clone(idempotency.responseBody),updatedAt:idempotency.updatedAt});
       return true;
@@ -1162,12 +1258,30 @@ export class InMemoryProductStore implements ProductStore {
     return { kind: "claimed", resourceId: input.resourceId, claimToken: input.claimToken };
   }
 
+  async findTaskIdempotency(input:TaskIdempotencyLookupInput):Promise<TaskIdempotencyBeginResult|null>{
+    const row=this.taskIdempotency.get(taskIdempotencyKey(input));
+    if(!row)return null;
+    if(row.requestHash!==input.requestHash)return{kind:"hash_mismatch"};
+    if(row.status==="completed")return{kind:"replay",resourceId:row.resourceId,responseStatus:row.responseStatus!,responseBody:clone(row.responseBody)};
+    return{kind:"in_progress",resourceId:row.resourceId};
+  }
+
   async findTaskIdempotencyByResource(input:TaskIdempotencyResourceLookupInput):Promise<TaskIdempotencyBeginResult|null>{
     const row=[...this.taskIdempotency.values()].find((record)=>record.actorId===input.actorId&&record.operation===input.operation&&record.key===input.key&&record.resourceId===input.resourceId);
     if(!row)return null;
     if(row.requestHash!==input.requestHash)return{kind:"hash_mismatch"};
     if(row.status==="completed")return{kind:"replay",resourceId:row.resourceId,responseStatus:row.responseStatus!,responseBody:clone(row.responseBody)};
     return{kind:"in_progress",resourceId:row.resourceId};
+  }
+  async findInProgressTerminalStartOperation(runId:string):Promise<import("../../ports/src/store.js").InProgressTerminalStartOperation|null>{
+    const row=[...this.taskIdempotency.values()].find((record)=>record.operation==="terminal-start"&&record.resourceId===runId&&record.status==="in_progress");
+    return row?{actorId:row.actorId,projectId:row.projectId,operation:"terminal-start",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId,claimToken:row.claimToken}:null;
+  }
+  async findTaskPreparationOperation(taskId:string):Promise<import("../../ports/src/store.js").TaskPreparationOperation|null>{
+    const rows=[...this.taskIdempotency.values()].filter((record)=>record.operation==="create"&&record.resourceId===taskId);
+    if(rows.length!==1)return null;
+    const row=rows[0]!;
+    return{actorId:row.actorId,projectId:row.projectId,operation:"create",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId};
   }
 
   async completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean> {
@@ -1181,7 +1295,7 @@ export class InMemoryProductStore implements ProductStore {
   async requestTaskSandboxRelease(input:TaskSandboxReleaseMutationInput){
     const key=taskIdempotencyKey(input.idempotency),record=this.taskIdempotency.get(key);
     if(!record||record.status!=="in_progress"||record.requestHash!==input.idempotency.requestHash||record.claimToken!==input.idempotency.claimToken)return"conflict" as const;
-    return this.sandboxRuns.requestExplicitCleanup(input,()=>{
+    return this.sandboxRunRecords.requestExplicitCleanup(input,()=>{
       this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
     });
   }
@@ -1320,11 +1434,11 @@ export class InMemoryProductStore implements ProductStore {
     this.messages.push(clone(stored));
     return clone(stored);
   }
-  async createPendingTaskMessage(v:PersistedTaskMessage,interactionChange?:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return this.atomicTaskMessageMutation([],async()=>{const source=this.tasks.get(v.taskId);if(!source||source.deletedAt)return null;const created=await this.createTaskMessage(v);this.appendInteractionChanges(v.taskId,interactionChange?[interactionChange]:[]);return created;});}
+  async createPendingTaskMessage(v:PersistedTaskMessage,interactionChange:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return this.atomicTaskMessageMutation([],async()=>{const source=this.tasks.get(v.taskId);if(!source||source.deletedAt)return null;if(!isMessageInteractionChange(v,interactionChange))throw new Error("Task message interaction identity mismatch");const created=await this.createTaskMessage(v);this.appendInteractionChanges(v.taskId,[interactionChange]);return created;});}
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { return this.messages.filter((value) => value.taskId === taskId && !value.deletedAt).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map(clone); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { return clone(this.messages.find((value) => value.id === id) ?? null); }
   async listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]> {
-    return this.messages.filter((message) => !message.deletedAt && (
+    return this.messages.filter((message) => !message.deletedAt && hasPersistedMessageInteraction(this.interactionChanges,message) && (
       (message.deliveryStatus ?? "pending") === "pending" && (!message.nextRetryAt || message.nextRetryAt <= now) ||
       message.deliveryStatus === "dispatching" && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now) && (!message.nextRetryAt || message.nextRetryAt <= now)
     )).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).slice(0, limit).map(clone);
@@ -1333,7 +1447,7 @@ export class InMemoryProductStore implements ProductStore {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     const source=current?this.tasks.get(current.taskId):undefined;
-    if (!current || !source || source.deletedAt || current.deletedAt || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,current)) return null;
+    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
     const updated: PersistedTaskMessage = { ...current, deliveryStatus: "dispatching", claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1342,7 +1456,7 @@ export class InMemoryProductStore implements ProductStore {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     const source = current ? this.tasks.get(current.taskId) : undefined;
-    if (!current || !source || source.deletedAt || current.deletedAt || current.deliveryStatus !== "dispatching" || current.claimToken !== input.expectedClaimToken || !current.leaseExpiresAt || current.leaseExpiresAt > input.claimedAt || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,current)) return null;
+    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || current.deliveryStatus !== "dispatching" || current.claimToken !== input.expectedClaimToken || !current.leaseExpiresAt || current.leaseExpiresAt > input.claimedAt || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
     const updated: PersistedTaskMessage = { ...current, claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
@@ -1391,7 +1505,7 @@ export class InMemoryProductStore implements ProductStore {
     return inserted;
   }
 
-  private async atomicTaskMessageMutation<T>(runtimeWrites: AtomicTaskCreateInput[], mutation: () => Promise<T>): Promise<T> {
+  private async atomicTaskMessageMutation<T>(runtimeWrites: Array<{task:PersistedAgentTask}>, mutation: () => Promise<T>): Promise<T> {
     const previous=this.taskMutationTail;
     let release!:()=>void;
     this.taskMutationTail=new Promise<void>((resolve)=>{release=resolve;});
@@ -1400,7 +1514,7 @@ export class InMemoryProductStore implements ProductStore {
     finally{release();}
   }
 
-  private async atomicTaskMessageMutationUnlocked<T>(runtimeWrites: AtomicTaskCreateInput[], mutation: () => Promise<T>): Promise<T> {
+  private async atomicTaskMessageMutationUnlocked<T>(runtimeWrites: Array<{task:PersistedAgentTask}>, mutation: () => Promise<T>): Promise<T> {
     const previousChanges = this.interactionChanges.map(clone);
     const previousTasks = [...this.tasks.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousInteractionSync = [...this.interactionSync.entries()].map(([id,value]) => [id,clone(value)] as const);
@@ -1412,7 +1526,7 @@ export class InMemoryProductStore implements ProductStore {
     const documents = await Promise.all(runtimeWrites.map((write) =>
       this.jsonDocs.get("sandbox_runtime_state", write.task.id).then((document) => ["sandbox_runtime_state",write.task.id,document] as const)
     ));
-    const previousRuns=this.sandboxRuns.snapshot();
+    const previousRuns=this.sandboxRunRecords.snapshot();
     try {
       return await mutation();
     } catch (error) {
@@ -1433,7 +1547,7 @@ export class InMemoryProductStore implements ProductStore {
         if (document) await this.jsonDocs.put(collection,id,document);
         else await this.jsonDocs.delete(collection,id);
       }
-      this.sandboxRuns.restore(previousRuns);
+      this.sandboxRunRecords.restore(previousRuns);
       throw error;
     }
   }
@@ -1466,18 +1580,65 @@ export class InMemoryProductStore implements ProductStore {
     this.taskIdempotency.set(key,{...record,status:"completed",responseStatus,responseBody:clone(responseBody),updatedAt});
   }
 
-  private reserveActiveTask(projectId: string, updatedAt: string): boolean {
-    const policy = this.policies.get(projectId);
-    const usage = this.usage.get(projectId);
-    const project=this.projects.get(projectId);
-    if (!project || (project.lifecycleStatus??"active") !== "active" || !policy || !usage || (policy.activeTasksLimit !== null && usage.activeTasks + 1 > policy.activeTasksLimit)) return false;
-    this.usage.set(projectId, clone({ ...usage, activeTasks: usage.activeTasks + 1, updatedAt }));
-    return true;
+  private async admitSandboxRun(
+    admission:SandboxAdmissionInput,
+    run:PersistedSandboxRunState,
+    updatedAt:string,
+    idempotency:BeginTaskIdempotencyInput,
+    presentation:import("../../contracts/src/api.js").TaskPresentation|null,
+    rejectedAuditEvent:ProjectAuditEvent
+  ):Promise<SandboxCapacityRejected|null>{
+    const scope=normalizeSandboxAdmission(admission,run);
+    const runs=this.sandboxRunRecords.snapshot();
+    const activeSandboxes=runs.filter((candidate)=>candidate.projectId===run.projectId&&candidate.state!=="released").length;
+    const policy=this.policies.get(run.projectId);
+    if(!policy)throw new Error("Sandbox admission Project policy is unavailable");
+    if(policy.activeTasksLimit!==null&&activeSandboxes>=policy.activeTasksLimit){
+      return this.rejectSandboxAdmission(
+        {kind:"project_capacity_rejected",activeSandboxes,sandboxLimit:policy.activeTasksLimit},
+        idempotency,presentation,rejectedAuditEvent,updatedAt
+      );
+    }
+    const namespaceSandboxes=runs.filter((candidate)=>candidate.namespace===scope.namespace&&candidate.state!=="released").length;
+    if(namespaceSandboxes>=scope.namespaceLimit){
+      return this.rejectSandboxAdmission(
+        {kind:"substrate_capacity_rejected"},
+        idempotency,presentation,rejectedAuditEvent,updatedAt
+      );
+    }
+    await this.sandboxRunRecords.put(run);
+    this.setAuthoritativeActiveTaskUsage(run.projectId,updatedAt);
+    return null;
   }
 
-  private releaseActiveTask(projectId: string, updatedAt: string): void {
+  private rejectSandboxAdmission(
+    admission:SandboxAdmissionRejection,
+    idempotency:BeginTaskIdempotencyInput,
+    presentation:import("../../contracts/src/api.js").TaskPresentation|null,
+    rejectedAuditEvent:ProjectAuditEvent,
+    updatedAt:string
+  ):SandboxCapacityRejected{
+    validateRejectedAdmissionAudit(rejectedAuditEvent);
+    const project=admission.kind==="project_capacity_rejected";
+    const details=project?{activeSandboxes:admission.activeSandboxes,sandboxLimit:admission.sandboxLimit}:null;
+    const responseBody=sandboxCapacityErrorEnvelope(project?"project_policy":"substrate_namespace",presentation,details);
+    const detail=sanitizeProjectAuditDetail({
+      ...rejectedAuditEvent.detail,
+      scope:project?"project_policy":"substrate_namespace",
+      ...(details??{})
+    });
+    this.completeAtomicTaskMessageMutation(idempotency,409,responseBody,updatedAt);
+    if(!this.auditEvents.some((event)=>event.id===rejectedAuditEvent.id))this.auditEvents.push(clone({...rejectedAuditEvent,status:"rejected",detail}));
+    return{kind:"capacity_rejected",admission,responseStatus:409,responseBody};
+  }
+
+  private setAuthoritativeActiveTaskUsage(projectId: string, updatedAt: string): void {
     const usage = this.usage.get(projectId);
-    if (usage) this.usage.set(projectId, clone({ ...usage, activeTasks: Math.max(0, usage.activeTasks - 1), updatedAt }));
+    if(usage)this.usage.set(projectId,clone({
+      ...usage,
+      activeTasks:this.sandboxRunRecords.snapshot().filter((run)=>run.projectId===projectId&&run.state!=="released").length,
+      updatedAt
+    }));
   }
 
   private async projectHasLiveBusinessReservations(projectId:string):Promise<boolean>{
@@ -1595,7 +1756,11 @@ class InMemorySandboxRunStore {
       const already=current.state==="release_requested"||current.state==="released";
       if(current.state!=="released"&&(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1))return"conflict";
       commit();
-      if(current.state!=="released")this.runs.set(input.runId,clone(input.run));
+      if(current.state!=="released")this.runs.set(input.runId,clone({
+        ...input.run,
+        startupActionDeadlineAt:current.startupActionDeadlineAt,
+        ...(current.startupActionDeadlineAt?{startupClaimToken:current.startupClaimToken,startupLeaseExpiresAt:current.startupLeaseExpiresAt}:{})
+      }));
       return already?"already_requested":"applied";
     });
   }
@@ -1603,38 +1768,70 @@ class InMemorySandboxRunStore {
   async fail(input:SandboxRunFailureInput,commit:(event:ProjectAuditEvent)=>void):Promise<PersistedSandboxRunState|null>{
     return this.serializeMutation(async()=>{
       const current=this.runs.get(input.runId);
-      if(!current||current.fencingToken!==input.expectedFencingToken||!["starting","active"].includes(current.state))return null;
-      const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
+      if(!current||current.fencingToken!==input.expectedFencingToken||input.startupClaimToken!==undefined&&current.startupClaimToken!==input.startupClaimToken||!["starting","active"].includes(current.state))return null;
+      const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
       this.runs.set(input.runId,clone(failed));
       try{commit(input.auditEvent);return clone(failed);}catch(error){this.runs.set(input.runId,clone(current));throw error;}
     });
   }
 
-  async runStartupOperation<T>(input:SandboxStartupOperationInput,readTask:()=>PersistedAgentTask|undefined,operation:()=>Promise<T>):Promise<{kind:"applied";value:T}|{kind:"conflict"}>{
+  async markStartupReady(input:import("../../ports/src/store.js").MarkTaskSandboxStartupReadyInput,readTask:()=>PersistedAgentTask|undefined):Promise<PersistedSandboxRunState|null>{
     return this.serializeMutation(async()=>{
       const run=this.runs.get(input.runId),task=readTask();
-      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run)||task.deletedAt||task.archivedAt)return{kind:"conflict"};
-      if(run.startupClaimToken&&run.startupClaimToken!==input.claimToken&&run.startupLeaseExpiresAt&&run.startupLeaseExpiresAt>input.claimedAt)return{kind:"conflict"};
-      this.runs.set(run.runId,clone({...run,startupClaimToken:input.claimToken,startupLeaseExpiresAt:input.leaseExpiresAt,updatedAt:input.claimedAt}));
-      return{kind:"applied",value:await operation()};
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run)||task.deletedAt||task.archivedAt)return null;
+      if(run.startupReadyAt!==null)return clone(run);
+      const ready={...run,startupReadyAt:input.readyAt,updatedAt:input.readyAt};
+      this.runs.set(run.runId,clone(ready));
+      return clone(ready);
     });
   }
 
-  async confirmStarted(input:ConfirmSandboxRunStartedInput,commit:(event:ProjectAuditEvent)=>void):Promise<ConfirmSandboxRunStartedResult>{
+  async claimStartup(input:SandboxStartupOperationInput,readTask:()=>PersistedAgentTask|undefined):Promise<import("../../ports/src/store.js").SandboxStartupClaimResult>{
     return this.serializeMutation(async()=>{
-      const current=await this.get(input.runId);
-      if(!current)return{kind:"conflict"};
-      if(current.startedAt){commit(input.auditEvent);return{kind:"already_started",run:current};}
-      if(current.fencingToken!==input.expectedFencingToken||current.state!=="starting"||current.startupClaimToken!==input.startupClaimToken)return{kind:"conflict"};
-      const run={...current,startedAt:input.startedAt,startupClaimToken:null,startupLeaseExpiresAt:null,fencingToken:current.fencingToken+1,updatedAt:input.startedAt};
-      this.runs.set(input.runId,clone(run));
-      try{commit(input.auditEvent);return{kind:"started",run:clone(run)};}catch(error){this.runs.set(current.runId,clone(current));throw error}
+      const run=this.runs.get(input.runId),task=readTask();
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run)||task.deletedAt||task.archivedAt)return{kind:"stale"};
+      if(run.startupReadyAt===null)return{kind:"not_ready",runId:run.runId};
+      if(run.startupActionDeadlineAt!==null)return{kind:"in_progress",runId:run.runId};
+      if(run.startupClaimToken&&run.startupClaimToken!==input.claimToken&&run.startupLeaseExpiresAt&&run.startupLeaseExpiresAt>input.claimedAt)return{kind:"in_progress",runId:run.runId};
+      this.runs.set(run.runId,clone({...run,startupClaimToken:input.claimToken,startupLeaseExpiresAt:input.leaseExpiresAt,updatedAt:input.claimedAt}));
+      return{kind:"claimed",runId:run.runId,claim:input.claimToken};
+    });
+  }
+
+  async beginStartupAction(input:import("../../ports/src/store.js").BeginSandboxStartupActionInput,readTask:()=>PersistedAgentTask|undefined):Promise<PersistedSandboxRunState|null>{
+    return this.serializeMutation(async()=>{
+      const run=this.runs.get(input.runId),task=readTask();
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==null||input.actionDeadlineAt<=input.startedAt||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run))return null;
+      const started={...run,startupActionDeadlineAt:input.actionDeadlineAt,updatedAt:input.startedAt};
+      this.runs.set(run.runId,clone(started));
+      return clone(started);
+    });
+  }
+
+  async completeStartupAction(input:import("../../ports/src/store.js").CompleteSandboxStartupActionInput,readTask:()=>PersistedAgentTask|undefined):Promise<PersistedSandboxRunState|null>{
+    return this.serializeMutation(async()=>{
+      const run=this.runs.get(input.runId),task=readTask();
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.completedAt>input.actionDeadlineAt||input.leaseExpiresAt<=input.completedAt||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run))return null;
+      const completed={...run,startupLeaseExpiresAt:input.leaseExpiresAt,startupActionDeadlineAt:null,updatedAt:input.completedAt};
+      this.runs.set(run.runId,clone(completed));
+      return clone(completed);
+    });
+  }
+
+  async drainStartupAction(input:import("../../ports/src/store.js").DrainSandboxStartupActionInput,readTask:()=>PersistedAgentTask|undefined,commit:(event:ProjectAuditEvent)=>void):Promise<PersistedSandboxRunState|null>{
+    return this.serializeMutation(async()=>{
+      const run=this.runs.get(input.runId),task=readTask();
+      if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.actionDeadlineAt>input.drainedAt||run.cleanupClaimedAt===null||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run))return null;
+      const drained={...run,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
+      this.runs.set(run.runId,clone(drained));
+      try{commit(input.auditEvent);return clone(drained);}catch(error){this.runs.set(run.runId,clone(run));throw error;}
     });
   }
 
   async activateTask(
     input:ActivateTaskSandboxRunInput,
-    readTask:()=>PersistedAgentTask|undefined
+    readTask:()=>PersistedAgentTask|undefined,
+    commit:(event:ProjectAuditEvent)=>void
   ):Promise<ActivateTaskSandboxRunResult>{
     return this.serializeMutation(async()=>{
       const run=this.runs.get(input.runId);
@@ -1643,12 +1840,12 @@ class InMemorySandboxRunStore {
       if(run.state==="active"&&!task.deletedAt&&!task.archivedAt){
         return{kind:"already_running",task:clone(task),run:clone(run)};
       }
-      if(run.state!=="starting"||!run.startedAt||run.fencingToken!==input.expectedFencingToken||task.deletedAt||task.archivedAt){
+      if(run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.startupClaimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.activatedAt>input.actionDeadlineAt||task.deletedAt||task.archivedAt){
         return{kind:"conflict"};
       }
-      const activatedRun={...run,state:"active" as const,startupClaimToken:null,startupLeaseExpiresAt:null,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
+      const activatedRun={...run,state:"active" as const,startedAt:run.startedAt??input.activatedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
       this.runs.set(run.runId,clone(activatedRun));
-      return{kind:"activated",task:clone(task),run:clone(activatedRun)};
+      try{commit(input.auditEvent);return{kind:"activated",task:clone(task),run:clone(activatedRun)};}catch(error){this.runs.set(run.runId,clone(run));throw error}
     });
   }
 
@@ -1657,7 +1854,8 @@ class InMemorySandboxRunStore {
       const current=await this.get(input.runId);
       if(!current||!sameRunIdentity(current,input.run))return"conflict";
       if(current.state==="released"){commit(true);return"already_applied";}
-      if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.state!=="released"||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
+      if(current.startupActionDeadlineAt&&current.startupActionDeadlineAt>input.run.updatedAt)return"conflict";
+      if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.state!=="released"||input.run.startupActionDeadlineAt!==null||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
       try{this.runs.set(input.runId,clone(input.run));commit(false);return"applied";}catch(error){this.runs.set(current.runId,clone(current));throw error}
     });
   }
@@ -1700,8 +1898,10 @@ function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSand
 function taskMatchesActiveSandboxRun(task:PersistedAgentTask|undefined,project:Project|undefined,run:PersistedSandboxRunState):boolean{return Boolean(task&&project&&!task.deletedAt&&task.id===run.taskId&&task.currentRunId===run.runId&&task.projectId===run.projectId&&task.workspaceId===run.workspaceId&&task.fileLibraryId===run.fileLibraryId&&project.id===run.projectId&&project.workspaceId===run.workspaceId)}
 
 function sandboxRunCleanupEligible(run: PersistedSandboxRunState, claimedAt: string): boolean {
-  return (run.state === "release_requested" || run.state === "failed")
-    && (!run.startupLeaseExpiresAt||run.startupLeaseExpiresAt<=claimedAt)
+  const startupActionExpired=run.startupActionDeadlineAt!==null&&run.startupActionDeadlineAt<=claimedAt;
+  return (run.state === "release_requested" || run.state === "failed" || run.state==="starting"&&run.startupActionDeadlineAt!==null&&run.startupActionDeadlineAt<=claimedAt)
+    && (startupActionExpired||!run.startupLeaseExpiresAt||run.startupLeaseExpiresAt<=claimedAt)
+    && (!run.startupActionDeadlineAt||run.startupActionDeadlineAt<=claimedAt)
     && (!run.cleanupClaimedAt||Date.parse(run.cleanupClaimedAt)<=Date.parse(claimedAt)-120_000);
 }
 
@@ -1801,7 +2001,42 @@ function validateTaskRunReservation(input:AtomicTaskCreateInput):void{
   if(input.task.currentRunId!==expectedRunId||input.reserveActive!==reservesActive||(input.sandboxRun!==undefined&&!taskRunScopeMatches(input.task,input.sandboxRun)))throw new Error("Task Run reservation is inconsistent");
 }
 
-function sandboxRestartIdentityMatches(current:PersistedAgentTask,input:AtomicTaskSandboxRestartInput):boolean{
+function requiredAdmissionCreateIdempotency(input:AtomicTaskCreateInput):BeginTaskIdempotencyInput{
+  if(!input.idempotency||input.rejectionPresentation!==null||!input.rejectedAuditEvent)throw new Error("Active Task creation requires admission idempotency and rejection receipt inputs");
+  return input.idempotency;
+}
+
+function requiredSandboxRestartAdmission(input:AtomicTaskSandboxRestartInput):{idempotency:BeginTaskIdempotencyInput;presentation:TaskPresentation;auditEvent:ProjectAuditEvent}{
+  if(!input.idempotency||!input.rejectionPresentation||!input.rejectedAuditEvent)throw new Error("Sandbox restart requires admission idempotency and rejection receipt inputs");
+  return{idempotency:input.idempotency,presentation:input.rejectionPresentation,auditEvent:input.rejectedAuditEvent};
+}
+
+function requiredMessageAdmissionReceipt(input:AtomicTaskMessageInput):{presentation:TaskPresentation;auditEvent:ProjectAuditEvent}{
+  if(!input.rejectionPresentation||!input.rejectedAuditEvent)throw new Error("Sandbox message restart requires rejection receipt inputs");
+  return{presentation:input.rejectionPresentation,auditEvent:input.rejectedAuditEvent};
+}
+
+function terminalBoundRunReceipt(run:PersistedSandboxRunState,presentation:TaskPresentation):{responseStatus:number;responseBody:unknown}{
+  if(run.state==="active")return{responseStatus:200,responseBody:{status:"active",runId:run.runId,presentation}};
+  if(run.state==="failed"||run.state==="release_requested")return{responseStatus:502,responseBody:{error:{code:"sandbox_start_failed",message:"Sandbox could not be started",retryable:true,details:null,presentation}}};
+  return{responseStatus:409,responseBody:{error:{code:"task_sandbox_released",message:"Task sandbox is released",retryable:false,details:null,presentation}}};
+}
+
+function normalizeSandboxAdmission(admission:SandboxAdmissionInput,run:PersistedSandboxRunState):SandboxAdmissionInput{
+  if(admission.namespace!==run.namespace)throw new Error("Sandbox admission namespace does not match Run");
+  if(!Number.isSafeInteger(admission.namespaceLimit)||admission.namespaceLimit<=0)throw new Error("Sandbox admission namespace limit must be a positive integer");
+  return admission;
+}
+
+function validateRejectedAdmissionAudit(event:ProjectAuditEvent):void{
+  const trigger=event.detail?.trigger;
+  const expectedAction=trigger==="task_create"?"task.create":"sandbox.started";
+  if(event.status!=="rejected"||event.action!==expectedAction||!["task_create","task_message","terminal"].includes(trigger??""))throw new Error("Sandbox admission rejected Audit is inconsistent");
+}
+
+type SandboxRestartIdentityInput = Pick<AtomicTaskSandboxRestartInput,"expectedReleasedRunId"|"task"|"sandboxRun">;
+
+function sandboxRestartIdentityMatches(current:PersistedAgentTask,input:SandboxRestartIdentityInput):boolean{
   const task=input.task,run=input.sandboxRun;
   return task.id===current.id&&task.workspaceId===current.workspaceId&&task.projectId===current.projectId&&task.endpointId===current.endpointId&&task.fileLibraryId===current.fileLibraryId&&task.currentRunId!==input.expectedReleasedRunId&&run.runId===task.currentRunId&&run.taskId===current.id&&run.workspaceId===current.workspaceId&&run.projectId===current.projectId&&run.fileLibraryId===current.fileLibraryId&&run.state==="starting";
 }
@@ -1846,8 +2081,16 @@ function latestInteractions(changes: PersistedTaskInteractionChange[]): TaskInte
   return [...latest.values()].map((change) => change.interaction).sort((left,right) => left.position - right.position || left.id.localeCompare(right.id));
 }
 
-function hasOlderUnresolvedMessage(messages:PersistedTaskMessage[],target:PersistedTaskMessage):boolean{
-  return messages.some((message)=>message.taskId===target.taskId&&!message.deletedAt&&["pending","dispatching"].includes(message.deliveryStatus??"pending")&&(message.createdAt<target.createdAt||message.createdAt===target.createdAt&&message.id<target.id));
+function hasOlderUnresolvedMessage(messages:PersistedTaskMessage[],changes:PersistedTaskInteractionChange[],target:PersistedTaskMessage):boolean{
+  return messages.some((message)=>message.taskId===target.taskId&&!message.deletedAt&&hasPersistedMessageInteraction(changes,message)&&["pending","dispatching"].includes(message.deliveryStatus??"pending")&&(message.createdAt<target.createdAt||message.createdAt===target.createdAt&&message.id<target.id));
+}
+
+function hasPersistedMessageInteraction(changes:PersistedTaskInteractionChange[],message:PersistedTaskMessage):boolean{
+  return changes.some((change)=>change.interaction.taskId===message.taskId&&change.sourceKind==="product"&&change.sourceId===`message:${message.id}`);
+}
+
+function isMessageInteractionChange(message:PersistedTaskMessage,change:TaskInteractionChangeInput):boolean{
+  return change.sourceKind==="product"&&change.sourceId===`message:${message.id}`&&change.interaction.taskId===message.taskId;
 }
 
 function correlationMatches(stored: TaskInteractionCorrelation | undefined, requested: TaskInteractionCorrelation): boolean {

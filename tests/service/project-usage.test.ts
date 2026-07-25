@@ -123,7 +123,7 @@ async function setup(label:string){
   await services.memberships.addMember(user.id,project.id,runnerId,"member");
   const task:PersistedAgentTask={id:`task_${label}`,workspaceId:workspace.id,projectId:project.id,endpointId:`endpoint_${label}`,fileLibraryId:`library_${label}`,createdByUserId:user.id,title:"Task",prompt:"Work",agentContext:"",currentRunId:`run_${label}`,archivedAt:null,deletedAt:null,createdAt,updatedAt:createdAt};
   const run=liveRun(task,createdAt,runnerId);
-  const created=await store.createTaskAtomically({task,reserveActive:true,newFileLibrary:{id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt,updatedAt:createdAt},sandboxRun:run});
+  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,"setup"),newFileLibrary:{id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt,updatedAt:createdAt},sandboxRun:run});
   assert.equal(created.kind,"created");
   return{store,services,userId:user.id,runnerId,workspace,project,projectId:project.id,task,run};
 }
@@ -131,7 +131,7 @@ async function setup(label:string){
 async function createRun(fixture:Awaited<ReturnType<typeof setup>>,label:string,startedAt:string|null,state:"starting"|"active"|"release_requested"|"failed"){
   const task:PersistedAgentTask={...fixture.task,id:`task_${label}`,fileLibraryId:`library_${label}`,currentRunId:`run_${label}`,title:`Task ${label}`,createdAt:startedAt??fixture.project.createdAt,updatedAt:startedAt??fixture.project.createdAt};
   const run=liveRun(task,startedAt,fixture.runnerId,state);
-  const result=await fixture.store.createTaskAtomically({task,reserveActive:true,newFileLibrary:{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${label}`,rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:fixture.userId,createdAt:task.createdAt,updatedAt:task.updatedAt},sandboxRun:run});
+  const result=await fixture.store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,label),newFileLibrary:{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${label}`,rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:fixture.userId,createdAt:task.createdAt,updatedAt:task.updatedAt},sandboxRun:run});
   assert.equal(result.kind,"created");
   return{task,run};
 }
@@ -144,7 +144,7 @@ async function release(store:ReturnType<typeof createLocalInMemoryProductStore>,
 function liveRun(task:PersistedAgentTask,startedAt:string|null,startedByUserId:string,state:"starting"|"active"|"release_requested"|"failed"="active"):PersistedSandboxRunState{return{
   namespace:"agentsmith",workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId:task.currentRunId!,
   state,image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,
-  fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId,startedAt,botifiedPort:3099,
+  fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId,startedAt,startupReadyAt:startedAt,startupActionDeadlineAt:null,botifiedPort:3099,
   resourceNames:{pod:`pod-${task.id}`,service:`service-${task.id}`,configMap:`config-${task.id}`,secret:`secret-${task.id}`},
   serviceKeySecretRef:{name:`secret-${task.id}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},
   resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},
@@ -152,3 +152,7 @@ function liveRun(task:PersistedAgentTask,startedAt:string|null,startedByUserId:s
   failureCode:state==="failed"?"startup_failed":null,failureCause:state==="failed"?"failed":null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,
   releaseReason:state==="failed"?"failed":state==="release_requested"?"requested":null,releaseRequestedAt:state==="failed"||state==="release_requested"?task.createdAt:null,failedAt:state==="failed"?task.createdAt:null,releasedAt:null,createdAt:startedAt??task.createdAt,updatedAt:startedAt??task.createdAt
 }}
+
+function createAdmissionReceipt(task:PersistedAgentTask,label:string){
+  return{idempotency:{actorId:task.createdByUserId!,projectId:task.projectId,operation:"create" as const,key:`fixture-${label}`,requestHash:`fixture-hash-${label}`,resourceId:task.id,claimToken:`fixture-claim-${label}`,now:task.updatedAt,leaseExpiresAt:"2099-01-01T00:00:00.000Z"},rejectionPresentation:null,rejectedAuditEvent:{id:`audit_fixture_rejected_${label}`,projectId:task.projectId,actorId:task.createdByUserId!,action:"task.create" as const,status:"rejected" as const,resourceKind:"task" as const,resourceId:task.id,detail:{taskId:task.id,trigger:"task_create" as const},createdAt:task.updatedAt}};
+}

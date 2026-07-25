@@ -125,6 +125,29 @@ describe("sandbox Kubernetes port", () => {
     assert.deepEqual(transport.requests, []);
   });
 
+  it("propagates an absolute startup abort through apply to the pending transport request",async()=>{
+    const controller=new AbortController();
+    let patchSignal:AbortSignal|undefined;
+    const transport:KubernetesTransport={
+      async request(request,signal){
+        if(request.method==="GET")return{statusCode:404};
+        patchSignal=signal;
+        return new Promise<KubernetesTransportResponse>((_resolve,reject)=>{
+          signal?.addEventListener("abort",()=>reject(signal.reason),{once:true});
+        });
+      }
+    };
+    const port=new SandboxKubernetesPort({transport});
+    const applying=port.applyResource(resource("Secret","asl-botified-t1"),identityLabels,controller.signal);
+    await new Promise<void>((resolve)=>setImmediate(resolve));
+
+    controller.abort(new Error("startup action deadline elapsed"));
+
+    await assert.rejects(applying,/startup action deadline elapsed/);
+    assert.equal(patchSignal,controller.signal);
+    assert.equal(patchSignal?.aborted,true);
+  });
+
   it("deletes with GET label fencing and UID precondition, with idempotent not-found handling", async () => {
     const transport = recordingTransport((request) => {
       if (request.method === "GET") {

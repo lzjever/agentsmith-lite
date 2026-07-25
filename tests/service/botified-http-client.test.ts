@@ -28,6 +28,42 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 }
 
 describe("Botified HTTP client", () => {
+  it("aborts a pending health request with the caller readiness signal",async()=>{
+    let observedSignal:AbortSignal|undefined;
+    const client=new FetchBotifiedRuntimeHttpClient(async(_input,init={})=>{
+      observedSignal=init.signal??undefined;
+      return new Promise<Response>((_resolve,reject)=>{
+        observedSignal?.addEventListener("abort",()=>reject(observedSignal?.reason),{once:true});
+      });
+    },60_000);
+    const controller=new AbortController();
+    const health=client.health("http://botified.local",undefined,controller.signal);
+    await new Promise<void>((resolve)=>setImmediate(resolve));
+
+    controller.abort(new Error("readiness deadline elapsed"));
+
+    await assert.rejects(health,/readiness deadline elapsed/);
+    assert.equal(observedSignal?.aborted,true);
+  });
+
+  it("aborts a pending state identity read with the caller startup signal",async()=>{
+    let observedSignal:AbortSignal|undefined;
+    const client=new FetchBotifiedRuntimeHttpClient(async(_input,init={})=>{
+      observedSignal=init.signal??undefined;
+      return new Promise<Response>((_resolve,reject)=>{
+        observedSignal?.addEventListener("abort",()=>reject(observedSignal?.reason),{once:true});
+      });
+    },60_000);
+    const controller=new AbortController();
+    const read=client.readState("http://botified.local","service-secret",controller.signal);
+    await new Promise<void>((resolve)=>setImmediate(resolve));
+
+    controller.abort(new Error("startup identity deadline elapsed"));
+
+    await assert.rejects(read,/startup identity deadline elapsed/);
+    assert.equal(observedSignal?.aborted,true);
+  });
+
   it("checks healthz without bearer auth and posts messages with the service key", async () => {
     const calls: FetchCall[] = [];
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {

@@ -129,6 +129,7 @@ export function renderAppManifests(input: AppManifestInput): KubernetesResource[
       metadata: { name: APP_KUBERNETES_SERVICE_NAME, namespace: input.namespace, labels: apiLabels },
       spec: {
         replicas: 1,
+        strategy: { type: "Recreate" },
         selector: { matchLabels: apiLabels },
         template: {
           metadata: { labels: apiLabels },

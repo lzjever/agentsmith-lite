@@ -81,7 +81,7 @@ describe("project resource policy", () => {
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 5 }, "2026-07-12T00:00:00.000Z");
     const task: PersistedAgentTask = { id: "task_file_reconcile", workspaceId: workspace.id, projectId: project.id, endpointId: "endpoint", fileLibraryId:"library_file_reconcile", title:"Task", prompt: "not audited", currentRunId:null,archivedAt:null,deletedAt:null,createdAt: project.createdAt, updatedAt: project.updatedAt };
     await store.createFileLibrary({id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt:project.createdAt,updatedAt:project.updatedAt});
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"created");
     await store.appendTaskArtifacts([{ id: "artifact_file_reconcile", taskId: task.id, fileId: "file_reconcile", name: "result.txt", bytes: 2, mediaType: "text/plain", previewText: null, createdAt: project.createdAt }]);
 
     const over=await services.policies.reconcileFileLibraryBytes(project.id,8);

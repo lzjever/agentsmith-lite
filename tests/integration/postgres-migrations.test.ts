@@ -65,6 +65,10 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
       ]);
       const sandboxAuditSubject=await client.query<{is_nullable:string}>("select is_nullable from information_schema.columns where table_schema='public' and table_name='project_audit_events' and column_name='subject_user_id'");
       assert.deepEqual(sandboxAuditSubject.rows,[{is_nullable:"YES"}]);
+      const startupReadiness=await client.query<{data_type:string;is_nullable:string}>("select data_type,is_nullable from information_schema.columns where table_schema='public' and table_name='sandbox_runs' and column_name='startup_ready_at'");
+      assert.deepEqual(startupReadiness.rows,[{data_type:"timestamp with time zone",is_nullable:"YES"}]);
+      const startupActionDeadline=await client.query<{data_type:string;is_nullable:string}>("select data_type,is_nullable from information_schema.columns where table_schema='public' and table_name='sandbox_runs' and column_name='startup_action_deadline_at'");
+      assert.deepEqual(startupActionDeadline.rows,[{data_type:"timestamp with time zone",is_nullable:"YES"}]);
       const sandboxSettlementTrigger=await client.query<{tgname:string}>("select tgname from pg_trigger where tgrelid='sandbox_usage_settlements'::regclass and not tgisinternal");
       assert.deepEqual(sandboxSettlementTrigger.rows,[{tgname:"sandbox_usage_settlements_immutable"}]);
 

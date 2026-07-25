@@ -21,6 +21,21 @@ function renderAppManifests(input: Parameters<typeof renderAppManifestResources>
 }
 
 describe("app manifest rendering", () => {
+  it("runs exactly one API control-plane pod with a non-overlapping rollout", () => {
+    const manifests = renderAppManifests({
+      namespace: "agentsmith",
+      imageTag: "dev",
+      env: {},
+      secrets: {}
+    });
+    const apiDeployment = manifests.find(
+      (manifest) => manifest.kind === "Deployment" && manifest.metadata.name === "agentsmith-lite-api"
+    ) as DeploymentResource | undefined;
+
+    assert.equal(apiDeployment?.spec.replicas, 1);
+    assert.deepEqual(apiDeployment?.spec.strategy, { type: "Recreate" });
+  });
+
   it("assigns every resource to one deploy phase and keeps deployments behind migration", () => {
     const manifests = renderAppManifests({
       namespace: "agentsmith",
@@ -845,6 +860,10 @@ interface DeploymentResource {
     labels: Record<string, string>;
   };
   spec: {
+    replicas?: number;
+    strategy?: {
+      type?: string;
+    };
     template: {
       spec: {
         serviceAccountName?: string;

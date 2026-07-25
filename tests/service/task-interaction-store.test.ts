@@ -94,6 +94,37 @@ describe("task interaction store", () => {
     assert.deepEqual(await store.listTaskInteractionChanges("task_interactions",0,10),[]);
   });
 
+  it("does not dispatch a pending message whose product interaction was never committed",async()=>{
+    const store=createLocalInMemoryProductStore();
+    await store.createProject(project());
+    await createTask(store);
+    const message=await store.createTaskMessage({
+      id:"message-crash-window",taskId:"task_interactions",actorId:"user",content:"not durable",
+      deliveryKey:"delivery-message-crash-window",requestHash:"crash-window-hash",
+      claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",
+      claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,
+      createdAt:timestamp(1),updatedAt:timestamp(1),deletedAt:null
+    });
+
+    assert.deepEqual(await store.listTaskMessagesDue(timestamp(2),10),[]);
+    assert.equal(await store.claimTaskMessage({
+      id:message.id,claimToken:"claim-must-not-stick",claimedAt:timestamp(2),leaseExpiresAt:timestamp(5)
+    }),null);
+    const persisted=await store.findTaskMessage(message.id);
+    assert.equal(persisted?.deliveryStatus,"pending");
+    assert.equal(persisted?.claimToken,null);
+
+    const later=await store.createPendingTaskMessage(
+      {id:"message-after-crash-window",taskId:"task_interactions",actorId:"user",content:"durable",deliveryKey:"delivery-message-after-crash-window",requestHash:"after-crash-window-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp(3),updatedAt:timestamp(3),deletedAt:null},
+      change("product","message:message-after-crash-window",0,interaction("message-after-crash-window",1,2,"user_message"))
+    );
+    assert.ok(later);
+    assert.deepEqual((await store.listTaskMessagesDue(timestamp(4),10)).map((candidate)=>candidate.id),[later.id]);
+    assert.equal((await store.claimTaskMessage({
+      id:later.id,claimToken:"valid-later-claim",claimedAt:timestamp(4),leaseExpiresAt:timestamp(6)
+    }))?.id,later.id);
+  });
+
   it("completes resource idempotency only for the matching Project and operation",async()=>{
     const store=createLocalInMemoryProductStore();
     await store.createProject(project());
@@ -157,7 +188,7 @@ function task(): PersistedAgentTask {
 
 async function createTask(store:ReturnType<typeof createLocalInMemoryProductStore>):Promise<void>{
   await store.createFileLibrary({id:"library_interactions",workspaceId:"workspace",projectId:"project",name:"Library",rootSubPath:"libraries/library_interactions/home",createdByUserId:"user",createdAt:timestamp(0),updatedAt:timestamp(0)});
-  assert.equal((await store.createTaskAtomically({task:task(),reserveActive:false})).kind,"created");
+  assert.equal((await store.createTaskAtomically({task:task(),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"created");
 }
 
 function project() { return { id:"project",workspaceId:"workspace",name:"Project",ownerUserId:"user",rootPath:"workspaces/workspace/projects/project",taskConcurrencyLimit:2,createdAt:timestamp(0),updatedAt:timestamp(0) }; }

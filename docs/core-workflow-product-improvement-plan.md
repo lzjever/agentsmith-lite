@@ -42,11 +42,19 @@ details in older plans:
 - any Terminal path in which selecting the peer view or opening its WebSocket
   starts compute, or in which a database transaction stays open during the
   Kubernetes/Botified start;
+- any Task-create path in which a pending initial message, runtime tick, or
+  Kubernetes/Botified `create_resource`/`adopt_resource` startup path can claim
+  startup before the admitted workspace has been descriptor-safely promoted
+  and durably marked ready;
+- any deployment that can overlap two AgentSmith API control-plane processes,
+  or any external startup action without a persisted hard deadline that a
+  recovering process must honor and drain through cleanup before
+  release/takeover;
 - any route-specific capacity envelope, public `activeTasks`/`activeTasksLimit`
   alias, or public `task_capacity`/`active_tasks` Alert vocabulary;
-- any claim that Sandbox terminology requires no Slice 1 data migration, or
-  that the Slice 1 generated-copy migration and Slice 3 Library lifecycle
-  migration are one combined migration;
+- any claim that Sandbox terminology requires no Slice 1 migration, or that
+  the Slice 1 startup-readiness/action-deadline/generated-copy migration and
+  Slice 3 Library lifecycle migration are one combined migration;
 - any claim that the first Astryx migration completed the shell, dialog, or
   visual-composition work.
 
@@ -58,6 +66,8 @@ The following decisions remain unchanged:
   or automatic reclamation;
 - the Web is an AgentSmith API client, and all authorization, resource,
   deletion, accounting, and Botified behavior is server-owned;
+- this milestone's AgentSmith API control plane is exactly one replica and is
+  replaced without old/new process overlap;
 - Astryx is the only visual system, English is the only locale, and removed
   Chat, Codex, LLMUP, JVS, WebDAV, mount, template, savepoint, and governance
   paths stay removed.
@@ -123,6 +133,9 @@ decoration.
 - Once released-message admission succeeds, the message remains accepted.
   Any later startup failure appears through the durable Run and interaction
   state while failed cleanup continues to hold capacity.
+- An admitted Task never starts from a partially prepared workspace. Runtime
+  pickup remains in progress until its operation-owned staging root is
+  promoted and that exact fenced Run is durably startup-ready.
 - Project policy capacity and substrate namespace capacity are distinct:
   Project capacity offers release/policy recovery, while substrate capacity
   offers release/retry and operator guidance without a misleading policy link.
@@ -154,6 +167,13 @@ decoration.
 - One atomic server admission path is the only capacity truth for every
   Sandbox start. The Web does not infer or cache whether a future start will
   succeed.
+- One persistent Run readiness field is the only startup-claim gate. No
+  dispatcher, runtime tick, or Kubernetes/Botified
+  `create_resource`/`adopt_resource` startup path infers readiness from
+  Task/interaction state or filesystem observation.
+- One in-process Promise per starting Run and one persisted external-action
+  deadline prevent same-process duplication and bound crash recovery without a
+  multi-replica coordination protocol.
 - Two typed capacity scopes and one shared presentation model serve Task
   creation, message cold-start, and Terminal cold-start without conflating
   user-managed Project policy with substrate saturation.
@@ -185,6 +205,39 @@ decoration.
   Terminal startup after a committed reservation.
 - Failed Terminal startup state that remains capacity-holding until the
   Kubernetes resource is confirmed absent, with exact same-key failure replay.
+- Operation-owned Task-create staging under the Project, outside every Library
+  root and Sandbox mount, guarded by descriptor-safe FD walk plus exact
+  operation marker, followed by same-volume promotion and one fenced
+  persistent startup-ready transition.
+- Initial Task-create null readiness versus ready reservation for
+  released-Task message/Terminal restart on an already promoted workspace.
+- Store-transaction readiness checks for every Kubernetes/Botified
+  `create_resource`/`adopt_resource` startup claim and message dispatch, while
+  cleanup/release reconciliation remains able to process not-ready Runs.
+- One persisted startup claim spans the complete Kubernetes apply/adopt and
+  Botified readiness sequence. Kubernetes resource creation is not an
+  intermediate confirmation point; only final `active` confirmation or an
+  atomic startup-failure transition terminates the claim.
+- One `AtomicTaskCreate` admission transaction writes the Task, Library
+  creation/binding, reserved Run, initial message, and initial interaction, so
+  no dispatcher can observe a ready message without its interaction.
+- One `AtomicTaskMessage` transaction for ready Run, message, initial
+  interaction, and fixed accepted receipt.
+- One Terminal Store transaction that binds each idempotency operation to one
+  Run and converges on that Run's state: only `starting` returns in-progress,
+  `active` fixes success, `failed`/`release_requested` fix failure, and
+  `released` replays or fixes failure without restarting the same operation.
+  Every in-progress response identifies its persisted Run; only a genuinely
+  new operation may admit and reserve from a released Task.
+- One in-process shared Promise per Run; database lease recovery only after
+  process crash, action-deadline drain, and local-operation absence.
+- AgentSmith API deployment at exactly one replica with `Recreate` strategy,
+  plus manifests/configuration that cannot overlap control-plane instances.
+- One independent persisted `startupActionDeadlineAt` around each Kubernetes
+  apply/adopt action and the bounded Botified readiness action, with normal
+  completion clearing that action's deadline, unknown completion retaining it
+  through deadline drain and cleanup, and empty-resource confirmation before
+  recovery or release.
 - Consistent Sandbox capacity terminology in Task creation, Task detail,
   Usage, Resource Policy, Alerts, and relevant Audit details.
 - Correct Audit action attribution for capacity rejection.
@@ -195,9 +248,10 @@ decoration.
 - A 32,768 UTF-8-byte `sessionStorage` draft-snapshot ceiling that never limits
   message editing or submission, plus validated same-origin Task-to-Files
   return navigation.
-- One narrow Slice 1 forward data migration for exact system-generated legacy
-  Alert/notification copy, separate from the Slice 3 Library lifecycle
-  migration.
+- Focused Slice 1 migration `074` for the Run startup-readiness and
+  external-action-deadline columns, database-fact active-Run readiness
+  backfill, and exact generated Alert/notification copy, separate from the
+  Slice 3 Library lifecycle migration.
 - File/folder row selection, folder navigation, keyboard behavior, selected
   details, and destructive actions.
 - Recursive folder deletion with complete point-in-time Project file-byte
@@ -237,15 +291,19 @@ decoration.
   background effects, stock imagery, or a second icon set.
 - Restoring legacy AgentSmith CSS, tokens, primitives, locale routes, or
   pixel-copying the old visual design.
-- Cloud validation, multi-replica control-plane design, automated visual
-  approval, permanent Playwright suites, default end-to-end gates, reports, or
-  evidence generation.
+- Cloud validation, multi-replica control-plane design, rolling overlap of old
+  and new AgentSmith API instances, automated visual approval, permanent
+  Playwright suites, default end-to-end gates, reports, or evidence generation.
 - Persisting Task drafts to the server, persisting follow/read mode or scroll
   anchors across routes, sharing drafts across users/devices, or introducing a
   global frontend store.
 - A capacity preflight, a second admission route, an unreleased-Run creation
   escape hatch, multiple Terminal capability fields, or WebSocket-owned
   startup.
+- A filesystem-ready inference, process-local readiness authority, second Run
+  on retry/crash recovery, or startup claim outside a Store transaction.
+- Startup generation counters, rotating startup credentials, admission
+  webhooks, leader election, or another multi-controller protocol.
 - Public compatibility aliases for old Task-capacity fields or Alert values.
 - A server or Web Task-message byte limit tied to the browser draft-snapshot
   ceiling.
@@ -268,6 +326,13 @@ checked only before initial Task creation through a non-atomic preflight.
 Released-message and released-Terminal starts bypass it. Project and namespace
 admission must move into the same atomic start path while retaining distinct
 safe errors and recovery copy.
+
+Task create has a second ordering defect after admission. The admitted Task,
+pending initial interaction, and reserved Run become visible before workspace
+promotion finishes. The five-second runtime tick can therefore claim the
+pending message and start Kubernetes/Botified against an unpromoted workspace.
+Process order in one request is not a correctness boundary; startup readiness
+must be persisted on the Run and checked transactionally by every claim path.
 
 ### 5.2 Capacity language describes the wrong durable object
 
@@ -378,6 +443,9 @@ feature expansion:
 - Namespace admission must be atomic for all three cold-start triggers and
   must not enter Terminal's generic reconnect loop when capacity is known to be
   unavailable.
+- Task-create staging/promotion and the runtime/message startup paths need one
+  persistent readiness handoff so the periodic tick cannot outrun workspace
+  promotion.
 - Task draft and peer view need user-scoped browser-session continuity because
   navigating to the Task's own Files page is an ordinary workflow.
 - A disabled bound-Library delete control must have a visible explanation and
@@ -423,7 +491,8 @@ Rules:
 
 - an existing starting or active Run does not reserve another slot;
 - initial Task creation, a released-Task message, and a released-Task Terminal
-  start use the same Store admission primitive;
+  start use the same internal Store admission primitive; Terminal exposes it
+  only through the dedicated atomic operation in sections 6.3 and 7.1;
 - Project and substrate admission happen in the same transaction under the
   capacity-writer lock order in section 7.1;
 - the authoritative Project and namespace count is the number of Run rows
@@ -457,15 +526,55 @@ same status and byte-equivalent JSON envelope even after capacity changes.
 Task creation does not preflight capacity. Its atomic rejection preserves the
 dialog's title, prompt, Endpoint, Library mode, selected Library, and new
 Library name. It shows the same scope-correct recovery as released Task start.
-A rejected create creates no admitted Task, newly bindable/visible File
-Library, message, or unreleased Run. It may persist only request idempotency
-and one deduplicated rejected Audit record. In create-new-Library mode, any
-candidate-directory preparation required before admission returns its own
-typed error if it fails before a capacity result exists. Only after capacity
-rejection has been determined does failure to compensate that candidate yield
-to the canonical capacity envelope. Any such filesystem remnant stays outside
-all list/bind projections and cannot be selected or bound. Existing-Library
-mode does not mutate that Library before admission and bind.
+
+Every persisted Sandbox Run has these internal startup fields:
+
+```ts
+startupReadyAt: string | null;
+startupActionDeadlineAt: string | null;
+```
+
+Initial Task-create reservation is inserted with `startupReadyAt: null`.
+Released-Task message and Terminal restart reuse an already promoted workspace,
+so their reservation transaction sets `startupReadyAt` immediately.
+`startupActionDeadlineAt` is null when no external startup action is
+outstanding. Neither field allocates or releases capacity; `state != released`
+remains the sole capacity predicate.
+
+Task create uses this fixed preparation handoff:
+
+1. Before admission, allocate the stable Task ID, Run ID, operation identity,
+   request hash, and fencing token. Prepare only the operation-owned Project
+   path `.preparations/<taskId>`.
+2. That staging root is inside the Project's owned storage boundary, on the
+   same volume as the destination, and outside every File Library root and
+   Sandbox mount. It is absent from Files, Library binding, Task workspace,
+   Artifact, and Sandbox projections.
+   Create and validate it through a descriptor-safe FD walk with no symlink
+   component, and write one operation marker containing the exact Project,
+   Task, Run, operation, request-hash, and fence identities.
+3. A preparation failure before admission returns its own typed error. No
+   capacity result exists yet and no Task, interaction, Library bind, or Run is
+   admitted.
+4. `AtomicTaskCreate` admission atomically persists the Task, Library
+   creation/binding, reserved Run with `startupReadyAt: null`, initial message,
+   and its initial pending interaction. The message and interaction are one
+   indivisible write set; no dispatcher-visible message can exist without its
+   interaction. Capacity rejection persists only request idempotency and one
+   deduplicated rejected Audit, then removes that operation's staging root.
+5. After successful admission, a descriptor-safe FD walk verifies the marker
+   and same-volume source/destination, then promotes only that operation's
+   staging content into the admitted canonical workspace. No string-path
+   validate-then-move fallback is allowed.
+6. Only after promotion succeeds may one Store transaction atomically set
+   `startupReadyAt` for the exact `taskId`, `runId`, and `fencingToken`.
+
+Failure to clean staging after capacity rejection never replaces the stored
+canonical capacity envelope. A remnant stays invisible, unbindable, outside
+Sandbox mounts, and claimable only by that same operation's fenced recovery.
+Same-key retry resumes only the marker-matched Task ID, Run ID, staging root,
+and promotion; it cannot allocate another staging root, bind another Library,
+reserve another Run, or mark a different Run ready.
 
 All Slice 1 retryable failures use exactly one envelope:
 
@@ -520,6 +629,13 @@ capacity shape.
   becomes `sandbox_start_failed`. A subsequent Sandbox startup failure is
   represented by the persisted Run/interaction failure and cleanup state; the
   Run keeps holding capacity until release finalization;
+- `AtomicTaskMessage` uses one Store transaction to write the ready reserved
+  Run, message, initial interaction, and fixed accepted idempotency receipt.
+  The existing workspace was already promoted by Task creation, so the Run may
+  commit with `startupReadyAt` set; there is no follow-up ready write;
+- once that accepted receipt commits, readiness/startup/dispatch work may
+  change only durable Run and interaction state. No later error changes the
+  original HTTP response or same-key replay;
 - the Web keeps draft, focus, timeline, and peer view, and titles the inline
   error `Sandbox could not be started`;
 - Project rejection links to live Sandboxes and, for administrators, Resource
@@ -548,18 +664,42 @@ capacity shape.
 - Only `Start sandbox and open Terminal` calls idempotent JSON
   `POST /tasks/:taskId/terminal/start` with an idempotency key.
 
-Terminal start is a two-phase fenced operation:
+Terminal start uses one dedicated Store begin operation and transaction-free
+runtime work:
 
-1. the admission transaction reserves exactly one `starting` Run and commits;
-2. after commit, and with no database transaction open, the service starts the
-   Kubernetes/Botified Sandbox using the Run identity and persisted fence;
-3. only the holder of that fence may confirm the same Run `active`;
-4. the command reports success only after active confirmation and returns the
-   canonical active `TaskPresentation`;
-5. startup failure records the Run `failed`, requests cleanup through
-   `release_requested`, and stores the canonical `sandbox_start_failed`
-   envelope with the failed/pending-cleanup `TaskPresentation`;
-6. that Run remains capacity-holding until cleanup confirms that no
+1. `beginTerminalStart` runs one Store transaction that validates
+   authorization and `requestHash`, begins or replays request idempotency, and
+   binds the operation to one persisted Run before deciding the response.
+2. A stored completed receipt always replays exactly. Otherwise the bound Run
+   state converges in that same transaction:
+   - `starting`: the only state that may return HTTP 202, always with its
+     persisted `runId`; null readiness means preparing and Terminal never marks
+     it ready;
+   - `active`: persist and return one fixed HTTP 200 active receipt;
+   - `failed` or `release_requested`: persist and return one fixed canonical
+     failure receipt;
+   - `released`: replay a receipt already stored for that operation, or persist
+     and return an explicit non-retryable lifecycle failure. Never reserve or
+     restart a Run for that same operation.
+3. Only a genuinely new idempotency operation may act on a currently released
+   Task. Its admission reserves one new ready `starting` Run against the
+   already promoted workspace and binds that `runId` in the same transaction;
+   later same-key calls follow the state matrix above.
+4. After commit, the service claims a ready Run transactionally.
+   Kubernetes/Botified startup occurs outside every database transaction.
+5. Only the current persisted claim/fence may execute `create_resource` or
+   `adopt_resource` and confirm that same Run `active`. The command reports
+   success only after active confirmation and returns the canonical active
+   `TaskPresentation`.
+6. Startup failure atomically records the Run `failed`, requests cleanup
+   through `release_requested`, and stores the canonical
+   `sandbox_start_failed` envelope with the failed/pending-cleanup
+   `TaskPresentation`.
+7. Failure completion mutates state only when operation ID, `requestHash`,
+   startup claim/fence, Project ID, Task ID, Run ID, Task `currentRunId`, and
+   Kubernetes/Botified resource identity all still match. A stale or mismatched
+   completion is rejected without changing Run, Task, usage, or idempotency.
+8. The failed Run remains capacity-holding until cleanup confirms that no
    Kubernetes/Botified resource exists and release finalization changes it to
    `released`.
 
@@ -574,6 +714,18 @@ unavailable until cleanup confirms `released`; the failed key always replays
 the exact stored failed/pending-cleanup envelope and never substitutes a
 released presentation. Once a fresh Task presentation confirms `released`, an
 explicit Retry uses a new key.
+
+The API process owns `startupOperationsByRunId`, a map from Run ID to the
+single shared startup Promise. While that Promise is unsettled, every same-Run
+caller other than the owner receives `in_progress`; no caller performs lease
+takeover or starts another external action. The owner resolves the shared
+Promise, and the map entry is removed in its settle/finally path.
+
+The database startup lease exists only for process-crash recovery. A new
+process may take over the same `starting` Run only after its persisted external
+action deadline has been drained, no in-process Promise exists for the Run,
+and the Store grants a new fenced claim. It never reserves another Run or
+returns in-progress without `runId`.
 
 ```ts
 type TerminalStartCommandResult =
@@ -662,18 +814,33 @@ Public Alert values are exactly type `sandbox_capacity` and metric
 `active_sandboxes`. No compatibility alias, dual public field, old route
 serializer, or old visible term remains.
 
-Slice 1 adds one narrow forward data migration for existing system-generated
-Alert/notification copy. It updates only rows whose system kind and complete
-legacy title/body exactly match the enumerated old generated strings, replacing
-those strings with canonical Sandbox terminology. It performs no substring or
-fuzzy replacement and never rewrites user-authored or non-matching content.
+Slice 1 migration `074` is one focused forward schema-and-data migration. The
+schema part adds nullable `sandbox_runs.startup_ready_at` and
+`sandbox_runs.startup_action_deadline_at`. Existing `active` Runs are
+backfilled ready only from database lifecycle fact because their resource
+already started. Existing `starting` Runs remain null. Migration `074` performs
+no filesystem walk, marker validation, startup recovery, or failure/cleanup
+transition.
 
-That data migration does not rename private SQL columns or persisted enum
+Application startup reconciliation owns old `starting` Run recovery. Its
+service descriptor-safely validates the exact operation marker: a match resumes
+that same staging/promotion operation, while a missing or invalid marker
+atomically moves the Run to `failed`/`release_requested` and cleanup. This is
+application behavior with focused service tests, not SQL migration behavior.
+
+The data part updates only rows whose system kind and complete legacy
+Alert/notification title/body exactly match the enumerated old generated
+strings, replacing those strings with canonical Sandbox terminology. It
+performs no substring or fuzzy replacement and never rewrites user-authored or
+non-matching content.
+
+That migration does not rename other private SQL columns or persisted enum
 values. Those may retain old storage names, but only the adapter may project
 them outward to canonical domain/public names. Application and Web code never
-accept, emit, branch on, or map back from a public legacy alias. The Slice 1
-copy migration and the Slice 3 File Library lifecycle migration are two
-separate, independently focused forward migrations.
+accept, emit, branch on, or map back from a public legacy alias. The focused
+Slice 1 startup-readiness/action-deadline/generated-copy migration `074` and
+the Slice 3 File Library lifecycle migration are two separate forward
+migrations.
 
 Audit behavior:
 
@@ -981,10 +1148,12 @@ must not substitute for the hierarchy corrections here.
 
 Keep the existing atomic Task mutation boundaries:
 
-- initial Task creation reserves one Run;
-- released-Task message creation reserves one Run and creates the message in
-  the same transaction;
-- released-Task Terminal start commits one Run reservation before fenced
+- initial `AtomicTaskCreate` writes the Task, Library creation/binding, Run with
+  `startupReadyAt: null`, initial message, and initial interaction in its
+  admission transaction;
+- released-Task `AtomicTaskMessage` writes the ready Run, message, initial
+  interaction, and fixed accepted receipt in one transaction;
+- released-Task Terminal start commits one ready Run reservation before fenced
   Kubernetes/Botified startup and before WebSocket transport.
 
 Move namespace admission out of the current Task-create-only preflight. Pass
@@ -1022,12 +1191,13 @@ namespace advisory lock
 - Any startup failure moves the Run through `failed` and
   `release_requested`; neither transition changes capacity or the absolute
   usage projection, and neither takes the namespace advisory lock.
-- Cleanup must positively confirm that the fenced Kubernetes/Botified resource
-  is absent. Only then does release finalization take namespace -> Project ->
-  policy/usage -> Task -> Run -> Library -> writes, confirm that exact Run
-  `released`, recompute both authoritative counts, and write the absolute
-  Project usage projection in the same transaction. Failed or pending cleanup
-  cannot free capacity by changing a counter or presentation.
+- Cleanup must obey the external-action deadline protocol below and positively
+  confirm that all app-owned Kubernetes/Botified resources are absent. Only
+  then does release finalization take namespace -> Project -> policy/usage ->
+  Task -> Run -> Library -> writes, confirm that exact Run `released`,
+  recompute both authoritative counts, and write the absolute Project usage
+  projection in the same transaction. Failed or pending cleanup cannot free
+  capacity by changing a counter or presentation.
 - count every Run with `state != released`, not only `active` Runs;
 - evaluate Project policy before namespace saturation in the locked snapshot,
   so simultaneous saturation deterministically returns Project rejection;
@@ -1045,24 +1215,180 @@ namespace advisory lock
 No Store or service API exposes a raw unreleased-Run insert. Tests and seed
 helpers that exercise production behavior also enter through admission. The
 adapter keeps unreleased-Run insertion private to the admission transaction
-and rejects every call without that transaction's admission guard; the narrow
-Slice 1 copy data migration adds no Run schema path or bypass.
+and rejects every call without that transaction's admission guard.
+
+Focused Slice 1 migration `074` adds nullable
+`sandbox_runs.startup_ready_at` and
+`sandbox_runs.startup_action_deadline_at`, and performs the exact
+generated-copy updates in section 6.5. It backfills existing `active` Runs
+ready from database state and leaves existing `starting` Runs null. SQL does
+not inspect the filesystem or transition starting Runs.
+
+On application startup, the startup-recovery reconciler passes each legacy
+null-ready `starting` Run to the preparation-recovery service. That service
+uses the descriptor-safe marker contract: an exact marker resumes the same
+staging/promotion operation; a missing or invalid marker atomically records
+`failed`/`release_requested` and hands the Run to cleanup. Cleanup remains
+independent of startup readiness.
+
+Task-create filesystem work is operation-owned:
+
+- open and validate the Project storage root, then create only
+  `.preparations/<taskId>` through a descriptor-safe FD walk;
+- prove the staging root is on the destination volume and outside every
+  Library root and Sandbox mount before writing;
+- create and later verify the operation marker through that FD walk;
+- after admission, descriptor-walk both staging and the admitted Library
+  destination, then promote only the marker-matched operation's content
+  without following symlinks or overwriting a different operation's workspace;
+- atomically mark startup ready only when `taskId`, `runId`, and
+  `fencingToken` still identify the Task's current reserved Run;
+- same-key retry reopens that same marker-matched staging root and resumes the
+  same promote/ready sequence. It never creates a successor staging root,
+  Task, interaction, Run, or Library binding.
 
 The idempotency row owns the canonical request result for all three entry
 points. Capacity rejection snapshots and serializes the section 6.1 envelope
 once; same-key replay cannot recalculate its count, limit, message, or
 presentation. Explicit Retry uses a new key.
 
-For Terminal, commit the reserved `starting` Run and operation fence first.
-Start Kubernetes/Botified outside every database transaction. A competing or
-stale caller cannot start or activate a Run without the matching fence.
-Confirmation of `active` uses the shared object order without namespace.
-Startup failure persists `failed`/`release_requested` and its
-failed/pending-cleanup presentation without changing usage. Same-key callers
-observe HTTP 202 `in_progress` until they converge on the stored HTTP 200
+One Store startup-claim operation is mandatory for every runtime path:
+
+```ts
+type SandboxStartupClaimResult =
+  | { kind: "not_ready"; runId: string }
+  | { kind: "in_progress"; runId: string }
+  | { kind: "claimed"; runId: string; claim: string }
+  | { kind: "stale" };
+```
+
+Inside one Store transaction it locks the applicable Project -> Task -> Run,
+then requires the exact current Run, `state == starting`, matching operation
+and fence, and non-null `startupReadyAt` before returning `claimed`. A null
+readiness value returns `not_ready` for that persisted Run. `not_ready` is
+ordinary in-progress state: it writes no failure, cleanup request, Audit,
+Alert, interaction transition, claim lease, or resource record.
+
+The five-second runtime tick, direct service startup, message dispatcher, and
+every Kubernetes/Botified `create_resource`/`adopt_resource` startup path must
+use that Store claim before external startup work. One successful claim remains
+bound to the same operation/Run/fence across the complete Kubernetes
+apply/create/adopt phase and the subsequent Botified readiness phase.
+Kubernetes resources becoming started is not an intermediate Run confirmation:
+the service must not clear, replace, or surrender the startup claim, confirm
+the Run, or expose success at that boundary. Only final Botified-ready
+confirmation may atomically set the Run `active` and terminate the claim; a
+definitive startup error may terminate it only in the same transaction that
+records canonical failure. None may check readiness in memory or call
+`create_resource`/`adopt_resource` after a `not_ready` result.
+
+The message dispatcher specifically leaves the initial or accepted interaction
+pending and neither claims nor dispatches it until the associated Run is ready.
+Its claim query also requires the message's persisted interaction; it can never
+observe or dispatch a ready initial message without that interaction because
+`AtomicTaskCreate` wrote both in the admission transaction.
+
+Cleanup/release reconciliation is not a startup path and must not require
+`startupReadyAt`. It can claim and remove residual resources, confirm resource
+absence, and finalize release for a Run whose readiness is null, subject to the
+action-deadline drain rule below. The readiness gate can never block cleanup of
+failed, release-requested, cancelled, expired, or otherwise app-owned residual
+Run resources.
+
+#### Single-control-plane startup execution
+
+This milestone deploys the AgentSmith API with `replicas: 1` and Kubernetes
+Deployment `strategy.type: Recreate`. The checked-in manifest and every local
+deployment configuration keep those values fixed; no value, patch, or rollout
+path may run old and new AgentSmith API control-plane processes concurrently.
+The old Pod must terminate before the new Pod starts. Multi-replica control
+plane behavior remains a non-goal.
+
+The one API process owns:
+
+```ts
+startupOperationsByRunId: Map<string, Promise<StartupResult>>;
+```
+
+The first same-Run caller installs the Promise before beginning external
+startup work. Until it settles, every additional same-process same-Run caller
+reports only `in_progress`. It does not acquire or take over a database lease
+and cannot issue another external action. The owner resolves the Promise, and
+the entry is removed only in its `finally` path.
+
+Each external startup action has its own deadline cycle. Before a Kubernetes
+`create_resource`/`adopt_resource` apply action, and separately before the
+bounded Botified readiness action, a short Store transaction compare-and-sets
+the exact current operation/claim/fence/resource identity and persists a fresh
+future `startupActionDeadlineAt`. The CAS fails when another unexpired action
+deadline exists. Each adapter call has a server/request hard deadline no later
+than its persisted timestamp; Botified readiness cannot reuse the completed
+Kubernetes action's deadline or wait without a bounded persisted deadline.
+
+After a normally completed Kubernetes action, a short identity-checked
+transaction clears that action's `startupActionDeadlineAt` and records the
+resource/next phase while retaining the same startup claim/fence. It does not
+confirm the Run `active`. The Botified readiness action then sets its own
+deadline. Its successful completion atomically clears that deadline, records
+the Run `active`, and terminates the claim. A definitive external failure
+atomically clears the applicable deadline only while recording canonical
+`failed`/`release_requested` state and terminating the claim.
+
+A timeout, connection loss, process crash, or otherwise unknown external
+result clears neither `startupActionDeadlineAt` nor the startup claim. Both
+remain durable until the deadline expires and the drain/cleanup protocol below
+has removed and re-listed all app-owned resources. Kubernetes/Botified I/O
+never occurs inside the short Store transactions.
+
+Process recovery and release obey one drain rule:
+
+1. while `startupActionDeadlineAt` is non-null and unexpired, wait; do not
+   cleanup, finalize release, or take over the database startup lease;
+2. after the deadline, cleanup every app-owned resource associated with that
+   Project/Task/Run, including any recorded or duplicate resource identity;
+3. list again through Kubernetes/Botified using app ownership identity and
+   require an empty result;
+4. clear the drained deadline in a short identity-checked transaction;
+5. only then may an identity-checked atomic failure terminate the old claim,
+   release finalize, or crash recovery acquire a newly fenced database lease
+   for that same Run.
+
+The database lease is crash recovery only. Takeover requires both a drained
+null action deadline and no local `startupOperationsByRunId` entry. Recreate
+deployment guarantees the old API process cannot later issue a new action;
+the persisted deadline and adapter hard deadline bound an already-issued
+request. Do not add startup generations, rotating startup credentials,
+webhooks, leader election, or another coordination mechanism.
+
+For Terminal, `beginTerminalStart` is the sole Store entry. Its one transaction
+validates the idempotency hash, binds the operation to one persisted Run, and
+either exactly replays a completed receipt or converges an incomplete
+operation from that bound Run's current state. Only `starting` writes/returns
+HTTP 202 `in_progress`, always with the persisted `runId`; null readiness means
+preparing and Terminal never marks it ready. `active` writes/returns the fixed
+HTTP 200 receipt. `failed` or `release_requested` writes/returns the fixed
+canonical failure receipt. `released` replays an already stored receipt or
+writes/returns an explicit lifecycle failure and never restarts or reserves
+for that same operation. Only a genuinely new operation against a released
+Task may perform admission and atomically bind a new ready reservation.
+After commit, one startup-claim transaction precedes the complete
+Kubernetes-to-Botified sequence, and a separate action-deadline transaction
+precedes each bounded external action. All external work remains outside the
+transactions. The Terminal path retains the same claim after Kubernetes
+resources start and may confirm `active` only after Botified readiness. Crash
+recovery may acquire a new fenced claim for the same Run only after deadline
+drain and absence of a same-process Promise.
+
+Terminal active confirmation uses the shared object order without namespace.
+Terminal failure completion is one transaction and validates operation ID,
+request hash, current claim/fence, Project, Task, Run, Task current Run, and
+resource identity before persisting `failed`/`release_requested` plus its
+canonical idempotency result. A stale completion changes nothing. Same-key
+callers observe HTTP 202 `in_progress` with the persisted `runId` only while
+the bound Run remains `starting`; they then converge on the stored HTTP 200
 active result or canonical failure. That failure replay remains the stored
 pending-cleanup presentation even if a later GET observes completed release.
-Only confirmed active returns command success. The existing Terminal WebSocket
+Only confirmed active returns command success; the existing Terminal WebSocket
 then connects as pure authenticated transport.
 
 ### 7.2 Recursive deletion engine
@@ -1236,16 +1562,15 @@ Database foreign keys and the exclusive binding constraint remain intact.
 Archived Tasks retain binding. Soft-deleted Task tombstones retain it until
 successful purge; only purge releases the binding.
 
-Task creation must not mutate an existing Library workspace before the atomic
-bind succeeds. After the Store admits the Task and binds an `active` Library,
-the service ensures required directories through the shared safe Library path
-API. Any post-bind preparation failure uses the existing deterministic Task
-creation recovery for that same Task identity; it never leaves an unbound
-filesystem preparation that can race Library deletion.
-
-The create-new-Library candidate directory in section 6.1 is not yet an
-existing or projected Library. It remains invisible and unbindable until
-admission succeeds; rejection compensation removes only that candidate.
+Before admission, every Task create writes only its operation-owned
+`.preparations/<taskId>` staging root; it never mutates an existing Library
+workspace. A create-new Library is likewise not projected or bindable from
+that staging path. After the Store admits the Task and binds an `active`
+Library, the service descriptor-safely promotes the same staging content into
+the canonical workspace, then marks only that Run startup-ready. Promotion
+failure leaves the admitted operation recoverable under the same Task/Run
+identity and keeps `startupReadyAt: null`; it cannot race Library deletion,
+become a second Library, or expose a partial workspace to a Sandbox.
 
 ### 7.4 One Library path boundary
 
@@ -1275,6 +1600,10 @@ Files routes cannot list or mutate the internal projection directory.
   capabilities; atomic mutation responses own Sandbox admission results.
 - Run rows with `state != released` own capacity truth; the Project usage row is
   a server-only absolute projection and is never admission input.
+- `startupReadyAt`, `startupActionDeadlineAt`, and `not_ready` are internal
+  startup coordination. The Web receives the existing starting/progress
+  presentation, not another public capability, lifecycle state, deadline, or
+  error.
 - URL owns selected Library and current folder.
 - Files browser state owns selected entry, local filter/sort, and presentation
   page.
@@ -1355,6 +1684,25 @@ Deliver:
 - one atomic Project/namespace admission path for all cold starts;
 - unreleased Run-row counting, absolute same-transaction Project usage
   projection, and no bypass path for unreleased Run creation;
+- operation-owned Task-create staging at Project
+  `.preparations/<taskId>`, outside every Library root/Sandbox mount, with
+  descriptor-safe same-volume promotion;
+- nullable persisted Run `startupReadyAt`: null for initial Task-create
+  reservation, exact-transitioned after promotion, and ready in released-Task
+  message/Terminal restart reservation;
+- one `AtomicTaskCreate` admission write set containing Task, Library
+  creation/binding, reserved Run, initial message, and initial interaction;
+  dispatcher-visible initial message without its interaction is impossible;
+- nullable persisted `startupActionDeadlineAt`, independently set by CAS for
+  each Kubernetes apply/adopt action and bounded Botified readiness action;
+  normal completion clears that action's deadline, while timeout/unknown
+  completion retains it through deadline drain and cleanup;
+- one transactional ready-gated startup claim used by runtime tick, direct
+  startup, message dispatch, and all Kubernetes/Botified
+  `create_resource`/`adopt_resource` plus readiness paths; the claim spans the
+  entire apply-to-readiness sequence and ends only with final `active` or
+  atomic failure, while `not_ready` remains side-effect-free in-progress and
+  never gates cleanup/release reconciliation;
 - namespace -> Project object order only for admission/release finalization,
   plus Project -> policy -> usage serialization for Sandbox-limit update with
   no namespace lock;
@@ -1363,8 +1711,20 @@ Deliver:
   success, same-Run in-progress/convergence, capacity-holding
   failed/release-requested cleanup, canonical pending-cleanup failure replay,
   and transport-only WebSocket;
+- one Terminal-specific Store transaction binding an operation to one Run:
+  only `starting` returns HTTP 202 with persistent `runId`, `active` fixes HTTP
+  200, `failed`/`release_requested` fix failure, and `released` replays or
+  fixes failure without restarting that operation; only a new operation may
+  admit/reserve from a released Task, and crash-only same-Run fenced lease
+  recovery follows deadline drain;
+- one-process `startupOperationsByRunId` Promise ownership, with unsettled
+  same-Run calls returning only in-progress and no lease takeover;
+- one-replica AgentSmith API deployment using `Recreate`, with manifests and
+  configuration forbidding old/new control-plane overlap;
 - accepted released-message behavior in which post-admission startup failure is
   durable Run/interaction state and never a `sandbox_start_failed` request;
+- `AtomicTaskMessage` transactionally writing the ready Run, message, initial
+  interaction, and fixed accepted receipt together;
 - always-selectable Terminal peer view, one command-only `openTerminal`
   capability, and `sandboxState`-driven static surfaces;
 - user-and-Task-scoped draft, history/validated-return URL peer view, and
@@ -1375,8 +1735,11 @@ Deliver:
 - public `sandboxLimit`/`activeSandboxes`, Alert
   `sandbox_capacity`/`active_sandboxes`, and no public aliases;
 - adapter-only outward mapping for retained private SQL/Alert legacy values;
-- one narrow forward data migration for exact matching, system-generated
-  legacy Alert/notification title/body copy;
+- focused Slice 1 migration `074` adding `startup_ready_at` and
+  `startup_action_deadline_at`, backfilling old active Runs ready solely from
+  database lifecycle fact, leaving old starting Runs null, and updating exact
+  generated Alert/notification copy; application startup reconciliation, not
+  SQL, owns marker validation and old starting-Run recovery/failure cleanup;
 - trigger-correct, idempotently deduplicated rejection Audit, with no
   count/limit or Project Alert for substrate rejection;
 - create rejection with no admitted business state; pre-admission directory
@@ -1389,23 +1752,35 @@ Implementation/commit order:
 
 1. Write the focused failing Store/contract tests for all three entry points,
    Project-first simultaneous saturation, mixed races, replay, lock-sensitive
-   finalization/policy updates, and absolute projections.
-2. Implement one Store admission path, unreleased-Run guard, capacity-writer
-   lock orders, release finalization, namespace-free Sandbox-limit update,
-   canonical envelope, idempotency, and Audit/Alert rules until those tests
-   pass.
-3. Write failing Terminal service/API tests, then implement committed
-   reservation, fenced out-of-transaction startup, same-Run convergence,
-   active confirmation, failed/release-requested cleanup, exact
-   pending-cleanup failure replay, accepted-message failure state, and pure
+   finalization/policy updates, atomic initial message/interaction creation,
+   startup readiness/claim lifetime/action deadlines, runtime-tick pickup, and
+   absolute projections.
+2. Add focused Slice 1 migration `074` for nullable `startup_ready_at`,
+   nullable `startup_action_deadline_at`, active-Run readiness backfill,
+   leaving existing starting Runs null, and exact generated copy.
+3. Implement descriptor-safe Project `.preparations/<taskId>` staging,
+   operation marker, same-volume promotion, capacity-rejection cleanup,
+   same-operation recovery, the application startup reconciler and
+   preparation-recovery service for old starting Runs, ready-gated startup
+   claim, `AtomicTaskCreate`, and message/interaction dispatch gating.
+4. Write failing Terminal service/API tests, then implement the dedicated
+   atomic Store begin method, ready restart reservation, preparing behavior for
+   null-ready starting Runs, `startupOperationsByRunId`, action-deadline CAS,
+   bounded Kubernetes apply plus independently bounded Botified readiness under
+   one continuous claim, crash-only lease recovery, active confirmation,
+   failed/release-requested cleanup, exact pending-cleanup replay, and pure
    WebSocket transport.
-4. Add the narrow Slice 1 forward copy migration for exact matching generated
-   Alert/notification rows; keep private enum/column mappings adapter-only.
-5. Write failing Web/client tests for envelope mapping, snapshot-only draft
+5. Implement the remaining admission lock orders, release finalization,
+   deadline drain/list-empty cleanup, namespace-free Sandbox-limit update,
+   canonical envelope, `AtomicTaskMessage`, idempotency, Audit/Alert rules, and
+   adapter-only private enum/column mappings.
+6. Set the AgentSmith API manifest to one replica and `Recreate`; remove or
+   reject every configuration path that could overlap control-plane instances.
+7. Write failing Web/client tests for envelope mapping, snapshot-only draft
    ceiling, always-selectable Terminal surfaces, scoped URL view, `returnTo`,
    and public names; then implement message/Terminal/create recovery and
    continuity.
-6. Delete replaced serializers, old public aliases, WebSocket admission, and
+8. Delete replaced serializers, old public aliases, WebSocket admission, and
    duplicated released-state/capacity copy.
 
 Primary modules:
@@ -1425,6 +1800,7 @@ Primary modules:
 - `src/components/resources/UsageView.tsx`
 - `src/components/resources/ResourcePolicyPage.tsx`
 - `src/components/alerts/*`
+- AgentSmith API Deployment manifests and local deployment configuration
 
 Focused checks:
 
@@ -1443,6 +1819,34 @@ Focused checks:
   commit;
 - active Task messaging consumes no new slot; no production path can insert an
   unreleased Run outside admission;
+- initial Task-create reservation persists `startupReadyAt: null`; released
+  message/Terminal restart reservation is ready because it reuses the promoted
+  workspace; a mismatched Task, Run, or fence cannot ready the initial Run;
+- `AtomicTaskCreate` admission writes the Task, Library creation/binding,
+  reserved Run, initial message, and initial interaction in one transaction;
+  rollback removes the whole write set and dispatcher observation can never
+  split the message from its interaction;
+- before Task-create admission, all writes stay under the operation-owned
+  Project `.preparations/<taskId>` root, outside every Library root and Sandbox
+  mount; preparation failure returns its own error;
+- capacity rejection removes only that staging root; cleanup failure preserves
+  the exact capacity envelope and any remnant remains invisible/unbindable;
+- the five-second runtime tick, message dispatcher, direct startup, and every
+  Kubernetes/Botified `create_resource`/`adopt_resource` startup path return
+  `not_ready` or in-progress before promotion, create no startup
+  resource/claim/failure, and leave the interaction pending;
+- cleanup/release reconciliation ignores startup readiness and can remove
+  residual resources plus finalize a Run whose `startupReadyAt` is null;
+- descriptor-safe same-volume promotion followed by the exact
+  `taskId`/`runId`/`fencingToken` transaction is the only transition to ready;
+  only then can one startup claim succeed;
+- that claim remains current across Kubernetes apply/create/adopt and Botified
+  readiness; a Kubernetes-started resource cannot cause intermediate active
+  confirmation or claim release, and only atomic final `active` or failure
+  ends the claim;
+- same-key Task-create retry resumes the marker-matched staging root,
+  promotion, Task, interaction, and Run; it cannot reserve or promote a
+  successor;
 - create rejection persists only exact idempotency plus one deduplicated
   rejected Audit; directory preparation failure before admission returns its
   own error, while failed compensation after a decided capacity rejection
@@ -1454,9 +1858,33 @@ Focused checks:
   active, failure enters failed/release_requested and returns exact
   pending-cleanup replay, capacity remains held until confirmed resource
   absence and release finalization, and no pre-success WebSocket mounts;
+- Terminal idempotency begin/replay and bound-Run convergence are one Store
+  transaction: only `starting` returns HTTP 202 with its persisted `runId`,
+  `active` fixes HTTP 200, `failed`/`release_requested` fix canonical failure,
+  and `released` replays its stored receipt or fixes explicit failure without
+  restarting that operation; only a new operation may admit/reserve from a
+  released Task, and a starting/null-ready Run remains preparing without a
+  Terminal ready write;
+- while `startupOperationsByRunId` holds an unsettled Promise, same-Run calls
+  return only in-progress and neither take over the lease nor issue another
+  external action;
+- before each Kubernetes `create_resource`/`adopt_resource` action and the
+  separate Botified readiness action, Store CAS persists matching claim/fence
+  and a fresh `startupActionDeadlineAt`; adapter hard deadlines do not exceed
+  the applicable timestamp, normal completion clears that action's deadline
+  without dropping the claim, and timeout/unknown completion retains both
+  through deadline drain and cleanup;
+- process recovery/release waits out an unexpired action deadline, then cleans
+  all app-owned resources and re-lists empty before clearing the deadline;
+  crash-only lease takeover requires the drained deadline and no local Promise;
+- Terminal failure completion changes state only when operation, `requestHash`,
+  claim/fence, Project, Task, Run, Task current Run, and resource identity all
+  match; every stale mismatch is a no-op/error;
 - released-message admission persists the message before startup; later
-  startup failure appears only in Run/interaction state and never returns or
-  stores a message `sandbox_start_failed` envelope;
+  readiness/startup/dispatch failure appears only in Run/interaction state and
+  never changes the fixed accepted HTTP receipt/replay or stores a message
+  `sandbox_start_failed` envelope; Run, message, initial interaction, and that
+  receipt are one `AtomicTaskMessage` transaction;
 - every retryable Slice 1 failure has exactly
   `{error:{code,message,retryable:true,details,presentation}}`, with the
   required nullability and no legacy envelope/serializer;
@@ -1474,24 +1902,38 @@ Focused checks:
 - API/Web payload assertions contain only `sandboxLimit`, `activeSandboxes`,
   `sandbox_capacity`, and `active_sandboxes`; old public names are rejected and
   retained private storage names are adapter-confined;
-- the Slice 1 data migration rewrites only exact system-generated legacy
-  Alert/notification title/body pairs, leaves near matches and user-authored
-  rows untouched, and is distinct from the Slice 3 lifecycle migration.
+- migration `074` only adds nullable `startup_ready_at` and
+  `startup_action_deadline_at`, backfills existing active Runs ready from
+  database lifecycle fact, leaves existing starting Runs null, and rewrites
+  only exact generated Alert/notification copy; the application startup
+  reconciler and its preparation-recovery service validate markers, resume a
+  matching old starting Run, or move a missing/invalid-marker Run to
+  failure/cleanup, and Slice 3 retains its distinct lifecycle migration;
+- deployment assertions require exactly one AgentSmith API replica,
+  `strategy.type: Recreate`, no old/new Pod overlap, and no generation,
+  credential, webhook, or multi-controller mechanism.
 
 Slice completion:
 
 - all three entries share one admission authority and exact replay behavior;
 - Run rows, not usage projection, decide capacity; release and policy updates
   use their specified separate lock orders;
+- no startup-capable path can outrun Task-create promotion because every claim
+  requires persisted readiness in its Store transaction;
+- Task-create retry converges on its marker-matched staging/Run identity;
+- same-process startup converges through one Promise, while database lease
+  recovery occurs only after crash, deadline drain, and local-operation
+  absence;
+- single-replica Recreate deployment prevents control-plane process overlap;
 - Terminal start is fenced outside the transaction and the WebSocket is pure
   transport; failed cleanup remains capacity-holding and is never presented as
   released;
 - no retained public contract calls Sandbox allocation `active Task capacity`,
   and substrate saturation has no count/limit, Project-policy link, or Project
   Alert;
-- Slice 1 adds one narrow generated-copy data migration while private legacy
-  enum/column values remain adapter-confined; Slice 3 retains its separate
-  forward Library lifecycle migration.
+- Slice 1 migration `074` adds startup readiness/action deadline plus generated
+  copy while private legacy enum/column values remain adapter-confined; Slice 3
+  retains its separate forward Library lifecycle migration.
 
 ### Slice 2: File and folder object behavior
 
@@ -1679,10 +2121,14 @@ Slice completion:
 
 Use the existing local single-node K8s deployment and real configured
 OpenAI-compatible endpoint. Work serially and fix observed defects in place.
+The AgentSmith API Deployment has exactly one replica and
+`strategy.type: Recreate`; redeploy must terminate the old API Pod before
+starting the new one.
 
 Product path:
 
-1. OIDC login and Project open.
+1. Deploy/redeploy and confirm one AgentSmith API Pod, Recreate strategy, and no
+   old/new control-plane overlap; then complete OIDC login and Project open.
 2. Inspect and change Sandbox capacity.
 3. Fill capacity, open a released Task, preserve a draft, and observe the
    blocked message and Terminal treatment.
@@ -1704,6 +2150,8 @@ runner.
 
 Slice completion:
 
+- the AgentSmith API manifest/configuration permits exactly one replica and a
+  non-overlapping Recreate rollout;
 - the real path produces the user outcomes in section 3;
 - defects found on this exact path are corrected in their owning code;
 - no unrelated feature expansion or governance artifact is left behind.
@@ -1722,18 +2170,69 @@ the same Slice. Slice 1 coverage is mandatory and remains serial:
   Project-serialized namespace-free policy update, authoritative
   unreleased-Run counts, absolute usage projection, and rejection of every
   unreleased-Run bypass;
+- startup-readiness Store tests prove initial Task create starts null, released
+  message/Terminal restart reserves ready, only the exact Task/Run/fence can
+  ready a prepared initial Run, `not_ready` has no startup side effects, and
+  runtime tick, dispatcher, direct startup, and every Kubernetes/Botified
+  `create_resource`/`adopt_resource` startup path share the transactional gate;
+- `AtomicTaskCreate` Store/concurrency tests prove admission commits or rolls
+  back Task, Library creation/binding, Run, initial message, and initial
+  interaction together; even when readiness changes concurrently, dispatcher
+  queries never observe a ready initial message without its interaction;
+- cleanup/release tests prove reconciliation can claim residual cleanup,
+  confirm resource absence, and finalize release when
+  `startupReadyAt: null`;
+- Task-create service tests prove pre-admission writes are confined to the
+  descriptor-safe FD-walked Project `.preparations/<taskId>` root outside all
+  Library roots and Sandbox mounts; exact operation marker and same-volume
+  promotion precede ready, and the five-second tick cannot claim the initial
+  pending interaction before it;
 - idempotency tests cover exact same-key capacity/error replay, deduplicated
   rejected Audit, explicit new-key Retry, Terminal in-progress/same-Run
-  convergence, failed/pending-cleanup startup replay, pre-admission directory
-  errors, and invisible/unbindable post-rejection cleanup remnants;
+  convergence, failed/pending-cleanup startup replay, same-staging Task-create
+  recovery, pre-admission preparation errors, and
+  invisible/unbindable post-rejection cleanup remnants;
 - Terminal service/API tests prove reservation commit precedes one fenced K8s
   start outside the transaction, success follows active confirmation, failure
   remains capacity-holding through `failed`/`release_requested`, release waits
   for confirmed resource absence, failure replay never claims released, and
   WebSocket transport never admits or starts;
-- released-message tests prove admission accepts and persists the message, and
-  any later startup failure is durable Run/interaction state rather than
-  `sandbox_start_failed`;
+- Terminal Store tests prove begin/hash/replay and bound-Run state convergence
+  are one transaction: only `starting` writes HTTP 202 with a persisted
+  `runId`; `active` writes the fixed HTTP 200 receipt;
+  `failed`/`release_requested` write the fixed canonical failure receipt; and
+  `released` replays its stored receipt or writes explicit failure without
+  reserving/restarting that operation. A new operation may reserve ready from
+  a released Task, while a starting/null-ready Run remains preparing without a
+  Terminal ready write;
+- in-process startup tests prove `startupOperationsByRunId` installs one shared
+  Promise, every additional same-Run caller returns only `in_progress`, no
+  same-process lease takeover or second external action occurs, and `finally`
+  removes the settled entry;
+- startup-claim lifecycle tests prove one operation/Run/fence claim remains
+  held through Kubernetes apply/create/adopt and independently bounded
+  Botified readiness; Kubernetes resources reaching started cannot confirm
+  active or clear the claim, and only an identity-checked final `active` or
+  atomic `failed`/`release_requested` transaction terminates it;
+- action-deadline tests prove Store CAS persists matching claim/fence plus
+  a fresh `startupActionDeadlineAt` before each Kubernetes
+  `create_resource`/`adopt_resource` action and separately before Botified
+  readiness; each adapter request/server deadline never exceeds its own
+  persisted value, normal completion clears only that action deadline while
+  preserving the claim between phases, and readiness success atomically clears
+  its deadline, records `active`, and ends the claim;
+- recovery/release tests prove an unexpired action deadline causes waiting with
+  no cleanup/finalize/takeover and timeout/unknown completion clears neither
+  deadline nor claim; after expiry all app-owned resources are cleaned and
+  re-listed empty before deadline drain, atomic failure/claim termination,
+  release, or crash-only same-Run lease recovery with no local Promise;
+- Terminal failure-completion tests independently mismatch operation,
+  `requestHash`, claim/fence, Project, Task, Run, current Run, and resource
+  identity and prove each stale completion leaves all state unchanged;
+- released-message tests prove `AtomicTaskMessage` writes the ready Run,
+  message, initial interaction, and fixed accepted receipt in one transaction,
+  and any later startup/dispatch failure is durable Run/interaction state
+  rather than `sandbox_start_failed` or a changed HTTP/idempotency receipt;
 - API contract tests assert the sole error envelope and its exact Project,
   substrate, create, message, and Terminal nullability, canonical message, and
   presentation rules;
@@ -1745,9 +2244,20 @@ the same Slice. Slice 1 coverage is mandatory and remains serial:
 - public-contract tests permit only `sandboxLimit`, `activeSandboxes`,
   `sandbox_capacity`, and `active_sandboxes`, and prove private old
   SQL/Alert values cannot escape the adapter;
-- Slice 1 migration tests update only exact system-generated legacy
-  Alert/notification title/body pairs and preserve near matches, user-authored
-  copy, private enums, and private column names;
+- Slice 1 migration `074` tests add nullable `startup_ready_at` and
+  `startup_action_deadline_at`, backfill existing active Runs ready solely from
+  database lifecycle fact, leave existing starting Runs null, update only
+  exact generated Alert/notification copy, and preserve near matches,
+  user-authored copy, private enums, and other private column names; they
+  perform no filesystem or marker assertion;
+- application startup reconciler service tests prove exact marker validation
+  resumes the same old starting Run and staging/promotion operation, while a
+  missing or invalid marker atomically records
+  `failed`/`release_requested` and hands cleanup an ungated null-ready Run;
+- deployment tests/assertions prove the AgentSmith API manifest has
+  `replicas: 1` and `strategy.type: Recreate`, configuration cannot overlap old
+  and new control-plane Pods, and no generation/credential/webhook mechanism
+  is introduced;
 - Store tests also cover atomic capacity and Library-binding races;
 - service tests for Task cold-start, Project/namespace admission, recursive
   deletion, descriptor-anchored symlink/parent replacement resistance,
@@ -1776,9 +2286,12 @@ the local cluster needed for the current product path.
 
 The development team delivers:
 
-- final API contract and the narrow Slice 1 forward migration for exact
-  system-generated legacy Alert/notification title/body copy, while private
-  Alert/storage enum and column names remain adapter-mapped;
+- final API contract and focused Slice 1 migration `074` adding nullable
+  `sandbox_runs.startup_ready_at` and
+  `sandbox_runs.startup_action_deadline_at`, database-fact active-Run
+  readiness backfill, unchanged null readiness for old starting Runs, and
+  exact generated Alert/notification updates, while private Alert/storage enum
+  and other column names remain adapter-mapped;
 - the distinct Slice 3 forward File Library `active | deleting` lifecycle
   migration; these are two focused migrations, not one combined or
   ambiguously named migration;
@@ -1786,11 +2299,39 @@ The development team delivers:
 - Run-row capacity authority, absolute usage projection, capacity-writer lock
   order for admission/release finalization, namespace-free Project-serialized
   Sandbox-limit updates, exact rejection replay, and no unreleased-Run bypass;
+- operation-owned Project `.preparations/<taskId>` staging, descriptor-safe
+  FD walk and operation marker, same-volume workspace promotion, exact fenced
+  ready transition, and same-staging/Run recovery;
+- `AtomicTaskCreate` admission that writes Task, Library creation/binding,
+  reserved Run, initial message, and initial interaction together, plus a
+  dispatcher contract that cannot expose a ready message without interaction;
+- an application startup reconciler plus preparation-recovery service that
+  validates old starting-Run markers, resumes only an exact operation match,
+  and sends missing/invalid-marker Runs to failed/release cleanup;
+- one transactional startup-ready claim required by runtime tick, dispatcher,
+  direct startup, and every Kubernetes/Botified apply/adopt/readiness startup
+  path; it remains held from Kubernetes work through final Botified readiness
+  and ends only at atomic `active` or failure, without gating cleanup/release
+  reconciliation;
+- one-process `startupOperationsByRunId` Promise ownership and persisted
+  action-deadline CAS independently around every external Kubernetes
+  `create_resource`/`adopt_resource` action and bounded Botified readiness
+  action, with adapter hard deadlines, normal per-action clearing, and
+  unknown-result deadline-drained cleanup/re-list before release or crash
+  recovery;
+- exactly one AgentSmith API replica with Recreate deployment and no
+  configuration path for overlapping control-plane processes;
 - fenced transaction-free Terminal startup with active-only success,
   capacity-holding failed/pending cleanup, exact non-released failure replay,
   and a pure transport WebSocket;
-- accepted released-message startup failure represented by durable
-  Run/interaction state rather than a Terminal error;
+- one Terminal Store begin transaction with bound-Run convergence: only
+  `starting` produces in-progress with persistent `runId`, `active` fixes HTTP
+  200, `failed`/`release_requested` fix failure, and `released` replays or
+  fixes failure without restarting that operation; plus preparing behavior for
+  a starting/null-ready Run, crash-only deadline-drained same-Run lease
+  recovery, and full-identity atomic failure completion;
+- `AtomicTaskMessage` transactionally fixed accepted receipt, with later
+  startup/dispatch failure represented only by durable Run/interaction state;
 - one error envelope plus coherent message, Terminal, Usage, Policy, Alert, and
   Audit behavior using only canonical public Sandbox names;
 - user-and-Task-scoped draft with snapshot-only byte ceiling,
@@ -1837,15 +2378,74 @@ The milestone is complete only when all of the following are true:
   order;
 - same-key capacity rejection exactly replays its original canonical envelope;
   explicit Retry uses a new key;
+- Task create writes before admission only to its operation-owned,
+  Project-contained `.preparations/<taskId>` root outside all Library roots and
+  Sandbox mounts; descriptor-safe FD walk and the exact operation marker guard
+  every prepare/recovery/promote, preparation failure returns its own error,
+  and capacity-rejection cleanup failure cannot replace the canonical envelope
+  or expose/bind the remnant;
+- initial Task-create reservation starts with `startupReadyAt: null`; released
+  message/Terminal restart reservation is ready because the canonical
+  workspace was already promoted; only descriptor-safe same-volume promotion
+  followed by an exact
+  `taskId`/`runId`/`fencingToken` Store transaction makes a Task-create Run
+  ready;
+- `AtomicTaskCreate` admission atomically writes the Task, Library
+  creation/binding, reserved Run, initial message, and initial interaction;
+  rollback leaves none of them, and dispatcher can never observe a ready
+  initial message without its interaction;
+- the five-second runtime tick, message dispatcher, direct startup, and every
+  Kubernetes/Botified `create_resource`/`adopt_resource` startup path
+  transactionally require readiness; `not_ready` is in-progress, creates no
+  startup resource/claim/failure, and leaves pending interactions undispatched;
+- cleanup/release reconciliation does not require readiness and can clean
+  residual resources, confirm absence, and finalize release when
+  `startupReadyAt: null`;
+- same-key Task-create retry resumes only the marker-matched staging,
+  promotion, Task, interaction, and Run;
+- while the single API process has an unsettled
+  `startupOperationsByRunId[runId]`, every additional same-Run call returns
+  only `in_progress`; it performs no lease takeover or second external action;
+- one persisted startup claim/fence spans Kubernetes apply/create/adopt and
+  Botified readiness; Kubernetes resources reaching started never confirm the
+  Run or drop the claim, and only final atomic `active` or
+  `failed`/`release_requested` terminates it;
+- before every Kubernetes `create_resource`/`adopt_resource` action and the
+  separate bounded Botified readiness action, Store CAS persists a fresh
+  `startupActionDeadlineAt` for the exact claim/fence, and each adapter's hard
+  server/request deadline is no later than its own timestamp; normal completion
+  clears that action deadline, preserving the claim between phases, while
+  timeout/unknown completion retains deadline and claim through drain/cleanup;
+- recovery or release waits while an action deadline is unexpired. After it
+  expires, cleanup removes all app-owned resources and re-lists empty before
+  draining the deadline, finalizing release, or allowing crash-only database
+  lease recovery for the same Run with no local Promise;
+- the AgentSmith API runs exactly one replica with
+  `strategy.type: Recreate`; manifests/configuration cannot overlap old and new
+  control-plane processes, and no generation, rotating credential, webhook,
+  leader-election, or multi-controller mechanism is introduced;
 - Terminal commits one reservation before fenced Kubernetes/Botified startup
   outside the transaction, same-key concurrency stays on that Run, only active
   confirmation succeeds, startup failure enters
   `failed`/`release_requested`, remains capacity-holding until resource absence
   is confirmed, replays the canonical failed/pending-cleanup presentation
   without pretending released, and the WebSocket is pure transport;
+- Terminal idempotency begin/hash/replay and bound-Run state convergence are
+  one Store transaction: only `starting` returns HTTP 202 with a persisted
+  `runId`; `active` fixes HTTP 200; `failed`/`release_requested` fix canonical
+  failure; and `released` replays its stored receipt or fixes explicit failure
+  without restarting that operation. Only a new operation may reserve ready
+  from a released Task; a current starting/null-ready Run remains preparing
+  and is never made ready by Terminal; crash recovery can take the same Run
+  only after deadline drain and local-Promise absence; and failure completion
+  requires matching operation/request hash, claim/fence, Project, Task,
+  Run/current Run, and resource identity;
 - after released-message admission succeeds, its message is accepted; later
-  startup failure is persisted Run/interaction state and
-  `sandbox_start_failed` is never used for that message request;
+  startup/dispatch failure is persisted Run/interaction state;
+  `AtomicTaskMessage` wrote the ready Run, message, initial interaction, and
+  fixed accepted HTTP/idempotency receipt in one transaction, so no later
+  error changes replay and `sandbox_start_failed` is never used for that
+  message request;
 - every readable Task can select Terminal; `openTerminal` authorizes only
   start/connect, and `sandboxState` alone selects
   Start/progress/Connect/Pending-cleanup/Unavailable without extra capability
@@ -1865,9 +2465,13 @@ The milestone is complete only when all of the following are true:
   Sandbox-capacity semantics;
 - public contracts expose only `sandboxLimit`, `activeSandboxes`,
   `sandbox_capacity`, and `active_sandboxes`; retained old SQL/Alert values are
-  private adapter inputs with no public aliases; the narrow Slice 1 migration
-  rewrites only exact system-generated legacy Alert/notification title/body
-  pairs, and remains separate from the Slice 3 lifecycle migration;
+  private adapter inputs with no public aliases; focused Slice 1 migration
+  `074` adds nullable `startup_ready_at` and `startup_action_deadline_at`,
+  backfills old active Runs ready solely from database lifecycle fact, leaves
+  old starting Runs null, rewrites only exact generated Alert/notification
+  copy, and remains separate from the Slice 3 lifecycle migration; the
+  application startup reconciler and its service tests own marker validation,
+  exact-operation recovery, and missing/invalid-marker failure/cleanup;
 - substrate rejection Audit has no count/limit and triggers no Project
   capacity Alert;
 - Audit no longer records an existing-Task restart rejection as Task creation;

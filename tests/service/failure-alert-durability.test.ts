@@ -177,7 +177,10 @@ async function sandboxSetup(secret: string) {
       createdAt: timestamp,
       updatedAt: timestamp
     },
-    reserveActive: true,
+    reserveActive: true, admission:{namespace:"agentsmith",namespaceLimit:100},
+    idempotency:{actorId:setup.userId,projectId:task.projectId,operation:"create",key:"fixture-failure-alert",requestHash:"fixture-failure-alert-hash",resourceId:task.id,claimToken:"fixture-failure-alert-claim",now:timestamp,leaseExpiresAt:"2099-01-01T00:00:00.000Z"},
+    rejectionPresentation:null,
+    rejectedAuditEvent:{id:"audit_fixture_failure_alert_rejected",projectId:task.projectId,actorId:setup.userId,action:"task.create",status:"rejected",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,trigger:"task_create"},createdAt:timestamp},
     sandboxRun:run
   });
   assert.equal(created.kind, "created");
@@ -209,6 +212,8 @@ function sandboxRun(workspaceId: string, projectId: string, projectSubPath: stri
     fileLibraryId:`library-${taskId}`,
     startedByUserId:"owner",
     startedAt:timestamp,
+    startupReadyAt:timestamp,
+    startupActionDeadlineAt:null,
     botifiedPort: 3099,
     resourceNames: { pod: `asl-${taskId}`, service: `asl-${taskId}`, configMap: `asl-${taskId}-config`, secret: `asl-${taskId}-secret`, serviceAccount: `asl-${taskId}`, networkPolicy: `asl-${taskId}` },
     serviceKeySecretRef: { name: `asl-${taskId}-secret`, key: "BOTIFIED_SERVICE_KEY" },

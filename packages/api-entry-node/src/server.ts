@@ -12,6 +12,7 @@ import {
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
+import { SandboxRetryableProductError } from "../../application/src/taskService.js";
 import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type ProjectMembershipRole, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput, type WorkspaceMembershipRole } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
@@ -756,6 +757,7 @@ async function routeApi(
     }
     if (segments[4] === "archive" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req))); }
     if (segments[4] === "sandbox" && segments[5] === "release" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.releaseTaskSandbox(user.id,taskId,requireIdempotencyKey(req))); }
+    if (segments[4] === "terminal" && segments[5] === "start" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);const receipt=await services.tasks.startTaskTerminal(user.id,taskId,requireIdempotencyKey(req));return sendJson(res,receipt.status==="in_progress"?202:200,receipt); }
     if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
     if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
     if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
@@ -1072,7 +1074,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|archive|sandbox\/release|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|archive|sandbox\/release|terminal\/start|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1361,6 +1363,10 @@ function toPublicEndpoint(endpoint: ModelEndpoint): PublicModelEndpoint {
 function handleError(res: ServerResponse, error: unknown): void {
   if (res.headersSent) {
     res.end();
+    return;
+  }
+  if(error instanceof SandboxRetryableProductError){
+    sendJson(res,error.statusCode,error.envelope);
     return;
   }
   const statusCode = error instanceof ProductError ? error.statusCode : 500;

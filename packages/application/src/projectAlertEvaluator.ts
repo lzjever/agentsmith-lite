@@ -186,7 +186,7 @@ function alertNotificationBody(projectName: string, alert: ProjectAlert, title: 
 }
 function alertMetricLabel(metric: AlertRuleMetric): string {
   return {
-    active_tasks: "Active tasks",
+    active_tasks: "Active sandboxes",
     provider_requests: "Provider requests",
     provider_tokens: "Provider tokens",
     provider_cost: "Provider cost",

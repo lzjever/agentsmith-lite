@@ -15,7 +15,7 @@ describe("Phase 2 task workspace API", () => {
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-task-workspace-"));
-    api = await createTestApiServer({ port: 0, dataRoot, builtinAdminPassword: "admin-password", providerClient:{completeChat:async()=>{throw new Error("not used");},validateEndpoint:async()=>({status:"healthy"})} });
+    api = await createTestApiServer({ port: 0, dataRoot, builtinAdminPassword: "admin-password", sandboxNamespaceLimit: 100, providerClient:{completeChat:async()=>{throw new Error("not used");},validateEndpoint:async()=>({status:"healthy"})} });
     await request("POST", "/api/v1/auth/bootstrap", { password: "admin-password" }, false);
     const login = await request("POST", "/api/v1/auth/login", { email: "admin@agentsmith-lite.local", password: "admin-password" }, false);
     cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";

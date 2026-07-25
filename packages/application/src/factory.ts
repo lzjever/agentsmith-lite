@@ -6,6 +6,7 @@ import { AuthService } from "./authService.js";
 import { AuthorizationService } from "./authorizationService.js";
 import { EndpointService } from "./endpointService.js";
 import { FileService } from "./fileService.js";
+import { FilePathValidationService } from "./filePathValidationService.js";
 import { FileLibraryService } from "./fileLibraryService.js";
 import { MembershipService } from "./membershipService.js";
 import { RuntimeService } from "./runtimeService.js";
@@ -57,7 +58,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const workspaces = new WorkspaceService(input.store, authorization, policies);
   const memberships = new MembershipService(input.store, authorization);
   const workspaceMemberships = new WorkspaceMembershipService(input.store, authorization);
-  const files = new FileService();
+  const files = new FileService(new FilePathValidationService(input.dataRoot));
   const projectAbsoluteRoot=(projectRootPath:string)=>path.resolve(input.dataRoot,projectRootPath);
   const fileLibraries=new FileLibraryService(input.store,authorization,files,projectAbsoluteRoot);
   const builtinAdminPassword = input.liveSandbox && input.requireBuiltinAdminPasswordForLiveSandbox !== false
@@ -82,7 +83,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   let tasks: TaskService;
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
     namespace,
-    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {})
+    ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {}),
+    hasLocalStartupOperation:(runId)=>tasks?.hasLocalStartupOperation(runId)??false
   });
   const taskConfig = {
     dataRoot: input.dataRoot,

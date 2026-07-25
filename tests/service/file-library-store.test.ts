@@ -29,12 +29,12 @@ describe("file library store", () => {
     await store.createFileLibrary(otherProject);
 
     const taskWithRun=task({fileLibraryId:first.id,currentRunId:"run_one"});
-    const created = await store.createTaskAtomically({task:taskWithRun,reserveActive:false,sandboxRun:releasedRun(taskWithRun)});
+    const created = await store.createTaskAtomically({task:taskWithRun,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},sandboxRun:releasedRun(taskWithRun)});
     assert.equal(created.kind,"created");
     assert.equal(created.kind==="created"?created.task.fileLibraryId:null,first.id);
     assert.deepEqual(await store.findTaskBoundToFileLibrary(first.id), { kind: "bound", task: { id: "task_one", title: "Task" } });
-    assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_two", fileLibraryId: first.id }), reserveActive: false }),{kind:"already_bound"});
-    assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_cross", fileLibraryId: otherProject.id }), reserveActive: false }),{kind:"library_not_found"});
+    assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_two", fileLibraryId: first.id }), reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100} }),{kind:"already_bound"});
+    assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_cross", fileLibraryId: otherProject.id }), reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100} }),{kind:"library_not_found"});
 
     const archived = await store.archiveTask("task_one", "2026-07-19T01:00:00.000Z");
     assert.equal(archived.kind==="ready"?archived.value.fileLibraryId:null, first.id);
@@ -43,11 +43,11 @@ describe("file library store", () => {
     assert.equal(deleted.kind==="ready"?deleted.value.fileLibraryId:"unexpected", first.id);
     assert.equal(deleted.kind==="ready"?deleted.value.currentRunId:"unexpected", "run_one");
     assert.equal((await store.findTaskBoundToFileLibrary(first.id)).kind,"bound");
-    assert.equal((await store.createTaskAtomically({task:task({id:"task_reused",fileLibraryId:first.id}),reserveActive:false})).kind,"already_bound");
+    assert.equal((await store.createTaskAtomically({task:task({id:"task_reused",fileLibraryId:first.id}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"already_bound");
     assert.equal(await store.purgeDeletedTaskData("task_one"),true);
     assert.equal(await store.findTask("task_one"),null);
     assert.deepEqual(await store.findTaskBoundToFileLibrary(first.id), { kind: "unbound" });
-    assert.equal((await store.createTaskAtomically({task:task({id:"task_reused",fileLibraryId:first.id}),reserveActive:false})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task:task({id:"task_reused",fileLibraryId:first.id}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"created");
     assert.deepEqual(await store.findFileLibrary(first.id),first);
   });
 
@@ -56,8 +56,8 @@ describe("file library store", () => {
     await store.createProject(project());
     await store.createFileLibrary(library({id:"library_race"}));
     const results=await Promise.all([
-      store.createTaskAtomically({task:task({id:"task_race_one",fileLibraryId:"library_race"}),reserveActive:false}),
-      store.createTaskAtomically({task:task({id:"task_race_two",fileLibraryId:"library_race"}),reserveActive:false})
+      store.createTaskAtomically({task:task({id:"task_race_one",fileLibraryId:"library_race"}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}}),
+      store.createTaskAtomically({task:task({id:"task_race_two",fileLibraryId:"library_race"}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})
     ]);
     assert.deepEqual(results.map((result)=>result.kind).sort(),["already_bound","created"]);
   });
@@ -67,7 +67,7 @@ describe("file library store", () => {
     await store.createProject(project());
     await store.createFileLibrary(library({id:"library_existing",name:"Taken"}));
     const generated=library({id:"library_generated",name:" taken ",rootSubPath:"libraries/library_generated/home"});
-    assert.deepEqual(await store.createTaskAtomically({task:task({fileLibraryId:generated.id}),newFileLibrary:generated,reserveActive:false}),{kind:"library_name_conflict"});
+    assert.deepEqual(await store.createTaskAtomically({task:task({fileLibraryId:generated.id}),newFileLibrary:generated,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}}),{kind:"library_name_conflict"});
     assert.equal(await store.findFileLibrary(generated.id),null);
 
   });
@@ -117,7 +117,7 @@ function releasedRun(task:PersistedAgentTask):PersistedSandboxRunState {
     namespace:"agentsmith",state:"released",image:"botified:test",pvcName:"files",
     projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,
     fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,
-    startedByUserId:"user_one",startedAt:timestamp,botifiedPort:3099,
+    startedByUserId:"user_one",startedAt:timestamp,startupReadyAt:timestamp,startupActionDeadlineAt:null,botifiedPort:3099,
     resourceNames:{pod:"pod-task-one",service:"service-task-one",configMap:"config-task-one",secret:"secret-task-one",serviceAccount:"account-task-one",networkPolicy:"policy-task-one"},
     serviceKeySecretRef:{name:"secret-task-one",key:"BOTIFIED_SERVICE_KEY"},
     directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},

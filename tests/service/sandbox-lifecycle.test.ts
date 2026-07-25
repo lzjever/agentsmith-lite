@@ -105,6 +105,84 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal(persisted.cleanupClaimedAt,null);
     assert.deepEqual(persisted.lastCleanupError,{at:timestamp(3),target:"Kubernetes inventory",message:"Inventory rejected credential <redacted>"});
   });
+
+  it("drains an expired startup action only after cleanup and atomically fails the same Run",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const fixture=await createReleaseRequestedRun(store);
+    const starting:PersistedSandboxRunState={
+      ...fixture.run,state:"starting",startupReadyAt:timestamp(0),
+      startupClaimToken:"crashed-startup",startupLeaseExpiresAt:timestamp(2),
+      startupActionDeadlineAt:timestamp(3),releaseReason:null,releaseRequestedAt:null,
+      fencingToken:fixture.run.fencingToken+1,updatedAt:timestamp(1)
+    };
+    assert.ok(await store.sandboxRuns.updateWithFencing(fixture.run.runId,fixture.run.fencingToken,starting));
+    const resources=observedResources(starting);
+    const port=new LifecyclePort(resources,false);
+
+    await new SandboxLifecycleService(store,{namespace:starting.namespace,port,now:()=>new Date(timestamp(2))}).reapSandboxRunsOnce({apply:true,runId:starting.runId});
+    assert.equal(port.deletedRefs.length,0);
+    assert.equal((await store.sandboxRuns.get(starting.runId))?.startupActionDeadlineAt,timestamp(3));
+
+    let localStartupPending=true;
+    const lifecycle=new SandboxLifecycleService(store,{
+      namespace:starting.namespace,port,now:()=>new Date(timestamp(4)),
+      hasLocalStartupOperation:()=>localStartupPending
+    });
+    await lifecycle.reapSandboxRunsOnce({apply:true,runId:starting.runId});
+    assert.equal(port.deletedRefs.length,0);
+    assert.equal((await store.sandboxRuns.get(starting.runId))?.startupActionDeadlineAt,timestamp(3));
+
+    localStartupPending=false;
+    await lifecycle.reapSandboxRunsOnce({apply:true,runId:starting.runId});
+    assert.equal(port.remainingResources().length,0);
+    const drained=await store.sandboxRuns.get(starting.runId);assert.ok(drained);
+    assert.equal(drained.state,"failed");
+    assert.equal(drained.failureCode,"startup_failed");
+    assert.ok(drained.releaseRequestedAt);
+    assert.equal(drained.startupActionDeadlineAt,null);
+    assert.equal(drained.startupClaimToken,null);
+    assert.equal(drained.cleanupClaimedAt,null);
+    assert.equal((await store.findProjectResourceUsage(starting.projectId))?.activeTasks,1);
+    assert.equal((await store.claimSandboxStartup({
+      taskId:drained.taskId,runId:drained.runId,expectedFencingToken:drained.fencingToken,
+      claimToken:"recovered-startup",claimedAt:timestamp(5),leaseExpiresAt:timestamp(7)
+    })).kind,"stale");
+  });
+
+  it("does not claim release-requested cleanup while its local startup Promise is unsettled",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const fixture=await createReleaseRequestedRun(store);
+    const pending:PersistedSandboxRunState={
+      ...fixture.run,
+      startupClaimToken:"terminal-release-race",
+      startupLeaseExpiresAt:timestamp(2),
+      startupActionDeadlineAt:timestamp(3),
+      fencingToken:fixture.run.fencingToken+1,
+      updatedAt:timestamp(1)
+    };
+    assert.ok(await store.sandboxRuns.updateWithFencing(fixture.run.runId,fixture.run.fencingToken,pending));
+    const port=new LifecyclePort(observedResources(pending),false);
+    let localStartupPending=true,cleanupClaims=0;
+    const claimForCleanup=store.sandboxRuns.claimForCleanup.bind(store.sandboxRuns);
+    store.sandboxRuns.claimForCleanup=async(input)=>{cleanupClaims+=1;return claimForCleanup(input);};
+    const lifecycle=new SandboxLifecycleService(store,{
+      namespace:pending.namespace,
+      port,
+      now:()=>new Date(timestamp(4)),
+      hasLocalStartupOperation:()=>localStartupPending
+    });
+
+    await lifecycle.reapSandboxRunsOnce({apply:true,runId:pending.runId});
+    assert.equal(cleanupClaims,0);
+    assert.equal(port.deletedRefs.length,0);
+    assert.equal((await store.sandboxRuns.get(pending.runId))?.startupActionDeadlineAt,timestamp(3));
+
+    localStartupPending=false;
+    await lifecycle.reapSandboxRunsOnce({apply:true,runId:pending.runId});
+    assert.ok(cleanupClaims>0);
+    assert.equal(port.remainingResources().length,0);
+    assert.equal((await store.sandboxRuns.get(pending.runId))?.state,"released");
+  });
 });
 
 class LifecyclePort {
@@ -131,8 +209,8 @@ async function createReleaseRequestedRun(store:ReturnType<typeof createLocalInMe
   await store.createWorkspace({id:workspaceId,name:"Workspace",ownerUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)});
   await store.createProject({id:projectId,workspaceId,name:"Project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:timestamp(0),updatedAt:timestamp(0)});
   const task:PersistedAgentTask={id:taskId,workspaceId,projectId,endpointId:"endpoint_lifecycle",fileLibraryId:libraryId,createdByUserId:owner,title:"Task",prompt:"Work",agentContext:"",currentRunId:"run_lifecycle",archivedAt:null,deletedAt:null,createdAt:timestamp(0),updatedAt:timestamp(0)};
-  const run:PersistedSandboxRunState={workspaceId,projectId,taskId,runId:task.currentRunId!,namespace:"agentsmith",state:"release_requested",image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${libraryId}/home`,fileLibraryId:libraryId,startedByUserId:owner,startedAt:timestamp(0),botifiedPort:3099,resourceNames:{pod:"task-lifecycle",service:"task-lifecycle",configMap:"task-lifecycle-config",secret:"task-lifecycle-secret",serviceAccount:"task-lifecycle",networkPolicy:"task-lifecycle"},serviceKeySecretRef:{name:"task-lifecycle-secret",key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:"requested",releaseRequestedAt:timestamp(1),failedAt:null,releasedAt:null,createdAt:timestamp(0),updatedAt:timestamp(1)};
-  const created=await store.createTaskAtomically({task,reserveActive:true,newFileLibrary:{id:libraryId,workspaceId,projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)},sandboxRun:run});
+  const run:PersistedSandboxRunState={workspaceId,projectId,taskId,runId:task.currentRunId!,namespace:"agentsmith",state:"release_requested",image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${libraryId}/home`,fileLibraryId:libraryId,startedByUserId:owner,startedAt:timestamp(0),startupReadyAt:null,startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:"task-lifecycle",service:"task-lifecycle",configMap:"task-lifecycle-config",secret:"task-lifecycle-secret",serviceAccount:"task-lifecycle",networkPolicy:"task-lifecycle"},serviceKeySecretRef:{name:"task-lifecycle-secret",key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:"requested",releaseRequestedAt:timestamp(1),failedAt:null,releasedAt:null,createdAt:timestamp(0),updatedAt:timestamp(1)};
+  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},idempotency:{actorId:owner,projectId,operation:"create",key:"fixture-lifecycle",requestHash:"fixture-lifecycle-hash",resourceId:taskId,claimToken:"fixture-lifecycle-claim",now:timestamp(0),leaseExpiresAt:timestamp(9)},rejectionPresentation:null,rejectedAuditEvent:{id:"audit_fixture_lifecycle_rejected",projectId,actorId:owner,action:"task.create",status:"rejected",resourceKind:"task",resourceId:taskId,detail:{taskId,trigger:"task_create"},createdAt:timestamp(0)},newFileLibrary:{id:libraryId,workspaceId,projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)},sandboxRun:run});
   assert.equal(created.kind,"created");
   return{task,run};
 }
@@ -149,7 +227,7 @@ function orphanRun():PersistedSandboxRunState{
     namespace:"agentsmith",state:"active",image:"botified:test",pvcName:"files",
     projectSubPath:"workspaces/workspace_orphan/projects/project_orphan",
     fileLibraryRootSubPath:"libraries/library_orphan/home",fileLibraryId:"library_orphan",
-    startedByUserId:"user_orphan",startedAt:timestamp(0),botifiedPort:3099,
+    startedByUserId:"user_orphan",startedAt:timestamp(0),startupReadyAt:timestamp(0),startupActionDeadlineAt:null,botifiedPort:3099,
     resourceNames:{pod:"task-orphan",service:"task-orphan",configMap:"task-orphan-config",secret:"task-orphan-secret",serviceAccount:"task-orphan",networkPolicy:"task-orphan"},
     serviceKeySecretRef:{name:"task-orphan-secret",key:"BOTIFIED_SERVICE_KEY"},
     directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},

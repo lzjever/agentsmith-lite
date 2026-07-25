@@ -186,7 +186,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     ];
     for(const record of records){
       const task={...taskRecord(record.id,`library_${record.id}`,"unused"),currentRunId:null,title:record.title,prompt:record.title,createdAt:record.createdAt,updatedAt:record.createdAt};
-      assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,record.title)})).kind,"created");
+      assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,record.title)})).kind,"created");
     }
 
     const scope={search:"",archived:"exclude" as const,sort:"title" as const,direction:"asc" as const,limit:3};
@@ -338,7 +338,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   it("pages Artifacts by timestamp and ordinal ID while sharing safe preview kinds",async()=>{
     const task={...taskRecord("task_artifact_page","library_artifact_page","unused"),currentRunId:null};
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Artifact page")})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Artifact page")})).kind,"created");
     const artifacts:PersistedTaskArtifact[]=[
       taskArtifact("artifact_old",task.id,"2026-07-23T00:00:01.000Z","application/octet-stream"),
       taskArtifact("artifact_png",task.id,"2026-07-23T00:00:02.000Z","IMAGE/PNG; charset=binary"),
@@ -362,7 +362,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   it("reserves capacity, Task, Run, initial message, and Library atomically under a race",async()=>{
     const inputs=[0,1].map((index)=>{
       const task=taskRecord(`task_reserve_${index}`,`library_reserve_${index}`,`run_reserve_${index}`);
-      return{task,reserveActive:true,newFileLibrary:library(task.fileLibraryId!,`Library ${index}`),sandboxRun:run(task,task.currentRunId!,"starting"),initialMessage:message(`message_reserve_${index}`,task.id),auditEvent:{id:`audit_task_create_${task.id}`,projectId:task.projectId,actorId:"user_atomic",action:"task.create" as const,status:"accepted" as const,resourceKind:"task" as const,resourceId:task.id,detail:{taskId:task.id},createdAt:at}} as const;
+      return{task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:10},...createAdmissionReceipt(task,`reserve-${index}`),newFileLibrary:library(task.fileLibraryId!,`Library ${index}`),sandboxRun:run(task,task.currentRunId!,"starting"),initialMessage:message(`message_reserve_${index}`,task.id),auditEvent:{id:`audit_task_create_${task.id}`,projectId:task.projectId,actorId:"user_atomic",action:"task.create" as const,status:"accepted" as const,resourceKind:"task" as const,resourceId:task.id,detail:{taskId:task.id},createdAt:at}} as const;
     });
     const results=await Promise.all(inputs.map((input)=>store.createTaskAtomically(input)));
     assert.deepEqual(results.map((result)=>result.kind).sort(),["capacity_rejected","created"]);
@@ -374,12 +374,155 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findTaskMessage(loser.initialMessage.id),null);
     assert.equal((await store.findProjectResourceUsage("project_atomic"))?.activeTasks,1);
     assert.deepEqual(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.action==="task.create").map((event)=>event.resourceId),[winner.task.id]);
+    const rejected=results.find((result)=>result.kind==="capacity_rejected");
+    assert.deepEqual(rejected,{
+      kind:"capacity_rejected",
+      admission:{kind:"project_capacity_rejected",activeSandboxes:1,sandboxLimit:1},
+      responseStatus:409,
+      responseBody:{error:{code:"project_sandbox_capacity_reached",message:"Project Sandbox capacity reached",retryable:true,details:{activeSandboxes:1,sandboxLimit:1},presentation:null}}
+    });
+    const replay=await store.createTaskAtomically({
+      ...loser,
+      idempotency:{...loser.idempotency,claimToken:"capacity-replay-claim",now:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:03:00.000Z"}
+    });
+    assert.deepEqual(replay,{kind:"replay",responseStatus:409,responseBody:rejected?.responseBody});
+    assert.equal(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.id===loser.rejectedAuditEvent.id).length,1);
+  });
+
+  it("does not hold PostgreSQL Task or Run locks while the startup operation runs",async()=>{
+    const task=taskRecord("task_startup_lock","library_startup_lock","run_startup_lock");
+    const starting=run(task,task.currentRunId!,"starting");
+    assert.equal((await store.createTaskAtomically({
+      task,
+      reserveActive:true,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...createAdmissionReceipt(task,"startup-lock"),
+      newFileLibrary:library(task.fileLibraryId!,"Startup lock"),
+      sandboxRun:starting
+    })).kind,"created");
+    let entered!:()=>void;
+    let unblock!:()=>void;
+    const operationEntered=new Promise<void>((resolve)=>{entered=resolve;});
+    const operationBlocked=new Promise<void>((resolve)=>{unblock=resolve;});
+    assert.ok(await store.markTaskSandboxStartupReady({
+      taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,readyAt:at
+    }));
+    assert.equal((await store.claimSandboxStartup({
+      taskId:task.id,
+      runId:starting.runId,
+      expectedFencingToken:starting.fencingToken,
+      claimToken:"startup-lock-claim",
+      claimedAt:at,
+      leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+    })).kind,"claimed");
+    const startup=(async()=>{entered();await operationBlocked;return"applied";})();
+    await operationEntered;
+    const failedAt="2026-07-23T00:01:00.000Z";
+    const failure=store.failSandboxRun({
+      runId:starting.runId,
+      expectedFencingToken:starting.fencingToken,
+      code:"startup_failed",
+      message:"fixture failure",
+      failedAt,
+      auditEvent:{id:"audit_startup_lock_failed",projectId:task.projectId,actorId:null,subjectUserId:"user_atomic",action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id,runId:starting.runId},createdAt:failedAt}
+    });
+    const failureCompleted=await settlesWithin(failure,2_000);
+    unblock();
+    assert.equal(failureCompleted,true);
+    assert.equal((await failure)?.state,"failed");
+    assert.equal(await startup,"applied");
+  });
+
+  it("admits one mixed cold-start winner across Projects in a saturated namespace",async()=>{
+    await createProjectFixture("project_restart");
+    await createProjectFixture("project_message");
+    const createTask=projectTask("task_namespace_create","project_atomic","run_namespace_create");
+    const restartTask={...projectTask("task_namespace_restart","project_restart","unused"),currentRunId:null};
+    const messageTask=projectTask("task_namespace_message","project_message","run_namespace_released");
+    const releasedRun=run(messageTask,messageTask.currentRunId!,"released");
+    assert.equal((await store.createTaskAtomically({task:restartTask,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:projectLibrary(restartTask,"Restart")})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task:messageTask,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:projectLibrary(messageTask,"Message"),sandboxRun:releasedRun})).kind,"created");
+
+    const createRun=run(createTask,createTask.currentRunId!,"starting");
+    const restartReplacement={...restartTask,currentRunId:"run_namespace_restart",updatedAt:"2026-07-23T00:01:00.000Z"};
+    const restartRun=run(restartReplacement,restartReplacement.currentRunId!,"starting");
+    const messageInput={...atomicMessage(messageTask,releasedRun,"namespace","run_namespace_message"),admission:{namespace:"agentsmith",namespaceLimit:1}};
+    const results=await Promise.all([
+      store.createTaskAtomically({task:createTask,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:1},...createAdmissionReceipt(createTask,"namespace-create"),newFileLibrary:projectLibrary(createTask,"Create"),sandboxRun:createRun}),
+      store.restartTaskSandboxAtomically({expectedReleasedRunId:null,task:restartReplacement,runtimeState:{botifiedBaseUrl:"http://restart"},sandboxRun:restartRun,reservedAt:restartReplacement.updatedAt,admission:{namespace:"agentsmith",namespaceLimit:1},...restartAdmissionReceipt(restartReplacement,"namespace-restart")}),
+      store.createTaskMessageAtomically(messageInput)
+    ]);
+
+    assert.equal(results.filter((result)=>result.kind==="created"||result.kind==="restarted").length,1);
+    assert.equal(results.filter((result)=>result.kind==="capacity_rejected"&&result.admission.kind==="substrate_capacity_rejected").length,2);
+    assert.equal((await store.sandboxRuns.list()).filter((candidate)=>candidate.namespace==="agentsmith"&&candidate.state!=="released").length,1);
+    const usages=await Promise.all(["project_atomic","project_restart","project_message"].map((projectId)=>store.findProjectResourceUsage(projectId)));
+    assert.equal(usages.reduce((total,usage)=>total+(usage?.activeTasks??0),0),1);
+    for(const [index,candidate] of [createRun,restartRun,messageInput.restart!.sandboxRun].entries()){
+      if(results[index]?.kind==="capacity_rejected")assert.equal(await store.sandboxRuns.get(candidate.runId),null);
+    }
+    if(results[2]?.kind==="capacity_rejected"){
+      assert.equal(await store.findTaskMessage(messageInput.message.id),null);
+      assert.equal(((await store.queryProjectAuditEvents(messageTask.projectId,{limit:100})).items).some((event)=>event.id===messageInput.auditEvent.id),false);
+    }
+  });
+
+  it("serializes release finalization against namespace admission with absolute usage",async()=>{
+    await createProjectFixture("project_release_target");
+    const occupiedTask=taskRecord("task_release_race","library_release_race","run_release_race");
+    const occupied={...run(occupiedTask,occupiedTask.currentRunId!,"starting"),state:"release_requested" as const,releaseReason:"requested" as const,releaseRequestedAt:at};
+    assert.equal((await store.createTaskAtomically({task:occupiedTask,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:1},...createAdmissionReceipt(occupiedTask,"release-race"),newFileLibrary:library(occupiedTask.fileLibraryId!,"Release race"),sandboxRun:occupied})).kind,"created");
+    const target={...projectTask("task_release_target","project_release_target","unused"),currentRunId:null};
+    assert.equal((await store.createTaskAtomically({task:target,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:projectLibrary(target,"Target")})).kind,"created");
+    const replacement={...target,currentRunId:"run_release_target",updatedAt:"2026-07-23T00:02:00.000Z"};
+    const replacementRun=run(replacement,replacement.currentRunId!,"starting");
+    const releasedAt="2026-07-23T00:01:00.000Z";
+    const released={...occupied,state:"released" as const,releasedAt,fencingToken:occupied.fencingToken+1,updatedAt:releasedAt};
+
+    const [releaseResult,admissionResult]=await Promise.all([
+      store.completeSandboxRunRelease({
+        runId:occupied.runId,expectedFencingToken:occupied.fencingToken,run:released,
+        settlement:{runId:occupied.runId,workspaceId:occupied.workspaceId,projectId:occupied.projectId,taskId:occupied.taskId,fileLibraryId:occupied.fileLibraryId,startedByUserId:occupied.startedByUserId,startedAt:null,releasedAt,durationSeconds:0,resources:occupied.resourceSnapshot,releaseReason:"requested"},
+        auditEvent:{id:"audit_release_race",projectId:occupied.projectId,actorId:null,subjectUserId:occupied.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:occupied.taskId,detail:{taskId:occupied.taskId,runId:occupied.runId,releaseReason:"requested"},createdAt:releasedAt}
+      }),
+      store.restartTaskSandboxAtomically({expectedReleasedRunId:null,task:replacement,runtimeState:{botifiedBaseUrl:"http://release-target"},sandboxRun:replacementRun,reservedAt:replacement.updatedAt,admission:{namespace:"agentsmith",namespaceLimit:1},...restartAdmissionReceipt(replacement,"release-target")})
+    ]);
+
+    assert.equal(releaseResult,"applied");
+    assert.ok(admissionResult.kind==="restarted"||admissionResult.kind==="capacity_rejected");
+    assert.ok((await store.sandboxRuns.list()).filter((candidate)=>candidate.namespace==="agentsmith"&&candidate.state!=="released").length<=1);
+    assert.equal((await store.findProjectResourceUsage(occupied.projectId))?.activeTasks,0);
+    assert.equal((await store.findProjectResourceUsage(target.projectId))?.activeTasks,admissionResult.kind==="restarted"?1:0);
+  });
+
+  it("keeps Sandbox-limit policy updates namespace-free while admission waits",async()=>{
+    const task={...taskRecord("task_policy_lock","library_policy_lock","unused"),currentRunId:null};
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Policy lock")})).kind,"created");
+    const replacement={...task,currentRunId:"run_policy_lock",updatedAt:"2026-07-23T00:01:00.000Z"};
+    const replacementRun=run(replacement,replacement.currentRunId!,"starting");
+    const blocker=new pg.Client({connectionString:postgresUrl});
+    await blocker.connect();
+    let committed=false;
+    try{
+      await blocker.query("begin");
+      await blocker.query("select pg_advisory_xact_lock(hashtextextended($1,0))",["agentsmith-lite:sandbox:agentsmith"]);
+      const policy=store.patchProjectResourcePolicy(task.projectId,{activeTasksLimit:2},at);
+      assert.equal((await completesWithin(policy,2_000))?.activeTasksLimit,2);
+      const admission=store.restartTaskSandboxAtomically({expectedReleasedRunId:null,task:replacement,runtimeState:{botifiedBaseUrl:"http://policy-lock"},sandboxRun:replacementRun,reservedAt:replacement.updatedAt,admission:{namespace:"agentsmith",namespaceLimit:1},...restartAdmissionReceipt(replacement,"policy-lock")});
+      assert.equal(await settlesWithin(admission,50),false);
+      await blocker.query("commit");
+      committed=true;
+      assert.equal((await completesWithin(admission,5_000)).kind,"restarted");
+    }finally{
+      if(!committed)await blocker.query("rollback").catch(()=>undefined);
+      await blocker.end();
+    }
   });
 
   it("lets racing messages share one exact new Run",async()=>{
     const task=taskRecord("task_message","library_message","run_released");
     const released=run(task,task.currentRunId!,"released");
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Messages"),sandboxRun:released})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Messages"),sandboxRun:released})).kind,"created");
 
     const first=atomicMessage(task,released,"first","run_first");
     const second=atomicMessage(task,released,"second","run_second");
@@ -396,7 +539,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   it("reclaims an expired message lease without changing its persisted identity",async()=>{
     const task={...taskRecord("task_reclaim","library_reclaim","unused"),currentRunId:null};
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Reclaim")})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Reclaim")})).kind,"created");
     const replacement={...task,currentRunId:"run_reclaim",updatedAt:"2026-07-23T00:01:00.000Z"};
     const first=atomicMessage(task,{...run(replacement,"run_reclaim","starting"),state:"released",releaseReason:"requested",releaseRequestedAt:at,releasedAt:at},"original","run_reclaim");
     first.expectedCurrentRunId=null;
@@ -416,6 +559,30 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(reclaimed.kind==="created"?reclaimed.message.id:null,"message_original");
     assert.deepEqual((await store.listTaskMessages(task.id)).map((message)=>message.id),["message_original"]);
     assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,1);
+  });
+
+  it("keeps a PostgreSQL pending-message crash window out of due and claim paths",async()=>{
+    const task={...taskRecord("task_dispatch_guard","library_dispatch_guard","unused"),currentRunId:null};
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Dispatch guard")
+    })).kind,"created");
+    const orphan={...message("message_dispatch_orphan",task.id),createdAt:"2026-07-23T00:01:00.000Z",updatedAt:"2026-07-23T00:01:00.000Z"};
+    await store.createTaskMessage(orphan);
+    assert.deepEqual(await store.listTaskMessagesDue("2026-07-23T00:02:00.000Z",10),[]);
+    assert.equal(await store.claimTaskMessage({
+      id:orphan.id,claimToken:"orphan-claim",claimedAt:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:03:00.000Z"
+    }),null);
+
+    const durable={...message("message_dispatch_durable",task.id),createdAt:"2026-07-23T00:02:00.000Z",updatedAt:"2026-07-23T00:02:00.000Z"};
+    assert.ok(await store.createPendingTaskMessage(durable,{
+      sourceKind:"product",sourceId:`message:${durable.id}`,sourceRevision:0,
+      interaction:{id:"interaction_dispatch_durable",taskId:task.id,kind:"user_message",revision:1,position:1,occurredAt:durable.createdAt,updatedAt:durable.updatedAt!,title:"You",actorId:"user_atomic",body:durable.content,contentMode:"full",status:"pending"}
+    }));
+    assert.deepEqual((await store.listTaskMessagesDue("2026-07-23T00:03:00.000Z",10)).map((candidate)=>candidate.id),[durable.id]);
+    assert.equal((await store.claimTaskMessage({
+      id:durable.id,claimToken:"durable-claim",claimedAt:"2026-07-23T00:03:00.000Z",leaseExpiresAt:"2026-07-23T00:04:00.000Z"
+    }))?.id,durable.id);
   });
 
   it("completes resource idempotency only for the matching Project and operation",async()=>{
@@ -441,7 +608,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const original=message("message_mutation",task.id);
     assert.equal((await store.createTaskAtomically({
       task,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:library(task.fileLibraryId!,"Message mutation"),
       initialMessage:original
     })).kind,"created");
@@ -657,7 +824,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const task={...taskRecord("task_delete_run_race","library_delete_run_race","unused"),currentRunId:null};
     assert.equal((await store.createTaskAtomically({
       task,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:library(task.fileLibraryId!,"Run deletion race")
     })).kind,"created");
     const replacement={...task,currentRunId:"run_delete_race",updatedAt:"2026-07-23T00:01:00.000Z"};
@@ -667,7 +834,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
         task:replacement,
         runtimeState:{botifiedBaseUrl:"http://delete-race"},
         sandboxRun:run(replacement,replacement.currentRunId!,"starting"),
-        reservedAt:replacement.updatedAt
+        reservedAt:replacement.updatedAt,
+        admission:{namespace:"agentsmith",namespaceLimit:100},
+        ...restartAdmissionReceipt(replacement,"delete-race")
       }),
       store.beginProjectDeletion(task.projectId,replacement.updatedAt,"user_atomic")
     ]);
@@ -683,7 +852,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   it("lets Project deletion win against Task archive without deadlocking",async()=>{
     const task={...taskRecord("task_project_delete_archive","library_project_delete_archive","unused"),currentRunId:null};
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Project delete archive")})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Project delete archive")})).kind,"created");
     assert.equal((await store.beginProjectDeletion(task.projectId,"2026-07-23T00:01:00.000Z","user_atomic")).kind,"ready");
 
     const auditId="audit_project_delete_archive_loser";
@@ -697,7 +866,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   it("lets Project deletion win against Task deletion without deadlocking",async()=>{
     const task={...taskRecord("task_project_delete_task","library_project_delete_task","unused"),currentRunId:null};
-    assert.equal((await store.createTaskAtomically({task,reserveActive:false,newFileLibrary:library(task.fileLibraryId!,"Project delete task")})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Project delete task")})).kind,"created");
     assert.equal((await store.beginProjectDeletion(task.projectId,"2026-07-23T00:01:00.000Z","user_atomic")).kind,"ready");
 
     const auditId="audit_project_delete_task_loser";
@@ -713,7 +882,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const firstTask={...taskRecord("task_first","library_first","run_unused"),currentRunId:null};
     assert.equal((await store.createTaskAtomically({
       task:firstTask,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:library(firstTask.fileLibraryId!,"First")
     })).kind,"created");
     const firstReplacement={...firstTask,currentRunId:"run_first",updatedAt:"2026-07-23T00:01:00.000Z"};
@@ -723,7 +892,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       task:firstReplacement,
       runtimeState:{botifiedBaseUrl:"http://first-task"},
       sandboxRun:firstRun,
-      reservedAt:firstReplacement.updatedAt
+      reservedAt:firstReplacement.updatedAt,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...restartAdmissionReceipt(firstReplacement,"first")
     };
     assert.equal((await store.restartTaskSandboxAtomically({
       ...firstInput,
@@ -745,7 +916,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const capacityTask={...firstTask,id:"task_capacity",fileLibraryId:"library_capacity"};
     assert.equal((await store.createTaskAtomically({
       task:capacityTask,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:library(capacityTask.fileLibraryId!,"Capacity")
     })).kind,"created");
     const capacityReplacement={...capacityTask,currentRunId:"run_capacity",updatedAt:"2026-07-23T00:01:30.000Z"};
@@ -755,7 +926,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       task:capacityReplacement,
       runtimeState:{botifiedBaseUrl:"http://capacity-task"},
       sandboxRun:capacityRun,
-      reservedAt:capacityReplacement.updatedAt
+      reservedAt:capacityReplacement.updatedAt,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...restartAdmissionReceipt(capacityReplacement,"capacity")
     })).kind,"capacity_rejected");
     assert.equal((await store.findTask(capacityTask.id))?.currentRunId,null);
     assert.equal(await store.sandboxRuns.get(capacityRun.runId),null);
@@ -771,7 +944,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const releasedRun=run(releasedTask,releasedTask.currentRunId!,"released");
     assert.equal((await store.createTaskAtomically({
       task:releasedTask,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:{...library(releasedTask.fileLibraryId!,"Restart"),projectId},
       sandboxRun:releasedRun
     })).kind,"created");
@@ -782,7 +955,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       task:restartedTask,
       runtimeState:{botifiedBaseUrl:"http://restarted-task"},
       sandboxRun:restartedRun,
-      reservedAt:restartedTask.updatedAt
+      reservedAt:restartedTask.updatedAt,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...restartAdmissionReceipt(restartedTask,"restart")
     };
     assert.equal((await store.restartTaskSandboxAtomically({...restartInput,expectedReleasedRunId:"run_missing"})).kind,"conflict");
     assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,0);
@@ -801,7 +976,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       releaseRequestedAt:at,
       modelCa:{configMapName:"provider-ca",configMapKey:"ca.crt",path:"/etc/provider/ca.crt"}
     };
-    assert.equal((await store.createTaskAtomically({task,reserveActive:true,newFileLibrary:library(task.fileLibraryId!,"Delete project"),sandboxRun:pending})).kind,"created");
+    assert.equal((await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,"delete-project"),newFileLibrary:library(task.fileLibraryId!,"Delete project"),sandboxRun:pending})).kind,"created");
     const releasedAt="2026-07-23T00:01:00.000Z";
     const {networkPolicy,serviceAccount}=pending.resourceNames;
     assert.ok(networkPolicy);
@@ -857,7 +1032,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(projectedUsage?.projectFileBytesMeasuredAt,fileMeasuredAt);
     const release=async(label:string)=>{
       const task=taskRecord(`task_usage_${label}`,`library_usage_${label}`,`run_usage_${label}`),pending=run(task,task.currentRunId!,"starting");
-      assert.equal((await store.createTaskAtomically({task,reserveActive:true,newFileLibrary:library(task.fileLibraryId!,`Usage ${label}`),sandboxRun:pending})).kind,"created");
+      assert.equal((await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,`usage-${label}`),newFileLibrary:library(task.fileLibraryId!,`Usage ${label}`),sandboxRun:pending})).kind,"created");
       if(label==="a"){
         const live=await store.readProjectUsageOverview(usageOverviewReadInput("2026-07-23T00:01:00.000Z"));
         assert.equal(live.kind,"available");
@@ -880,7 +1055,16 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   function atomicMessage(task:PersistedAgentTask,released:PersistedSandboxRunState,label:string,newRunId:string):AtomicTaskMessageInput{
     const replacement={...task,currentRunId:newRunId,updatedAt:`2026-07-23T00:01:0${label.length}.000Z`};
-    return{taskId:task.id,expectedCurrentRunId:released.runId,message:message(`message_${label}`,task.id),idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"message",key:`key_${label}`,requestHash:`hash_${label}`,resourceId:`message_${label}`,claimToken:`claim_${label}`,now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"},auditEvent:{id:`audit_task_message_create_message_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId:`message_${label}`,deliveryStatus:"pending"},createdAt:at},restart:{task:replacement,runtimeState:{botifiedBaseUrl:"http://task"},sandboxRun:run(replacement,newRunId,"starting"),reservedAt:replacement.updatedAt}};
+    const persistedMessage=message(`message_${label}`,task.id);
+    return{taskId:task.id,expectedCurrentRunId:released.runId,message:persistedMessage,idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"message",key:`key_${label}`,requestHash:`hash_${label}`,resourceId:`message_${label}`,claimToken:`claim_${label}`,now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"},auditEvent:{id:`audit_task_message_create_message_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId:`message_${label}`,deliveryStatus:"pending"},createdAt:at},admission:{namespace:"agentsmith",namespaceLimit:100},rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,rejectedAuditEvent:{id:`audit_message_rejected_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"sandbox.started",status:"rejected",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id,trigger:"task_message"},createdAt:at},responseStatus:200,responseBody:{kind:"task_message",messageId:persistedMessage.id,taskId:task.id,projectId:task.projectId,actorId:"user_atomic"},interactionChange:{sourceKind:"product",sourceId:`message:${persistedMessage.id}`,sourceRevision:0,interaction:{id:`interaction_${persistedMessage.id}`,revision:1,taskId:task.id,kind:"user_message",title:"You",body:persistedMessage.content,contentMode:"full",position:0,occurredAt:at,updatedAt:at,actorId:"user_atomic",status:"pending"}},restart:{task:replacement,runtimeState:{botifiedBaseUrl:"http://task"},sandboxRun:run(replacement,newRunId,"starting"),reservedAt:replacement.updatedAt}};
+  }
+
+  function createAdmissionReceipt(task:PersistedAgentTask,label:string){
+    return{idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"create" as const,key:`fixture-${label}`,requestHash:`fixture-hash-${label}`,resourceId:task.id,claimToken:`fixture-claim-${label}`,now:task.updatedAt,leaseExpiresAt:"2099-01-01T00:00:00.000Z"},rejectionPresentation:null,rejectedAuditEvent:{id:`audit_fixture_rejected_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"task.create" as const,status:"rejected" as const,resourceKind:"task" as const,resourceId:task.id,detail:{taskId:task.id,trigger:"task_create" as const},createdAt:task.updatedAt}};
+  }
+
+  function restartAdmissionReceipt(task:PersistedAgentTask,label:string){
+    return{idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"terminal-start" as const,key:`fixture-terminal-${label}`,requestHash:`fixture-terminal-hash-${label}`,resourceId:task.id,claimToken:`fixture-terminal-claim-${label}`,now:task.updatedAt,leaseExpiresAt:"2099-01-01T00:00:00.000Z"},rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,rejectedAuditEvent:{id:`audit_fixture_terminal_rejected_${label}`,projectId:task.projectId,actorId:"user_atomic",action:"sandbox.started" as const,status:"rejected" as const,resourceKind:"sandbox" as const,resourceId:task.id,detail:{taskId:task.id,trigger:"terminal" as const},createdAt:task.updatedAt}};
   }
 
   async function raceProjectDeletionAgainstTaskOperation<T>(projectId:string,operation:()=>Promise<T>):Promise<[unknown,T]>{
@@ -937,12 +1121,34 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     }
   }
 
+  async function settlesWithin<T>(operation:Promise<T>,timeoutMs:number):Promise<boolean>{
+    return Promise.race([
+      operation.then(()=>true,()=>true),
+      new Promise<false>((resolve)=>setTimeout(()=>resolve(false),timeoutMs))
+    ]);
+  }
+
+  async function createProjectFixture(projectId:string):Promise<void>{
+    const credentialId=`credential_${projectId}`;
+    await store.createProject({id:projectId,workspaceId:"workspace_atomic",name:projectId,ownerUserId:"user_atomic",rootPath:`workspaces/workspace_atomic/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:at,updatedAt:at});
+    await store.createProjectCredential({id:credentialId,projectId,name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:projectId,version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
+    await store.createEndpoint({id:`endpoint_${projectId}`,projectId,name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId,capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
+  }
+
+  function projectTask(id:string,projectId:string,currentRunId:string):PersistedAgentTask{
+    return{id,workspaceId:"workspace_atomic",projectId,endpointId:projectId==="project_atomic"?"endpoint_atomic":`endpoint_${projectId}`,fileLibraryId:`library_${id}`,createdByUserId:"user_atomic",title:"Task",prompt:"Work",agentContext:"",currentRunId,archivedAt:null,deletedAt:null,createdAt:at,updatedAt:at};
+  }
+
+  function projectLibrary(task:PersistedAgentTask,name:string){
+    return{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name,rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};
+  }
+
   function taskRecord(id:string,fileLibraryId:string,currentRunId:string):PersistedAgentTask{return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",endpointId:"endpoint_atomic",fileLibraryId,createdByUserId:"user_atomic",title:"Task",prompt:"Work",agentContext:"",currentRunId,archivedAt:null,deletedAt:null,createdAt:at,updatedAt:at};}
   function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function alertRule(id:string,projectId:string):ProjectAlertRule{return{id,projectId,name:id,alertType:"sandbox_failure",metric:"failure_count",condition:"greater_than_or_equal",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:false,createdAt:at,updatedAt:at};}
-  function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:"workspaces/workspace_atomic/projects/project_atomic",fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
+  function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,startupReadyAt:state==="released"?at:null,startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
   function usageOverviewReadInput(measuredAt:string){const periodStart="2026-06-24T00:00:00.000Z",periodEnd="2026-07-24T00:00:00.000Z";return{projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",selectedEndpointId:null,periodStart,periodEnd,measuredAt}}
 
   async function seedProjectDeletionBusinessData(){
@@ -950,7 +1156,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const initialMessage=message("message_project_finalize",task.id);
     assert.equal((await store.createTaskAtomically({
       task,
-      reserveActive:false,
+      reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
       newFileLibrary:library(task.fileLibraryId!,"Project finalize"),
       initialMessage,
       runtimeState:{prompt:task.prompt,message:initialMessage.content}

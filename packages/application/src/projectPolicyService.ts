@@ -219,9 +219,8 @@ export class ProjectPolicyService {
     if (!idempotencyKey) return update();
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.policy.update", key: idempotencyKey, request: input, resourceId: projectId, failureMessage: "Project policy could not be updated", run: update });
   }
-  async recordTaskReservationRejected(projectId: string, actorId: string, taskId: string): Promise<void> {
+  async recordProjectSandboxCapacityRejected(projectId: string): Promise<void> {
     await this.openAlert(projectId, "active_tasks_limit");
-    await this.auditEvent(projectId, actorId, "task.create", "rejected", taskId);
   }
   async refreshActiveTaskAlerts(projectId:string):Promise<void>{
     await evaluateProjectAlertRules(this.store,projectId,"active_tasks_limit");

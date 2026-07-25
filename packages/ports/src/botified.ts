@@ -1,8 +1,8 @@
 import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 
 export interface BotifiedRuntimeHttpClient {
-  health(baseUrl: string, serviceKey?: string): Promise<{ status: "ok" }>;
-  readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult>;
+  health(baseUrl: string, serviceKey?: string, signal?:AbortSignal): Promise<{ status: "ok" }>;
+  readState(baseUrl: string, serviceKey: string, signal?:AbortSignal): Promise<BotifiedRuntimeStateResult>;
   postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult>;
   postMessageWithDelivery?(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt>;
   queryDeliveryReceipt?(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null>;
@@ -178,10 +178,11 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     this.#requestTimeoutMs = requestTimeoutMs;
   }
 
-  async health(baseUrl: string, _serviceKey?: string): Promise<{ status: "ok" }> {
+  async health(baseUrl: string, _serviceKey?: string, signal?:AbortSignal): Promise<{ status: "ok" }> {
     const body = await this.requestJson(baseUrl, "/healthz", {
       method: "GET",
-      auth: "none"
+      auth: "none",
+      ...(signal?{signal}:{})
     });
     const record = asRecord(body);
     if (record?.ok !== true) {
@@ -196,10 +197,11 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return { status: "ok" };
   }
 
-  async readState(baseUrl: string, serviceKey: string): Promise<BotifiedRuntimeStateResult> {
+  async readState(baseUrl: string, serviceKey: string, signal?:AbortSignal): Promise<BotifiedRuntimeStateResult> {
     const body = await this.requestJson(baseUrl, "/v1/state", {
       method: "GET",
-      serviceKey
+      serviceKey,
+      ...(signal?{signal}:{})
     });
     const record = asRecord(body);
     const result: BotifiedRuntimeStateResult = {
@@ -470,6 +472,7 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       serviceKey?: string;
       headers?: HeadersInit;
       body?: BodyInit;
+      signal?:AbortSignal;
     }
   ): Promise<unknown> {
     const headers = new Headers(input.headers);
@@ -482,7 +485,9 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     const requestInit: RequestInit = {
       method: input.method,
       headers,
-      signal: AbortSignal.timeout(this.#requestTimeoutMs)
+      signal: input.signal
+        ?AbortSignal.any([input.signal,AbortSignal.timeout(this.#requestTimeoutMs)])
+        :AbortSignal.timeout(this.#requestTimeoutMs)
     };
     if (input.body !== undefined) {
       requestInit.body = input.body;
@@ -562,11 +567,11 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
 }
 
 export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient {
-  async health(): Promise<{ status: "ok" }> {
+  async health(_baseUrl?:string,_serviceKey?:string,_signal?:AbortSignal): Promise<{ status: "ok" }> {
     return { status: "ok" };
   }
 
-  async readState(): Promise<BotifiedRuntimeStateResult> {
+  async readState(_baseUrl?:string,_serviceKey?:string,_signal?:AbortSignal): Promise<BotifiedRuntimeStateResult> {
     return { snapshot: {}, state: "idle" };
   }
 

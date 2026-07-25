@@ -103,4 +103,24 @@ describe("postgres adapter ports", () => {
     assert.match(migration.sql,/update workspaces workspace[\s\S]*lifecycle_status = 'active'/i);
     assert.doesNotMatch(migration.sql,/interval|idle_ttl|max_lifetime/i);
   });
+
+  it("adds nullable Sandbox startup readiness/deadline, backfills only active Runs, and rewrites exact generated copy in migration 074",async()=>{
+    const migration=(await readPostgresMigrations()).find((item)=>item.id==="074_sandbox_startup_readiness");
+    assert.ok(migration);
+    assert.match(migration.sql,/alter table sandbox_runs\s+add column startup_ready_at timestamptz/i);
+    assert.match(migration.sql,/alter table sandbox_runs\s+add column startup_action_deadline_at timestamptz/i);
+    assert.doesNotMatch(migration.sql,/startup_ready_at timestamptz not null/i);
+    assert.doesNotMatch(migration.sql,/startup_action_deadline_at timestamptz not null/i);
+    assert.match(migration.sql,/update sandbox_runs\s+set startup_ready_at = updated_at\s+where state = 'active'\s+and startup_ready_at is null/i);
+    assert.doesNotMatch(migration.sql,/where state = 'starting'[\s\S]*startup_ready_at/i);
+    assert.match(migration.sql,/notification\.type = 'project_alert'/i);
+    assert.match(migration.sql,/alert\.type = 'active_tasks_limit'/i);
+    assert.match(migration.sql,/notification\.title = 'Task capacity reached'/i);
+    assert.match(migration.sql,/notification\.body = project\.name \|\| ': Task capacity reached\.'/i);
+    assert.match(migration.sql,/notification\.body = project\.name \|\| ': Active tasks ' \|\| alert\.metric_value::text \|\| ' of ' \|\| alert\.threshold::text \|\| '\.'/i);
+    assert.match(migration.sql,/Sandbox capacity reached/i);
+    assert.match(migration.sql,/Active sandboxes/i);
+    assert.doesNotMatch(migration.sql,/replace\s*\(|regexp_replace|like\s+'%/i);
+    assert.doesNotMatch(migration.sql,/alter table project_alerts[\s\S]*(type|metric)|alter table project_alert_rules[\s\S]*(alert_type|metric)/i);
+  });
 });

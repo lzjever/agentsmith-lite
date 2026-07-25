@@ -25,18 +25,18 @@ export interface KubernetesTransportResponse {
 }
 
 export interface KubernetesTransport {
-  request(request: KubernetesTransportRequest): Promise<KubernetesTransportResponse>;
+  request(request: KubernetesTransportRequest, signal?: AbortSignal): Promise<KubernetesTransportResponse>;
 }
 
 export interface SandboxKubernetesMutationPort {
-  applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>): Promise<"applied" | "fence_mismatch">;
+  applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>, signal?:AbortSignal): Promise<"applied" | "fence_mismatch">;
   deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch">;
 }
 
 export type PodReadiness = "ready" | "pending" | "failed" | "not_found" | "fence_mismatch";
 
 export interface SandboxKubernetesReadinessPort {
-  getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>): Promise<PodReadiness>;
+  getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>, signal?:AbortSignal): Promise<PodReadiness>;
 }
 
 const FIELD_MANAGER = "agentsmith-lite-sandbox";
@@ -85,7 +85,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
     return resources;
   }
 
-  async applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>): Promise<"applied" | "fence_mismatch"> {
+  async applyResource(resource: KubernetesResource, expectedLabels: Record<string, string>, signal?:AbortSignal): Promise<"applied" | "fence_mismatch"> {
     if (!hasLabels(resource, expectedLabels)) {
       return "fence_mismatch";
     }
@@ -94,7 +94,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       method: "GET",
       path: resourcePath(ref),
       headers: {}
-    });
+    },signal);
     if (isSuccess(existing.statusCode) && !hasLabels(asResource(existing.body), expectedLabels)) {
       return "fence_mismatch";
     }
@@ -109,7 +109,7 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
         "content-type": "application/apply-patch+yaml"
       },
       body: JSON.stringify(prepareApplyResource(resource))
-    });
+    },signal);
     if (!isSuccess(response.statusCode)) {
       throw kubernetesHttpError(`Kubernetes apply ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
@@ -171,12 +171,12 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
     return "deleted";
   }
 
-  async getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>): Promise<PodReadiness> {
+  async getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>, signal?:AbortSignal): Promise<PodReadiness> {
     const response = await this.transport.request({
       method: "GET",
       path: resourcePath({ kind: "Pod", namespace, name }),
       headers: {}
-    });
+    },signal);
     if (response.statusCode === 404) {
       return "not_found";
     }
@@ -203,12 +203,13 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
 
 export async function applySandboxReconcileActionsToKubernetes(
   port: SandboxKubernetesMutationPort,
-  actions: SandboxReconcileAction[]
+  actions: SandboxReconcileAction[],
+  signal?:AbortSignal
 ): Promise<void> {
   for (const action of actions) {
     switch (action.type) {
       case "create_resource": {
-        const result = await port.applyResource(action.resource, action.labels);
+        const result = await port.applyResource(action.resource, action.labels,signal);
         if (result === "fence_mismatch") {
           throw new Error(`Kubernetes apply fence mismatch for ${action.type} ${action.kind}/${action.name}`);
         }
@@ -246,7 +247,7 @@ class InClusterHttpsKubernetesTransport implements KubernetesTransport {
     this.ca = readFileSync("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt");
   }
 
-  async request(request: KubernetesTransportRequest): Promise<KubernetesTransportResponse> {
+  async request(request: KubernetesTransportRequest,signal?:AbortSignal): Promise<KubernetesTransportResponse> {
     return new Promise<KubernetesTransportResponse>((resolve, reject) => {
       const clientRequest = https.request(
         {
@@ -267,6 +268,7 @@ class InClusterHttpsKubernetesTransport implements KubernetesTransport {
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           });
           response.on("end", () => {
+            signal?.removeEventListener("abort",abortRequest);
             const text = Buffer.concat(chunks).toString("utf8");
             resolve({
               statusCode: response.statusCode ?? 0,
@@ -275,10 +277,22 @@ class InClusterHttpsKubernetesTransport implements KubernetesTransport {
           });
         }
       );
-      clientRequest.on("error", reject);
+      const abortRequest=()=>{
+        const reason=signal?.reason instanceof Error?signal.reason:new Error("Kubernetes API request aborted");
+        clientRequest.destroy(reason);
+      };
+      clientRequest.on("error",(error)=>{
+        signal?.removeEventListener("abort",abortRequest);
+        reject(error);
+      });
+      signal?.addEventListener("abort",abortRequest,{once:true});
       clientRequest.setTimeout(KUBERNETES_REQUEST_TIMEOUT_MS, () => {
         clientRequest.destroy(new Error("Kubernetes API request timed out"));
       });
+      if(signal?.aborted){
+        abortRequest();
+        return;
+      }
       if (request.body) {
         clientRequest.write(request.body);
       }
