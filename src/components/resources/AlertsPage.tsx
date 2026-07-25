@@ -39,7 +39,6 @@ import {
   ApiError,
   apiClient,
   isReadOnlyMutationError,
-  type Endpoint,
   type ProjectAlert,
   type ProjectCapabilities
 } from "../../lib/api/client";
@@ -97,7 +96,6 @@ function ProjectAlertsPage({
       linkedAlertId: initialRoute.linkedAlertId
     })
   );
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const mounted = useRef(true);
@@ -119,10 +117,7 @@ function ProjectAlertsPage({
   const loadSupport = useCallback(async () => {
     const generation = ++supportGeneration.current;
     setCapabilitiesError("");
-    const [capabilitiesResult, endpointsResult] = await Promise.allSettled([
-      apiClient.projectCapabilities(projectId),
-      apiClient.endpoints(projectId)
-    ]);
+    const capabilitiesResult=await Promise.resolve(apiClient.projectCapabilities(projectId)).then((value)=>({status:"fulfilled" as const,value})).catch((reason)=>({status:"rejected" as const,reason}));
     if (!mounted.current || generation !== supportGeneration.current) return;
     if (capabilitiesResult.status === "fulfilled") {
       setCapabilities(capabilitiesResult.value);
@@ -132,9 +127,6 @@ function ProjectAlertsPage({
         "Alert permissions could not be loaded. Alerts are read-only until refreshed."
       );
     }
-    setEndpoints(
-      endpointsResult.status === "fulfilled" ? endpointsResult.value : []
-    );
   }, [projectId]);
 
   useEffect(() => {
@@ -483,7 +475,6 @@ function ProjectAlertsPage({
       {alertState.view === "rules" ? (
         <AlertRulesPanel
           projectId={projectId}
-          endpoints={endpoints}
           canManage={canManage}
           onAccessDenied={revokeAccess}
         />
@@ -491,7 +482,6 @@ function ProjectAlertsPage({
         <AlertInstances
           state={alertState}
           linkedSeparate={linkedSeparate}
-          endpoints={endpoints}
           projectBasePath={projectBasePath}
           canManage={canManage}
           onRetryList={() => dispatch({ type: "list_reload_requested" })}
@@ -551,7 +541,6 @@ function ProjectAlertsPage({
 function AlertInstances({
   state,
   linkedSeparate,
-  endpoints,
   projectBasePath,
   canManage,
   onRetryList,
@@ -568,7 +557,6 @@ function AlertInstances({
 }: {
   state: ReturnType<typeof createAlertPageState>;
   linkedSeparate: boolean;
-  endpoints: Endpoint[];
   projectBasePath: string;
   canManage: boolean;
   onRetryList: () => void;
@@ -626,7 +614,6 @@ function AlertInstances({
           <ul className="divide-y divide-border border-y border-border">
             <AlertRow
               alert={state.linkedAlert}
-              endpoints={endpoints}
               projectBasePath={projectBasePath}
               canManage={canManage}
               busyId={state.mutation.busyId}
@@ -685,7 +672,6 @@ function AlertInstances({
             <AlertRow
               key={alert.id}
               alert={alert}
-              endpoints={endpoints}
               projectBasePath={projectBasePath}
               canManage={canManage}
               busyId={state.mutation.busyId}
@@ -733,7 +719,6 @@ function AlertInstances({
 
 function AlertRow({
   alert,
-  endpoints,
   projectBasePath,
   canManage,
   busyId,
@@ -746,7 +731,6 @@ function AlertRow({
   onRetryMutation
 }: {
   alert: ProjectAlert;
-  endpoints: Endpoint[];
   projectBasePath: string;
   canManage: boolean;
   busyId: string | null;
@@ -761,9 +745,6 @@ function AlertRow({
   const silenced =
     !!alert.silencedUntil && Date.parse(alert.silencedUntil) > Date.now();
   const investigation = alertInvestigation(alert, projectBasePath);
-  const endpoint = alert.endpointId
-    ? endpoints.find((item) => item.id === alert.endpointId)
-    : undefined;
   const selected = selectedAlertId === alert.id;
   return (
     <li
@@ -814,7 +795,7 @@ function AlertRow({
                 className="hover:text-primary hover:underline"
                 href={`${projectBasePath}/endpoints?endpointId=${encodeURIComponent(alert.endpointId)}`}
               >
-                {endpoint?.name ?? `Endpoint ${alert.endpointId}`}
+                {alert.endpointName ?? `Endpoint ${alert.endpointId}`}
               </Link>
             </>
           ) : null}

@@ -14,6 +14,7 @@ import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { Banner, Button, EmptyState, Heading, IconButton, NumberInput, Selector, Spinner, Text, useToast } from "@astryxdesign/core";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
+import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
 type PolicyDraft = Omit<Required<ProjectPolicyInput>, "activeTasksLimit"> & { activeTasksLimit: number | null };
@@ -46,13 +47,10 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   const active = useRef(true);
   const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const [endpointViews,setEndpointViews]=useState<Map<string,Endpoint>>(new Map());
+  const [selectedEndpoint,setSelectedEndpoint]=useState<Endpoint>();
   const [caps, setCaps] = useState<ProjectCapabilities>();
   const [draft, setDraft] = useState<PolicyDraft>();
-  const [endpointState, setEndpointState] = useState<
-    "loading" | "ready" | "error"
-  >("loading");
-  const [endpointError, setEndpointError] = useState("");
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -69,12 +67,9 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     setError("");
     setCaps(undefined);
     setCapabilitiesError("");
-    setEndpointState("loading");
-    setEndpointError("");
-    const [policyResult, capabilitiesResult, endpointResult] = await Promise.allSettled([
+    const [policyResult, capabilitiesResult] = await Promise.allSettled([
       apiClient.policy(projectId),
       apiClient.projectCapabilities(projectId),
-      apiClient.endpoints(projectId),
     ]);
     if (!active.current || request !== loadRequest.current) return;
     if (policyResult.status === "rejected") {
@@ -86,18 +81,16 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     }
     setPolicy(policyResult.value);
     setDraft(policyDraft(policyResult.value));
+    const views=new Map<string,Endpoint>();
+    for(const endpointId of new Set((policyResult.value.endpointWindows??[]).map((window)=>window.endpointId))){
+      try{const endpoint=await apiClient.endpoint(projectId,endpointId);views.set(endpoint.id,endpoint)}catch{}
+    }
+    if(!active.current||request!==loadRequest.current)return;
+    setEndpointViews(views);setSelectedEndpoint(undefined);
     if (capabilitiesResult.status === "fulfilled") {
       setCaps(capabilitiesResult.value);
     } else {
       setCapabilitiesError("Policy permissions could not be loaded. The policy is read-only until refreshed.");
-    }
-    if (endpointResult.status === "fulfilled") {
-      setEndpoints(endpointResult.value);
-      setEndpointState("ready");
-    } else {
-      setEndpoints([]);
-      setEndpointError(endpointResult.reason instanceof Error ? endpointResult.reason.message : "Endpoints could not be loaded.");
-      setEndpointState("error");
     }
     setState("ready");
   }, [projectId]);
@@ -131,7 +124,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       if (cause instanceof ApiError && cause.status === 403) {
         setPolicy(undefined);
         setDraft(undefined);
-        setEndpoints([]);
+        setEndpointViews(new Map());
         setCaps(undefined);
         setState("loading");
         await load();
@@ -149,6 +142,9 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       if (active.current) setSaving(false);
     }
   }
+  const configuredEndpointIds=[...new Set(draft?.endpointWindows.map((window)=>window.endpointId)??[])];
+  if(selectedEndpoint&&!configuredEndpointIds.includes(selectedEndpoint.id))configuredEndpointIds.push(selectedEndpoint.id);
+  const policyEndpoints=configuredEndpointIds.map((id)=>endpointViews.get(id)??(selectedEndpoint?.id===id?selectedEndpoint:undefined)??{id,name:`Endpoint ${id}`} as Pick<Endpoint,"id"|"name">);
   return (
     <PageLayout
       contentWidth="narrow"
@@ -280,25 +276,8 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
               Each limit applies independently to every user over the selected rolling window.
             </Text>
-            {endpointState === "error" ? (
-              <Banner
-                className="mt-3"
-                status="error"
-                title="Endpoint windows unavailable"
-                description={`Endpoint windows could not be loaded: ${endpointError}`}
-                endContent={
-                  <Button
-                    label="Retry"
-                    variant="ghost"
-                    size="md"
-                    icon={<RefreshCw size={15} />}
-                    isDisabled={saving}
-                    onClick={() => void load()}
-                  />
-                }
-              />
-            ) : null}
-            {endpoints.map((endpoint) => (
+            {canManage?<div className="mt-3"><EndpointPicker projectId={projectId} value={selectedEndpoint?.id??""} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={saving} label="Add endpoint window" onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointViews((current)=>new Map(current).set(endpoint.id,endpoint))}}/></div>:null}
+            {policyEndpoints.map((endpoint) => (
               <fieldset
                 className="mt-4 border-t border-border pt-3"
                 key={endpoint.id}
@@ -387,8 +366,8 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                 })}
               </fieldset>
             ))}
-            {endpointState === "ready" && !endpoints.length ? (
-              <EmptyState className="mt-3" isCompact title="No endpoints configured" />
+            {!policyEndpoints.length ? (
+              <EmptyState className="mt-3" isCompact title="No endpoint windows configured" />
             ) : null}
           </section>
           {canManage ? (

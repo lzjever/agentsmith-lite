@@ -4,7 +4,7 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
@@ -97,12 +97,14 @@ export interface ProjectCapabilities { canManageEndpoints: boolean; canManageMem
 export type ProjectOverviewAction = "configure_endpoint" | "create_task" | "add_collaborator";
 export interface ProjectOverview { project: Project; workspaceLifecycleStatus: "active" | "archived" | "deleting"; capabilities: ProjectCapabilities; owner: { displayName: string | null; email: string } | null; memberRole: MemberRole; taskReadyEndpointCount: number; recommendedActions: ProjectOverviewAction[]; }
 export type EndpointCapability = "text" | "image" | "tool_calls";
-export type Endpoint = PublicModelEndpoint;
+export type Endpoint = EndpointView;
+export type EndpointPage = ApiEndpointPage;
 export interface EndpointModelDiscovery { models: string[]; health: { status: "healthy" | "unavailable" | "unknown"; checkedAt: string | null; errorCategory: "auth" | "network" | "upstream" | "timeout" | "rate_limit" | "unknown" | null }; }
 export interface EndpointInput {
   name: string; baseUrl: string; model: string; credentialId: string; capabilities: EndpointCapability[]; requestTimeoutSecs: number;
 }
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: string; lastRotatedAt: string | null; updatedAt: string; }
+export type CredentialPage = ApiCredentialPage;
 export type Task = AgentTask;
 export type TaskDetail = TaskDetailProjection;
 export type TaskArtifact = AgentTaskArtifact;
@@ -141,6 +143,7 @@ export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { k
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
 export interface ProjectUsageEndpoint { endpointId: string | null; endpointName: string; requests: number; tokens: number; cost: number;limits?:ProjectUsageLimit[]; }
+export type ProjectEndpointUsagePage = ApiProjectEndpointUsagePage;
 export type ProjectAlert = ApiProjectAlert;
 export type ProjectAlertView = ApiProjectAlertView;
 export type ProjectAlertPage = ApiProjectAlertPage;
@@ -217,11 +220,13 @@ function jsonIdempotent<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DEL
   return request<T>(path, { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
-function directoryQuery(query:{q?:string;role?:string;cursor?:string;limit?:number}):string {
+function directoryQuery(query:{q?:string;role?:string;mode?:string;cursor?:string;limit?:number;userId?:string}):string {
   const params=new URLSearchParams();
   if(query.q)params.set("q",query.q);
   if(query.role)params.set("role",query.role);
-  if(query.cursor)params.set("cursor",query.cursor);
+  if(query.mode)params.set("mode",query.mode);
+  if(query.userId)params.set("userId",query.userId);
+  if(query.cursor!==undefined)params.set("cursor",query.cursor);
   if(query.limit!==undefined)params.set("limit",String(query.limit));
   const encoded=params.toString();
   return encoded?`?${encoded}`:"";
@@ -273,11 +278,13 @@ export const apiClient = {
     jsonIdempotent<ProjectMember>(`/projects/${encodeURIComponent(projectId)}/members`, "PATCH", idempotencyKey, { userId, role, expectedUpdatedAt }),
   removeMember: (projectId: string, userId: string, expectedUpdatedAt: string, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/members`, "DELETE", idempotencyKey, { userId, expectedUpdatedAt }),
   transferProjectOwner:(projectId:string,userId:string,idempotencyKey:string)=>jsonIdempotent<{transferred:true}>(`/projects/${encodeURIComponent(projectId)}/members/transfer-owner`,"POST",idempotencyKey,{userId}),
-  credentials: (projectId: string) => request<ProjectCredential[]>(`/projects/${encodeURIComponent(projectId)}/credentials`),
+  credentials: (projectId:string,query:CredentialDirectoryQuery={}) => request<CredentialPage>(`/projects/${encodeURIComponent(projectId)}/credentials${directoryQuery(query)}`),
+  credential: (projectId:string,credentialId:string) => request<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`),
   createCredential: (projectId: string, input: { name: string; baseUrl: string; secret: string }, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials`, "POST", idempotencyKey, input),
   rotateCredential: (projectId: string, credentialId: string, secret: string, idempotencyKey: string) => jsonIdempotent<ProjectCredential>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}/rotate`, "POST", idempotencyKey, { secret }),
   deleteCredential: (projectId: string, credentialId: string, expectedVersion: number, idempotencyKey: string) => jsonIdempotent<{ deleted: true }>(`/projects/${encodeURIComponent(projectId)}/credentials/${encodeURIComponent(credentialId)}`, "DELETE", idempotencyKey, { expectedVersion }),
-  endpoints: (projectId: string) => request<Endpoint[]>(`/projects/${encodeURIComponent(projectId)}/endpoints`),
+  endpoints: (projectId:string,query:EndpointDirectoryQuery={}) => request<EndpointPage>(`/projects/${encodeURIComponent(projectId)}/endpoints${directoryQuery(query)}`),
+  endpoint: (projectId:string,endpointId:string) => request<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`),
   createEndpoint: (projectId: string, input: EndpointInput, idempotencyKey: string) => jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints`, "POST", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
   updateEndpoint: (projectId: string, endpointId: string, input: EndpointInput & { expectedUpdatedAt: string }, idempotencyKey: string) =>
     jsonIdempotent<Endpoint>(`/projects/${encodeURIComponent(projectId)}/endpoints/${encodeURIComponent(endpointId)}`, "PATCH", idempotencyKey, { ...input, protocol: "openai_chat_completions" }),
@@ -305,6 +312,7 @@ export const apiClient = {
   updatePolicy: (projectId: string, input: ProjectPolicyUpdate, idempotencyKey: string) =>
     jsonIdempotent<ProjectResourcePolicy>(`/projects/${encodeURIComponent(projectId)}/policy`, "PATCH", idempotencyKey, input),
   usage: (projectId: string, query: { endpointId?: string; userId?: string } = {}) => { const params = new URLSearchParams(); if (query.endpointId) params.set("endpointId", query.endpointId); if (query.userId) params.set("userId", query.userId); return request<ProjectUsageOverview>(`/projects/${encodeURIComponent(projectId)}/usage${params.size ? `?${params}` : ""}`); },
+  endpointUsage: (projectId:string,query:ProjectEndpointUsageQuery={}) => request<ProjectEndpointUsagePage>(`/projects/${encodeURIComponent(projectId)}/usage/endpoints${directoryQuery(query)}`),
   measureFileStorage: (projectId: string) => json<ProjectFileStorageRefreshResponse>(`/projects/${encodeURIComponent(projectId)}/usage/file-storage/refresh`, "POST", {}),
   sandboxRunHistory: (projectId: string, query: { userId?: string; cursor?: string; limit?: number } = {}) => { const params = new URLSearchParams(); if (query.userId) params.set("userId", query.userId); if (query.cursor) params.set("cursor", query.cursor); if (query.limit) params.set("limit", String(query.limit)); return request<ProjectSandboxRunHistoryPage>(`/projects/${encodeURIComponent(projectId)}/usage/sandbox-runs${params.size ? `?${params}` : ""}`); },
   alerts: (projectId: string, query: ApiProjectAlertQuery = {}) => { const params=new URLSearchParams();if(query.view)params.set("view",query.view);if(query.cursor)params.set("cursor",query.cursor);if(query.limit)params.set("limit",String(query.limit));return request<ProjectAlertPage>(`/projects/${encodeURIComponent(projectId)}/alerts${params.size?`?${params}`:""}`); },

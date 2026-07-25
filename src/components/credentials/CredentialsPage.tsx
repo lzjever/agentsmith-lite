@@ -7,9 +7,10 @@ import {
   EmptyState,
   Spinner,
   Text,
+  TextInput,
   useToast,
 } from "@astryxdesign/core";
-import { KeyRound, Plus } from "lucide-react";
+import { KeyRound, Plus, Search } from "lucide-react";
 import {
   Fragment,
   type FormEvent,
@@ -34,6 +35,10 @@ import { DeleteCredentialDialog } from "./DeleteCredentialDialog";
 
 export function CredentialsPage({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<ProjectCredential[]>([]);
+  const [query,setQuery]=useState(""),[committedQuery,setCommittedQuery]=useState("");
+  const [cursor,setCursor]=useState<string|undefined>(),[cursorHistory,setCursorHistory]=useState<Array<string|undefined>>([]);
+  const [loadedCursor,setLoadedCursor]=useState<string|undefined>(),[loadedCursorHistory,setLoadedCursorHistory]=useState<Array<string|undefined>>([]);
+  const [nextCursor,setNextCursor]=useState<string|null>(null),[refreshing,setRefreshing]=useState(false);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState("");
@@ -46,6 +51,8 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
   const [rotateError, setRotateError] = useState("");
   const [busy, setBusy] = useState(false);
   const loadRevision = useRef(0);
+  const capabilitiesRevision=useRef(0);
+  const hasContent=useRef(false);
   const projectRevision = useRef(0);
   const currentProjectId = useRef(projectId);
   const mutationKeys = useMutationKeys();
@@ -63,32 +70,25 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
   const load = useCallback(async (): Promise<ProjectCredential[] | null> => {
     const targetProjectId = projectId;
     const revision = ++loadRevision.current;
-    setState("loading");
-    setCapabilities(undefined);
-    setCapabilitiesError("");
+    hasContent.current?setRefreshing(true):setState("loading");
     try {
-      const [credentialsResult, capabilitiesResult] = await Promise.allSettled([
-        apiClient.credentials(projectId),
-        apiClient.projectCapabilities(projectId),
-      ]);
+      const credentialsResult=await apiClient.credentials(projectId,{q:committedQuery,...(cursor!==undefined?{cursor}:{}),limit:20});
       if (targetProjectId !== currentProjectId.current || revision !== loadRevision.current) return null;
-      if (credentialsResult.status === "rejected") throw credentialsResult.reason;
-      setItems(credentialsResult.value);
-      if (capabilitiesResult.status === "fulfilled") {
-        setCapabilities(capabilitiesResult.value);
-      } else {
-        setCapabilitiesError("Credential permissions could not be loaded. Credentials are read-only until refreshed.");
-      }
+      setItems(credentialsResult.items);setNextCursor(credentialsResult.nextCursor);setLoadedCursor(cursor);setLoadedCursorHistory(cursorHistory);hasContent.current=true;
       setError("");
       setState("ready");
-      return credentialsResult.value;
+      return credentialsResult.items;
     } catch (reason) {
       if (targetProjectId !== currentProjectId.current || revision !== loadRevision.current) return null;
       setError(reason instanceof ApiError ? reason.message : "Credentials could not be loaded.");
-      setState("error");
+      if(!hasContent.current)setState("error");
       return null;
+    }finally{
+      if(targetProjectId===currentProjectId.current&&revision===loadRevision.current)setRefreshing(false);
     }
-  }, [projectId]);
+  }, [committedQuery,cursor,cursorHistory,projectId]);
+
+  useEffect(()=>{const timer=window.setTimeout(()=>{setCommittedQuery(query.trim());setCursorHistory([]);setCursor(undefined)},250);return()=>window.clearTimeout(timer)},[query]);
 
   useEffect(() => {
     setCreateOpen(false);
@@ -98,8 +98,16 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
     setCreateError("");
     setRotateError("");
     setBusy(false);
-    void load();
-  }, [load]);
+    hasContent.current=false;setQuery("");setCommittedQuery("");setCursor(undefined);setCursorHistory([]);setLoadedCursor(undefined);setLoadedCursorHistory([]);
+    setCapabilities(undefined);setCapabilitiesError("");
+    const targetProjectId=projectId,revision=++capabilitiesRevision.current;
+    void apiClient.projectCapabilities(projectId).then((value)=>{
+      if(targetProjectId===currentProjectId.current&&revision===capabilitiesRevision.current)setCapabilities(value);
+    }).catch(()=>{
+      if(targetProjectId===currentProjectId.current&&revision===capabilitiesRevision.current)setCapabilitiesError("Credential permissions could not be loaded. Credentials are read-only until refreshed.");
+    });
+  }, [projectId]);
+  useEffect(()=>{void load()},[load]);
 
   useEffect(() => {
     if (!rotate) mutationKeys.clear("credential.rotate");
@@ -121,7 +129,7 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
       setRemove(undefined);
       if (reason.status === 403) {
         setItems([]);
-        await load();
+        await resetPage();
       } else {
         setCapabilities((current) => current ? { ...current, canManageEndpoints: false } : current);
         setCapabilitiesError("Credential management access changed. Credentials are now read-only.");
@@ -154,6 +162,7 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
       setCreateOpen(false);
       setCreateProjectId(undefined);
       showToast({ body: "Credential created." });
+      await resetPage();
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("credential.create", projectId);
       if (revision !== projectRevision.current) return;
@@ -187,10 +196,7 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
       if (reason instanceof ApiError) mutationKeys.complete("credential.rotate", requestIdentity);
       if (revision !== projectRevision.current) return;
       if (isCredentialRefreshError(reason)) {
-        const listed = await load();
-        if (revision !== projectRevision.current) return;
-        const refreshed = listed?.find((item) => item.id === requestIdentity);
-        setRotate(refreshed);
+        try{setRotate(await apiClient.credential(projectId,requestIdentity))}catch{setRotate(undefined)}
       }
       setRotateError(await mutationError(reason, "Credential could not be rotated."));
     } finally {
@@ -215,21 +221,21 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
       setItems((current) => current.filter((item) => item.id !== remove.id));
       setRemove(undefined);
       showToast({ body: "Credential deleted." });
+      await resetPage();
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("credential.delete", requestIdentity);
       if (revision !== projectRevision.current) return;
       if (isCredentialDeleteRefreshError(reason)) {
-        const listed = await load();
-        if (revision !== projectRevision.current) return;
-        const refreshed = listed?.find((item) => item.id === requestIdentity);
-        setRemove(refreshed);
-        if (reason instanceof ApiError && reason.status === 404 && listed && !refreshed) return;
+        try{setRemove(await apiClient.credential(projectId,requestIdentity))}catch{setRemove(undefined);if(reason instanceof ApiError&&reason.status===404)return}
       }
       throw new Error(await mutationError(reason, "Credential is still in use or could not be deleted."));
     } finally {
       if (revision === projectRevision.current) setBusy(false);
     }
   }
+
+  async function resetPage(){setCursorHistory([]);setCursor(undefined);if(cursor===undefined)await load()}
+  const visibleItems=dedupeCredentials([rotate,remove,...items].filter((item):item is ProjectCredential=>item!==undefined));
 
   return (
     <PageLayout
@@ -276,12 +282,21 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
       ) : null}
       {state === "ready" ? (
         <>
+          {error ? (
+            <Banner
+              className="mb-4"
+              status="error"
+              title="Credentials could not be refreshed"
+              description={error}
+              endContent={<Button label="Retry" variant="ghost" onClick={() => void load()} />}
+            />
+          ) : null}
           <Text as="p" display="block" color="secondary" className="mb-5">
             {canManage
               ? "Create, rotate, or remove credentials for this project."
               : "You can view credential metadata, but cannot change credentials."}
           </Text>
-          {items.length === 0 ? (
+          {items.length === 0&&!query ? (
             <EmptyState
               data-testid="page-state__empty"
               data-page-state="empty"
@@ -292,8 +307,10 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
               ) : undefined}
             />
           ) : (
-            <div aria-label="Project credentials">
-              {items.map((item, index) => (
+            <div aria-label="Project credentials" className="space-y-4">
+              <TextInput label="Search credentials" isLabelHidden startIcon={<Search size={16}/>} value={query} onChange={(value)=>{loadRevision.current+=1;setQuery(value)}} placeholder="Search credentials" className="max-w-sm" size="lg"/>
+              {visibleItems.length===0?<EmptyState isCompact title="No credentials match this search" description="Try a different credential name, URL, or fingerprint."/>:<div>
+              {visibleItems.map((item, index) => (
                 <Fragment key={item.id}>
                   {index > 0 ? <Divider /> : null}
                   <CredentialRow
@@ -311,7 +328,8 @@ export function CredentialsPage({ projectId }: { projectId: string }) {
                     }}
                   />
                 </Fragment>
-              ))}
+              ))}</div>}
+              {loadedCursorHistory.length>0||nextCursor?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={refreshing||Boolean(error)||loadedCursorHistory.length===0} onClick={()=>{setCursor(loadedCursorHistory.at(-1));setCursorHistory(loadedCursorHistory.slice(0,-1))}}/><Text type="supporting" color="secondary">Page {loadedCursorHistory.length+1}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={refreshing||Boolean(error)||query.trim()!==committedQuery||!nextCursor} onClick={()=>{if(nextCursor){setCursorHistory([...loadedCursorHistory,loadedCursor]);setCursor(nextCursor)}}}/></div>:null}
             </div>
           )}
         </>
@@ -372,4 +390,10 @@ function isCredentialDeleteRefreshError(reason: unknown): boolean {
     reason.status === 404 ||
     (reason.status === 409 && reason.message === "Credential changed elsewhere. Refresh and try again.")
   );
+}
+
+function dedupeCredentials(items:ProjectCredential[]):ProjectCredential[]{
+  const byId=new Map<string,ProjectCredential>();
+  for(const item of items)if(!byId.has(item.id))byId.set(item.id,item);
+  return [...byId.values()];
 }

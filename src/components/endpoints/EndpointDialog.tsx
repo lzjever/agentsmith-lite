@@ -15,8 +15,8 @@ import {
 import type {
   EndpointCapability,
   EndpointInput,
-  ProjectCredential,
 } from "../../lib/api/client";
+import { CredentialPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
@@ -32,7 +32,7 @@ export function EndpointDialog({
   canSave,
   nameConflict,
   error,
-  credentials,
+  projectId,
   onDiscoverModels,
   onDismissError,
   onOpenChange,
@@ -50,7 +50,7 @@ export function EndpointDialog({
   canSave: boolean;
   nameConflict: boolean;
   error: string;
-  credentials: ProjectCredential[];
+  projectId:string;
   onDiscoverModels: () => void;
   onDismissError: () => void;
   onOpenChange: (open: boolean) => void;
@@ -162,29 +162,7 @@ export function EndpointDialog({
                     width="100%"
                   />
                 </div>
-                <Selector
-                  label="Credential"
-                  isRequired
-                  options={credentials.map((credential) => ({
-                    value: credential.id,
-                    label: `${credential.name} (${credential.fingerprint})`,
-                  }))}
-                  value={input.credentialId}
-                  onChange={(credentialId) => {
-                    const credential = credentials.find(
-                      (item) => item.id === credentialId,
-                    );
-                    onChange({
-                      ...input,
-                      credentialId,
-                      ...(credential ? { baseUrl: credential.baseUrl } : {}),
-                    });
-                  }}
-                  placeholder="Select credential"
-                  isDisabled={saving || discovering}
-                  size="lg"
-                  width="100%"
-                />
+                <CredentialPicker projectId={projectId} value={input.credentialId} disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})}/>
                 <NumberInput
                   label="Timeout"
                   value={input.requestTimeoutSecs}

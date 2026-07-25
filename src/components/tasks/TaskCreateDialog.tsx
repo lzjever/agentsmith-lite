@@ -5,6 +5,7 @@ import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Banner, Button, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
+import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
 
 export type TaskCreateValue = {
@@ -15,9 +16,9 @@ export type TaskCreateValue = {
 };
 
 export function TaskCreateDialog({
-  endpoints, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
+  projectId, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
 }: {
-  endpoints: Endpoint[];
+  projectId:string;
   libraries: FileLibrary[];
   librariesLoading: boolean;
   policyHref?: string;
@@ -29,6 +30,7 @@ export function TaskCreateDialog({
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [endpointId, setEndpointId] = useState("");
+  const [selectedEndpoint,setSelectedEndpoint]=useState<Endpoint>();
   const [libraryMode, setLibraryMode] = useState<"create_new" | "use_existing">("create_new");
   const [libraryName, setLibraryName] = useState("Task File Library");
   const [libraryNameEdited, setLibraryNameEdited] = useState(false);
@@ -48,13 +50,10 @@ export function TaskCreateDialog({
     setLibraryName("Task File Library");
     setLibraryNameEdited(false);
     setLibraryId("");
+    setEndpointId("");
+    setSelectedEndpoint(undefined);
     clearError();
   }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    setEndpointId((current) => endpoints.some((endpoint) => endpoint.id === current) ? current : (endpoints[0]?.id ?? ""));
-  }, [endpoints, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -91,10 +90,10 @@ export function TaskCreateDialog({
       <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
         <div className="grid gap-5">
           {error ? <Banner status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
-          {endpoints.length === 0 ? <Banner status="warning" title="No task-ready endpoint" description="Add or repair an endpoint before creating a task." /> : <>
-            <div className="grid gap-4 sm:grid-cols-2">
+          <>
+            <div className="grid gap-4">
               <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
-              <Selector label="Endpoint" options={endpoints.map((endpoint) => ({ value: endpoint.id, label: `${endpoint.name} (${endpoint.model})` }))} value={endpointId} onChange={setEndpointId} isDisabled={busy} size="lg" />
+              <EndpointPicker projectId={projectId} mode="task_ready" value={endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={busy} onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointId(endpoint.id)}}/>
             </div>
             <div className="grid gap-3">
               <RadioList label="File Library" htmlName="file-library-mode" value={libraryMode} onChange={(value) => setLibraryMode(value as typeof libraryMode)} isDisabled={busy}>
@@ -105,7 +104,7 @@ export function TaskCreateDialog({
               {libraryMode === "use_existing" ? librariesLoading ? <Text className="ml-7" type="supporting" color="secondary">Loading File Libraries...</Text> : availableLibraries.length > 0 ? <div className="ml-7"><Selector label="Existing File Library" options={availableLibraries.map((library) => ({ value: library.id, label: library.name }))} value={libraryId} onChange={setLibraryId} isDisabled={busy} size="lg" /></div> : <Text className="ml-7" type="supporting" color="secondary">No unbound File Library is available.</Text> : null}
             </div>
             <TextArea label="Task prompt" value={prompt} onChange={setPrompt} rows={7} placeholder="Describe the result you need" isDisabled={busy} width="100%" />
-          </>}
+          </>
         </div>
       </form>
   </Dialog>;

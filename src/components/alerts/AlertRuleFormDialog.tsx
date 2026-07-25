@@ -12,6 +12,7 @@ import {
 } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
+import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
@@ -29,8 +30,8 @@ export interface AlertRuleFormValue { name: string; alertType: ProjectAlertType;
 
 const standardWindowSeconds = new Set([3600, 86400, 604800]);
 
-export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, canSave, error, onOpenChange, onChange, onSubmit }: {
-  open: boolean; editing: boolean; value: AlertRuleFormValue; endpoints: Endpoint[]; saving: boolean; error: string;
+export function AlertRuleFormDialog({ open, editing, value, projectId, selectedEndpoint, saving, canSave, error, onOpenChange, onChange, onSubmit }: {
+  open: boolean; editing: boolean; value: AlertRuleFormValue; projectId:string;selectedEndpoint?:Endpoint;saving: boolean; error: string;
   canSave: boolean;
   onOpenChange: (open: boolean) => void; onChange: (value: AlertRuleFormValue) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -131,22 +132,21 @@ export function AlertRuleFormDialog({ open, editing, value, endpoints, saving, c
                 label="Scope"
                 options={[
                   { value: "project", label: "Entire project" },
-                  ...(supportsEndpointScope(value.alertType)
-                    ? endpoints.map((endpoint) => ({ value: endpoint.id, label: endpoint.name }))
-                    : []),
+                  ...(supportsEndpointScope(value.alertType)?[{value:"endpoint",label:"One endpoint"}]:[]),
                 ]}
-                value={value.scope.kind === "project" ? "project" : value.scope.endpointId}
+                value={value.scope.kind}
                 onChange={(next) =>
                   onChange({
                     ...value,
                     scope: next === "project"
                       ? { kind: "project" }
-                      : { kind: "endpoint", endpointId: next },
+                      : { kind: "endpoint", endpointId: value.scope.kind==="endpoint"?value.scope.endpointId:"" },
                   })
                 }
                 isDisabled={saving || !supportsEndpointScope(value.alertType)}
                 size="lg"
               />
+              {supportsEndpointScope(value.alertType)&&value.scope.kind==="endpoint"?<EndpointPicker projectId={projectId} value={value.scope.endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={saving} onChange={(endpoint)=>onChange({...value,scope:{kind:"endpoint",endpointId:endpoint.id}})}/>:null}
               <CheckboxInput
                 label="Enabled"
                 value={value.enabled}

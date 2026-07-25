@@ -5,12 +5,12 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Banner, Button as AstryxButton, IconButton, Spinner, Text, useToast } from "@astryxdesign/core";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { TaskCreateDialog, type TaskCreateValue } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
-import { taskCompatibleEndpoints, taskDetailNeedsRefresh, taskEndpointGuidance } from "./task-ui";
+import { taskDetailNeedsRefresh } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
@@ -34,7 +34,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const showToast = useToast();
   const active = useRef(true);
   const [page, setPage] = useState<TaskListPage>(emptyPage);
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const [taskReadyEndpointCount,setTaskReadyEndpointCount]=useState(0);
   const [libraries, setLibraries] = useState<FileLibrary[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [endpointsState, setEndpointsState] = useState<DependencyState>("loading");
@@ -78,13 +78,13 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     setEndpointsState("loading");
     setEndpointsError("");
     try {
-      const available = await apiClient.endpoints(projectId);
+      const available = await apiClient.endpoints(projectId,{mode:"task_ready",limit:1});
       if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
-      setEndpoints(available);
+      setTaskReadyEndpointCount(available.readiness.taskReady);
       setEndpointsState("ready");
     } catch (reason) {
       if (!active.current || endpointsVersion !== endpointsLoadVersion.current) return;
-      setEndpoints([]);
+      setTaskReadyEndpointCount(0);
       setEndpointsError(message(reason));
       setEndpointsState("error");
     }
@@ -203,10 +203,8 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     } finally { if (active.current) setCreating(false); }
   }
 
-  const compatibleEndpoints = taskCompatibleEndpoints(endpoints);
-  const endpointGuidance = taskEndpointGuidance(endpoints);
   const canCreate = capabilitiesState === "ready" && capabilities?.canCreateTasks === true;
-  const createReady = canCreate && endpointsState === "ready" && librariesState === "ready" && compatibleEndpoints.length > 0;
+  const createReady = canCreate && endpointsState === "ready" && librariesState === "ready" && taskReadyEndpointCount > 0;
   const subtitle = canCreate ? "Create and follow Botified work for this project." : "Follow Botified work for this project.";
 
   function refresh() {
@@ -221,8 +219,8 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {librariesState === "error" ? <DependencyError>{librariesError} Task creation is disabled until File Libraries can be loaded.</DependencyError> : null}
     {state === "loading" ? <div className="grid min-h-48 place-items-center px-4 py-6"><Spinner label="Loading tasks..." /></div> : null}
     {state === "error" ? <Banner status="error" container="section" title="Tasks unavailable" description={error || "Tasks could not be loaded."} endContent={<AstryxButton label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
-    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <Text display="block" type="supporting" color="secondary" className="mt-4">Your project access is read-only.</Text> : null}{canCreate && endpointsState === "ready" && endpointGuidance ? <Text display="block" type="supporting" color="secondary" className="mt-4">{endpointGuidance} <Link className="text-primary hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}><Text weight="medium">Open endpoints</Text></Link></Text> : null}</> : null}
-    <TaskCreateDialog policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} endpoints={compatibleEndpoints} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <Text display="block" type="supporting" color="secondary" className="mt-4">Your project access is read-only.</Text> : null}{canCreate && endpointsState === "ready" && taskReadyEndpointCount===0 ? <Text display="block" type="supporting" color="secondary" className="mt-4">No task-ready endpoint is available. <Link className="text-primary hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}><Text weight="medium">Open endpoints</Text></Link></Text> : null}</> : null}
+    <TaskCreateDialog projectId={projectId} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 

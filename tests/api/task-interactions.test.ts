@@ -501,8 +501,8 @@ describe("task interactions API", () => {
     assert.deepEqual(viewer.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
 
     await store.updateProjectMembership(owner);
-    const findCredential = store.findProjectCredential.bind(store);
-    store.findProjectCredential = async (id) => id === endpoint.credentialId ? null : findCredential(id);
+    const findCredential = store.findStoredProjectCredential.bind(store);
+    store.findStoredProjectCredential = async (projectId,id) => id === endpoint.credentialId ? null : findCredential(projectId,id);
     const credentialDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(credentialDisabled.items.length,initial.items.length);
     assert.equal(credentialDisabled.presentation.capabilities.sendMessage,false);

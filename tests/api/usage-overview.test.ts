@@ -49,7 +49,20 @@ test("usage overview returns project limits and authenticated-user provider aggr
     assert.equal(all.provider.daily.length, 30);
     assert.match(all.provider.periodStart, /T00:00:00\.000Z$/);
     assert.match(all.provider.periodEnd, /T00:00:00\.000Z$/);
-    assert.deepEqual(all.provider.endpoints.map((endpoint: { endpointName: string; requests: number; tokens: number; cost: number }) => [endpoint.endpointName, endpoint.requests, endpoint.tokens, endpoint.cost]), [["Primary", 1, 8, 1.25], ["Secondary", 1, 2, 0.25], ["Other provider activity", 2, 0, 0]]);
+    assert.equal("endpoints" in all.provider,false);
+    assert.equal(all.provider.selectedEndpoint,null);
+    const endpointUsage=await get(api.baseUrl,`/api/v1/projects/${project.id}/usage/endpoints?limit=50`,cookie);
+    assert.deepEqual(endpointUsage.items.map((endpoint:{endpointName:string;requests:number;tokens:number;cost:number})=>[endpoint.endpointName,endpoint.requests,endpoint.tokens,endpoint.cost]).sort(),[["Primary",1,8,1.25],["Secondary",1,2,0.25]].sort());
+    assert.equal(endpointUsage.total,2);
+    assert.equal(endpointUsage.nextCursor,null);
+    const endpointUsageFirst=await get(api.baseUrl,`/api/v1/projects/${project.id}/usage/endpoints?limit=1`,cookie);
+    assert.ok(endpointUsageFirst.nextCursor);
+    const endpointUsageSecond=await get(api.baseUrl,`/api/v1/projects/${project.id}/usage/endpoints?limit=1&cursor=${encodeURIComponent(endpointUsageFirst.nextCursor)}`,cookie);
+    assert.equal(endpointUsageSecond.items.length,1);
+    assert.notEqual(endpointUsageSecond.items[0].endpointId,endpointUsageFirst.items[0].endpointId);
+    assert.deepEqual((await get(api.baseUrl,`/api/v1/projects/${project.id}/usage/endpoints?q=primary`,cookie)).items.map((endpoint:{endpointName:string})=>endpoint.endpointName),["Primary"]);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/endpoints?cursor=`,{headers:{cookie}})).status,400);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/endpoints?q=changed&cursor=${encodeURIComponent(endpointUsageFirst.nextCursor)}`,{headers:{cookie}})).status,400);
     assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "activeTasks"), { metric: "activeTasks", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });
     assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 110, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
     assert.equal(all.limits.some((limit: { metric: string }) => limit.metric === "projectFileBytes"),false);
@@ -77,9 +90,9 @@ test("usage overview returns project limits and authenticated-user provider aggr
 
     const filtered = await get(api.baseUrl, `/api/v1/projects/${project.id}/usage?endpointId=${second.id}`, cookie);
     assert.equal(filtered.provider.selectedEndpointId, second.id);
+    assert.deepEqual(filtered.provider.selectedEndpoint,{id:second.id,name:"Secondary"});
     assert.deepEqual(filtered.provider.totals, { requests: 1, tokens: 2, cost: 0.25 });
     assert.deepEqual(filtered.provider.daily.reduce((total: { requests: number; tokens: number; cost: number }, day: { requests: number; tokens: number; cost: number }) => ({ requests: total.requests + day.requests, tokens: total.tokens + day.tokens, cost: total.cost + day.cost }), { requests: 0, tokens: 0, cost: 0 }), filtered.provider.totals);
-    assert.deepEqual(filtered.provider.endpoints, all.provider.endpoints);
     const invalid = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?endpointId=other`, { headers: { cookie } });
     assert.equal(invalid.status, 404);
     const removedFilter = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage?groupBy=provider`, { headers: { cookie } });

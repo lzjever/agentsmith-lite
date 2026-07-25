@@ -18,6 +18,9 @@ export interface UserProfilePreferences { userId: string; displayName: string | 
 export interface ProfileResponse { user: ProfileUser; preferences: UserProfilePreferences; }
 export interface ProjectCredential { id: string; projectId: string; name: string; type: "api_key"; baseUrl: string; fingerprint: string; version: number; createdAt: ISODateString; lastRotatedAt: ISODateString | null; updatedAt: ISODateString; }
 export interface StoredProjectCredential extends ProjectCredential { keyId: string; nonce: Uint8Array; ciphertext: Uint8Array; authTag: Uint8Array; }
+export interface CredentialDirectoryQuery { q?: string; cursor?: string; limit?: number; }
+export interface CredentialPage { items: ProjectCredential[]; nextCursor: string | null; }
+export type ProjectCredentialSummary = Pick<ProjectCredential,"id"|"name"|"baseUrl"|"version">;
 export type ProjectContextScope = "workspace_shared" | "workspace_personal" | "project_shared" | "project_personal";
 export type ProjectContextContentType = "text" | "json" | "markdown" | "yaml";
 export interface ProjectContextEntry { id: string; workspaceId: string; projectId: string | null; ownerUserId: string | null; scope: ProjectContextScope; contextKey: string; content: string; contentType: ProjectContextContentType; version: number; createdAt: ISODateString; updatedAt: ISODateString; }
@@ -256,10 +259,13 @@ export interface ProjectProviderUsage {
   periodStart: ISODateString;
   periodEnd: ISODateString;
   selectedEndpointId: string | null;
+  selectedEndpoint: Pick<PublicModelEndpoint,"id"|"name"> | null;
   daily: ProjectUsageDay[];
   totals: { requests: number; tokens: number; cost: number };
-  endpoints: ProjectUsageEndpoint[];
 }
+
+export interface ProjectEndpointUsageQuery { q?:string; cursor?:string; limit?:number; userId?:string; }
+export interface ProjectEndpointUsagePage { items:ProjectUsageEndpoint[]; nextCursor:string|null; total:number; }
 
 export interface ProjectFileStorageUsage {
   recordedBytes: number;
@@ -312,6 +318,7 @@ interface ProjectAlertFields {
   metricValue?: number | null;
   threshold?: number | null;
   endpointId?: string | null;
+  endpointName?: string | null;
   subjectActorId?: string | null;
   acknowledgedAt?: ISODateString | null;
   acknowledgedBy?: string | null;
@@ -452,6 +459,11 @@ export type PublicModelEndpoint = ModelEndpoint & {
   hasCredentialRef: boolean;
   taskEligible: boolean;
 };
+export type EndpointDirectoryMode = "all"|"task_ready";
+export interface EndpointDirectoryQuery { q?:string; mode?:EndpointDirectoryMode; cursor?:string; limit?:number; }
+export type EndpointView = PublicModelEndpoint & { credential:ProjectCredentialSummary|null };
+export interface EndpointReadiness { taskReady:number; }
+export interface EndpointPage { items:EndpointView[]; nextCursor:string|null; total:number; readiness:EndpointReadiness; }
 
 export type ChatRole = "system" | "user" | "assistant";
 

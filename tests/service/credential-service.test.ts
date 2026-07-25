@@ -24,7 +24,7 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
 
   assert.equal(replayedCredential.id, credential.id);
   assert.deepEqual(Object.keys(credential).sort(), ["baseUrl", "createdAt", "fingerprint", "id", "lastRotatedAt", "name", "projectId", "type", "updatedAt", "version"]);
-  assert.deepEqual((await services.credentials.list(user.id, project.id)).map((item) => item.id), [credential.id]);
+  assert.deepEqual((await services.credentials.list(user.id, project.id)).items.map((item) => item.id), [credential.id]);
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "first-secret");
   const endpoint = await services.endpoints.createEndpoint(user.id, project.id, { name: "Endpoint", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 });
   assert.equal(endpoint.health?.status, "healthy");
@@ -48,7 +48,7 @@ test("project credentials are write-only, rotate with new AAD version, and bind 
   assert.equal((await services.credentials.resolve(project.id, credential.id)).apiKey, "second-secret");
   await services.credentials.remove(user.id, project.id, credential.id, rotated.version, "credential-delete-key");
   await services.credentials.remove(user.id, project.id, credential.id, rotated.version, "credential-delete-key");
-  assert.deepEqual(await services.credentials.list(user.id, project.id), []);
+  assert.deepEqual((await services.credentials.list(user.id, project.id)).items, []);
   assert.equal(((await store.queryProjectAuditEvents(project.id,{limit:100})).items).filter(event=>event.action==="credential.delete"&&event.status==="accepted").length,1);
 });
 
@@ -71,7 +71,7 @@ test("concurrent credential rotations reject the stale writer", async () => {
   assert.equal(rejected.length, 1);
   assert.ok(rejected[0]!.reason instanceof ProductError);
   assert.equal((rejected[0]!.reason as ProductError).statusCode, 409);
-  assert.equal((await services.credentials.list(user.id, project.id))[0]!.version, 2);
+  assert.equal((await services.credentials.list(user.id, project.id)).items[0]!.version, 2);
 });
 
 function status(expected: number) { return (error: unknown) => error instanceof ProductError && error.statusCode === expected; }

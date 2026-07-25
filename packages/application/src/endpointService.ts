@@ -1,4 +1,4 @@
-import { sanitizeProjectAuditDetail, type CreateEndpointInput, type DiscoverEndpointModelsInput, type EndpointHealth, type EndpointModelDiscovery, type ModelEndpoint, type ProjectAuditAction, type UpdateEndpointInput } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type CreateEndpointInput, type DiscoverEndpointModelsInput, type EndpointDirectoryMode, type EndpointDirectoryQuery, type EndpointHealth, type EndpointModelDiscovery, type EndpointPage, type EndpointView, type ModelEndpoint, type ProjectAuditAction, type UpdateEndpointInput } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src/validation.js";
@@ -9,6 +9,7 @@ import { evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts }
 import { CredentialService } from "./credentialService.js";
 import { OpenAIProviderBroker } from "./openAIProviderBroker.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
+import { decodeProviderDirectoryCursor, encodeProviderDirectoryCursor, normalizeProviderDirectoryQuery, providerDirectoryLimit, type ProviderDirectoryScope } from "./endpointCredentialDirectory.js";
 
 export class EndpointService {
   constructor(
@@ -39,10 +40,16 @@ export class EndpointService {
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.endpoint.create",key:idempotencyKey,request:{projectId,...input},resourceId:endpoint.id,failureMessage:"Endpoint could not be created",run:create});
   }
 
-  async listEndpoints(userId: string, projectId: string): Promise<ModelEndpoint[]> {
+  async listEndpoints(userId:string,projectId:string,query:EndpointDirectoryQuery={}):Promise<EndpointPage>{
     await this.workspaces.requireProjectForUser(userId, projectId, "view");
-    return this.store.listEndpointsForProject(projectId);
+    const q=normalizeProviderDirectoryQuery(query.q),mode=endpointMode(query.mode),limit=providerDirectoryLimit(query.limit),scope:ProviderDirectoryScope={actorId:userId,projectId,kind:"endpoints",q,mode};
+    const after=query.cursor!==undefined?decodeProviderDirectoryCursor(query.cursor,scope):undefined;
+    const [page,readiness]=await Promise.all([this.store.listEndpointDirectoryPage(projectId,{q,mode,...(after?{after}:{}),limit:limit+1}),this.store.getProjectEndpointReadiness(projectId)]);
+    const items=page.items.slice(0,limit),last=items.at(-1);
+    return{items,nextCursor:page.items.length>limit&&last?encodeProviderDirectoryCursor(scope,{createdAt:last.createdAt,id:last.id}):null,total:page.total,readiness:{taskReady:readiness.taskReady}};
   }
+
+  async getEndpoint(userId:string,projectId:string,endpointId:string):Promise<EndpointView>{await this.workspaces.requireProjectForUser(userId,projectId,"view");const endpoint=await this.store.findEndpointView(projectId,endpointId);if(!endpoint)throw new NotFoundError("Endpoint not found");return endpoint}
 
   async updateEndpoint(userId: string, projectId: string, endpointId: string, input: UpdateEndpointInput, idempotencyKey?: string): Promise<ModelEndpoint> {
     await this.workspaces.requireProjectForUser(userId, projectId, "admin");
@@ -202,14 +209,14 @@ export class EndpointService {
   }
 
   private async requireCredentialBinding(projectId: string, credentialId: string, baseUrl: string): Promise<void> {
-    const credential = await this.store.findProjectCredential(credentialId);
-    if (!credential || credential.projectId !== projectId) throw new NotFoundError("Credential not found");
+    const credential = await this.store.findStoredProjectCredential(projectId,credentialId);
+    if (!credential) throw new NotFoundError("Credential not found");
     if (normalizeOpenAICompatibleBaseUrl(baseUrl) !== credential.baseUrl) throw new ProductError("Endpoint baseUrl does not match the credential binding");
   }
 
   private async requireUniqueName(projectId: string, name: string, excludeId?: string): Promise<void> {
     const normalized = name.trim().toLocaleLowerCase("en-US");
-    if ((await this.store.listEndpointsForProject(projectId)).some((endpoint) => endpoint.id !== excludeId && endpoint.name.trim().toLocaleLowerCase("en-US") === normalized)) throw endpointNameConflict();
+    if(await this.store.projectEndpointNameExists(projectId,normalized,excludeId))throw endpointNameConflict();
   }
 
   private async validate(endpoint: ModelEndpoint, actorId: string, settlementEndpointId: string | null): Promise<{endpoint:ModelEndpoint;credentialVersion:number}> {
@@ -232,6 +239,8 @@ export class EndpointService {
     return { ...health, checkedAt: nowIso() };
   }
 }
+
+function endpointMode(value:EndpointDirectoryMode|undefined):EndpointDirectoryMode{if(value===undefined||value==="all")return"all";if(value==="task_ready")return value;throw new ProductError("Endpoint directory mode must be all or task_ready",400)}
 
 type EndpointAuditAction = Extract<ProjectAuditAction, `endpoint.${string}`>;
 

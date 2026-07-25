@@ -137,6 +137,44 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.deepEqual(fanout.map((member)=>member.userId),["user_atomic",alphaId,highBmpId,astralId]);
   });
 
+  it("keeps endpoint and credential directories, exact reads, readiness, and usage paging aligned with C order",async()=>{
+    const tiedAt="2026-07-23T00:03:00.000Z";
+    const credentialInput=(id:string,name:string)=>({id,projectId:"project_atomic",name,type:"api_key" as const,baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:id,version:1,createdAt:tiedAt,lastRotatedAt:null,updatedAt:tiedAt});
+    await store.createProjectCredential(credentialInput("credential_\uE000","High BMP"));
+    await store.createProjectCredential(credentialInput("credential_\u{10000}","Astral"));
+    const credentialFirst=await store.listProjectCredentialDirectoryPage("project_atomic",{q:"",limit:1});
+    assert.deepEqual(credentialFirst.map((credential)=>credential.id),["credential_\u{10000}"]);
+    const credentialSecond=await store.listProjectCredentialDirectoryPage("project_atomic",{q:"",after:{createdAt:credentialFirst[0]!.createdAt,id:credentialFirst[0]!.id},limit:1});
+    assert.deepEqual(credentialSecond.map((credential)=>credential.id),["credential_\uE000"]);
+    assert.deepEqual((await store.listProjectCredentialDirectoryPage("project_atomic",{q:"high bmp",limit:20})).map((credential)=>credential.id),["credential_\uE000"]);
+    const publicCredential=await store.findProjectCredentialView("project_atomic","credential_\uE000");
+    assert.equal("ciphertext" in publicCredential!,false);
+    assert.ok((await store.findStoredProjectCredential("project_atomic","credential_\uE000"))?.ciphertext);
+    assert.equal(await store.findProjectCredentialView("missing","credential_\uE000"),null);
+
+    const endpointInput=(id:string,name:string,credentialId:string,taskReady:boolean)=>({id,projectId:"project_atomic",name,protocol:"openai_chat_completions" as const,baseUrl:"https://models.example.test/v1",model:"model",credentialId,capabilities:taskReady?["text" as const,"tool_calls" as const]:["text" as const],requestTimeoutSecs:30,health:{status:"healthy" as const,checkedAt:tiedAt,errorCategory:null},createdAt:tiedAt,updatedAt:tiedAt});
+    await store.createEndpoint(endpointInput("endpoint_\uE000","High BMP","credential_\uE000",true));
+    await store.createEndpoint(endpointInput("endpoint_\u{10000}","Astral","credential_\u{10000}",false));
+    const endpointFirst=await store.listEndpointDirectoryPage("project_atomic",{q:"",mode:"all",limit:1});
+    assert.deepEqual(endpointFirst.items.map((endpoint)=>endpoint.id),["endpoint_\u{10000}"]);
+    assert.equal(endpointFirst.total,3);
+    const endpointSecond=await store.listEndpointDirectoryPage("project_atomic",{q:"",mode:"all",after:{createdAt:endpointFirst.items[0]!.createdAt,id:endpointFirst.items[0]!.id},limit:1});
+    assert.deepEqual(endpointSecond.items.map((endpoint)=>endpoint.id),["endpoint_\uE000"]);
+    assert.deepEqual((await store.listEndpointDirectoryPage("project_atomic",{q:"high bmp",mode:"task_ready",limit:20})).items.map((endpoint)=>endpoint.id),["endpoint_\uE000"]);
+    assert.equal((await store.findEndpointView("project_atomic","endpoint_\uE000"))?.credential?.name,"High BMP");
+    assert.equal(await store.findEndpointView("missing","endpoint_\uE000"),null);
+    assert.equal(await store.projectEndpointNameExists("project_atomic","high bmp"),true);
+    assert.deepEqual(await store.findProjectEndpointIds("project_atomic",["endpoint_\uE000","missing","endpoint_\uE000"]),["endpoint_\uE000"]);
+    assert.deepEqual(await store.getProjectEndpointReadiness("project_atomic"),{total:3,taskReady:1});
+
+    const usageFirst=await store.queryProjectEndpointUsagePage({projectId:"project_atomic",userId:"user_atomic",periodStart:"2026-06-24T00:00:00.000Z",periodEnd:"2026-07-24T00:00:00.000Z",measuredAt:"2026-07-23T00:04:00.000Z",q:"",limit:1});
+    assert.deepEqual(usageFirst.items.map((endpoint)=>endpoint.endpointId),["endpoint_\u{10000}"]);
+    assert.equal(usageFirst.total,3);
+    assert.equal(usageFirst.hasMore,true);
+    const usageSecond=await store.queryProjectEndpointUsagePage({projectId:"project_atomic",userId:"user_atomic",periodStart:"2026-06-24T00:00:00.000Z",periodEnd:"2026-07-24T00:00:00.000Z",measuredAt:"2026-07-23T00:04:00.000Z",q:"",after:{createdAt:usageFirst.items[0]!.cursorCreatedAt,id:usageFirst.items[0]!.cursorId},limit:1});
+    assert.deepEqual(usageSecond.items.map((endpoint)=>endpoint.endpointId),["endpoint_\uE000"]);
+  });
+
   it("uses stable keysets, ordinal title order, and literal Task search patterns",async()=>{
     const records=[
       {id:"task_page_percent",title:"100%",createdAt:"2026-07-23T00:00:01.000Z"},

@@ -6,6 +6,29 @@ Project credential create and rotate requests accept a plaintext provider secret
 
 `GET /api/v1/workspaces` projects include the current user's nullable `pinnedAt`; it is never shared with other members. `PUT /api/v1/projects/{projectId}/pin` accepts `{ pinned: boolean }` and naturally idempotently sets that member's pin. Removing project membership removes the pin.
 
+## Provider Directories
+
+`GET /api/v1/projects/{projectId}/credentials` accepts only `q`, `cursor`, and
+`limit`; `GET /api/v1/projects/{projectId}/endpoints` additionally accepts
+`mode=all|task_ready`. Both default to 20 items and cap `limit` at 50.
+Credentials return `{ items, nextCursor }`; endpoints return
+`{ items, nextCursor, total, readiness }`. Endpoint items embed their safe
+credential summary. Public credential reads never select encrypted secret
+columns.
+
+Both directories order by `createdAt` and ID descending, using PostgreSQL `C`
+collation for IDs. Their canonical cursors bind the authenticated actor,
+Project, normalized search, directory kind, and endpoint mode, but not the
+limit. Search is trimmed, case-insensitive, capped at 160 characters, and
+rejects controls. Empty, malformed, noncanonical, cross-actor, cross-Project,
+cross-query, and cross-mode cursors are rejected.
+
+`GET /api/v1/projects/{projectId}/credentials/{credentialId}` and
+`GET /api/v1/projects/{projectId}/endpoints/{endpointId}` are authoritative
+Project-scoped exact metadata reads; they never scan a directory. Endpoint
+name uniqueness and policy endpoint validation are targeted store operations,
+not full-directory reads.
+
 ## Membership Directories
 
 `GET /api/v1/workspaces/{workspaceId}/members` and
@@ -34,12 +57,19 @@ It is a bounded database read and returns
 it never traverses Project files. `canSelectMemberUsage` is authoritative and
 true only for a Project owner or administrator. Provider data is always scoped
 to the authenticated user and one explicit 30 UTC-day period. The endpoint
-selector filters `daily` and `totals`; `endpoints` retains that user's
-per-endpoint period totals and rolling limits. Sandbox data is scoped to the
+selector filters `daily` and `totals`; the base response includes the exact
+selected endpoint summary and no all-endpoint array. Sandbox data is scoped to the
 selected member and returns the Project-lifetime summary plus every
 capacity-holding Run in `liveRuns`; `unreleasedCount` counts all of them,
 including `starting`, `release_requested`, and `failed`. It never returns
 settled Runs.
+
+`GET /api/v1/projects/{projectId}/usage/endpoints` accepts only `q`, `cursor`,
+`limit`, and the existing authorized `userId` scope. It returns
+`{ items, nextCursor, total }` with settled 30-day totals and rolling limits
+for current endpoints, ordered by endpoint `createdAt` and ID descending.
+Search, limits, cursor canonicalization, and cursor binding match the endpoint
+directory; the cursor additionally binds the selected usage user.
 
 `fileStorage` is the last recorded storage projection:
 `{ recordedBytes, measuredAt, limitBytes, remainingBytes }`. It is separate

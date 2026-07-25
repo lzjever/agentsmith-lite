@@ -59,7 +59,7 @@ test("endpoint validation cannot commit after its credential is rotated", async 
   finishValidation();
 
   await assert.rejects(creating, /Credential changed during endpoint validation/);
-  assert.deepEqual(await services.endpoints.listEndpoints(user.id, project.id), []);
+  assert.deepEqual((await services.endpoints.listEndpoints(user.id, project.id)).items, []);
 });
 
 test("endpoint names stay unique within a project across concurrent creates and renames", async () => {
@@ -87,7 +87,7 @@ test("endpoint names stay unique within a project across concurrent creates and 
   const rejectedCreate = concurrent.find((result) => result.status === "rejected");
   assert.match(String(rejectedCreate?.status === "rejected" ? rejectedCreate.reason : ""), /endpoint already uses that name/i);
 
-  const first = (await services.endpoints.listEndpoints(user.id, project.id))[0]!;
+  const first = (await services.endpoints.listEndpoints(user.id, project.id)).items[0]!;
   const second = await services.endpoints.createEndpoint(user.id, project.id, input("Secondary"));
   await assert.rejects(
     () => services.endpoints.updateEndpoint(user.id, project.id, second.id, { ...input(first.name.toUpperCase()), credentialId: credential.id, expectedUpdatedAt:second.updatedAt }),
@@ -109,7 +109,7 @@ test("endpoint save rejects a sanitized validation failure without persisting an
   const credential = await services.credentials.create(user.id, project.id, { name: "Provider", baseUrl: "https://models.example.test/v1", secret: "never-expose-this" });
 
   await assert.rejects(() => services.endpoints.createEndpoint(user.id, project.id, { name: "Provider", protocol: "openai_chat_completions", baseUrl: credential.baseUrl, model: "model", credentialId: credential.id, capabilities: ["text"], requestTimeoutSecs: 30 }), /Endpoint validation failed: auth/);
-  assert.deepEqual(await services.endpoints.listEndpoints(user.id, project.id), []);
+  assert.deepEqual((await services.endpoints.listEndpoints(user.id, project.id)).items, []);
   assert.deepEqual((await store.listSettledProjectProviderSettlements(project.id, "1970-01-01T00:00:00.000Z")).map((settlement) => settlement.endpointId), [null]);
   assert.equal((await store.findProjectResourceUsage(project.id))?.providerRequests, 1);
 });
@@ -217,7 +217,7 @@ test("endpoint recheck does not overwrite configuration changed while the provid
   finishRecheck({ status: "healthy" });
 
   assert.equal((await rechecking).name, "After");
-  assert.equal((await services.endpoints.listEndpoints(user.id, project.id))[0]?.name, "After");
+  assert.equal((await services.endpoints.listEndpoints(user.id, project.id)).items[0]?.name, "After");
 });
 
 test("a stale endpoint form is rejected before provider validation", async () => {

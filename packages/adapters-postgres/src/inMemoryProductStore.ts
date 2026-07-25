@@ -611,8 +611,8 @@ export class InMemoryProductStore implements ProductStore {
     if(!policy)return{kind:"policy_not_found"};
     if(![...this.memberships.values()].some((membership)=>membership.projectId===input.projectId&&membership.userId===input.selectedUserId))return{kind:"selected_member_not_found"};
     const usage=clone(this.usage.get(input.projectId)??null);
-    const endpoints=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===input.projectId).sort((left,right)=>left.createdAt.localeCompare(right.createdAt)||compareOrdinal(left.id,right.id)).map(clone);
-    if(input.selectedEndpointId!==null&&!endpoints.some((endpoint)=>endpoint.id===input.selectedEndpointId))return{kind:"endpoint_not_found"};
+    const selectedEndpoint=input.selectedEndpointId===null?null:this.endpoints.get(input.selectedEndpointId);
+    if(input.selectedEndpointId!==null&&selectedEndpoint?.projectId!==input.projectId)return{kind:"endpoint_not_found"};
     const providerSettlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId).map(clone);
     const sandboxRuns=this.sandboxRuns.snapshot().filter((run)=>run.projectId===input.projectId&&run.startedByUserId===input.selectedUserId);
     const tasks=new Map([...this.tasks.values()].filter((task)=>task.projectId===input.projectId).map((task)=>[task.id,clone(task)] as const));
@@ -623,22 +623,6 @@ export class InMemoryProductStore implements ProductStore {
     for(const value of selected){const date=value.settledAt!.slice(0,10),current=byDay.get(date)??{requests:0,tokens:0,cost:0};current.requests+=1;current.tokens+=value.usage?.tokens??0;current.cost+=value.usage?.cost??0;byDay.set(date,current)}
     const daily=[...byDay].sort(([left],[right])=>left.localeCompare(right)).map(([date,total])=>({date,...total}));
     const totals=selected.reduce((total,value)=>({requests:total.requests+1,tokens:total.tokens+(value.usage?.tokens??0),cost:total.cost+(value.usage?.cost??0)}),{requests:0,tokens:0,cost:0});
-    const endpointUsage=new Map<string,import("../../contracts/src/api.js").ProjectUsageEndpoint>();
-    for(const endpoint of endpoints)endpointUsage.set(endpoint.id,{endpointId:endpoint.id,endpointName:endpoint.name,requests:0,tokens:0,cost:0,limits:[]});
-    let unassigned:import("../../contracts/src/api.js").ProjectUsageEndpoint|undefined;
-    for(const value of settled){
-      if(value.endpointId===null){unassigned??={endpointId:null,endpointName:"Other provider activity",requests:0,tokens:0,cost:0};unassigned.requests+=1;unassigned.tokens+=value.usage?.tokens??0;unassigned.cost+=value.usage?.cost??0;continue}
-      const endpoint=endpointUsage.get(value.endpointId);if(!endpoint)continue;endpoint.requests+=1;endpoint.tokens+=value.usage?.tokens??0;endpoint.cost+=value.usage?.cost??0;
-    }
-    for(const endpoint of endpointUsage.values()){
-      for(const window of policy.endpointWindows??[]){
-        if(window.endpointId!==endpoint.endpointId)continue;
-        const cutoff=new Date(Date.parse(input.measuredAt)-window.windowSeconds*1000).toISOString();
-        const inWindow=providerSettlements.filter((value)=>value.endpointId===window.endpointId&&(value.actorId??null)===input.userId&&value.status!=="failed"&&value.reservedAt>=cutoff).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||compareOrdinal(left.id,right.id));
-        const current=inWindow.reduce((sum,value)=>sum+providerWindowValue(value,window.metric),0),oldestReservedAt=inWindow[0]?.reservedAt??null;
-        endpoint.limits!.push({metric:window.metric,current,limit:window.limit,remaining:Math.max(0,window.limit-current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt:oldestReservedAt?new Date(Date.parse(oldestReservedAt)+window.windowSeconds*1000).toISOString():null}});
-      }
-    }
     const settlementIds=new Set(sandboxSettlements.map((value)=>value.runId));
     for(const run of sandboxRuns){
       if(run.state==="released"){if(!settlementIds.has(run.runId))return{kind:"integrity_error"};continue}
@@ -656,7 +640,26 @@ export class InMemoryProductStore implements ProductStore {
     try{
       for(const row of rows){const rounded=Math.round(row.durationSeconds*1000);if(!Number.isSafeInteger(rounded)||rounded<0)return{kind:"integrity_error"};const duration=BigInt(rounded);totalDurationMilliseconds+=duration;cpuRequestMillisMilliseconds+=BigInt(row.resources.cpuRequestMillis)*duration;memoryRequestByteMilliseconds+=BigInt(row.resources.memoryRequestBytes)*duration}
     }catch{return{kind:"integrity_error"}}
-    return{kind:"available",value:{projectCreatedAt:project.createdAt,policy,usage,provider:{daily,totals,endpoints:[...endpointUsage.values(),...(unassigned?[unassigned]:[])].map(clone)},sandbox:{unreleasedCount:liveRuns.length,launches:sandboxSettlements.filter((value)=>value.startedAt!==null).length+liveRuns.filter((run)=>run.startedAt!==null).length,totalDurationMilliseconds:totalDurationMilliseconds.toString(),cpuRequestMillisMilliseconds:cpuRequestMillisMilliseconds.toString(),memoryRequestByteMilliseconds:memoryRequestByteMilliseconds.toString(),liveRuns}}};
+    return{kind:"available",value:{projectCreatedAt:project.createdAt,policy,usage,provider:{daily,totals,selectedEndpoint:selectedEndpoint?{id:selectedEndpoint.id,name:selectedEndpoint.name}:null},sandbox:{unreleasedCount:liveRuns.length,launches:sandboxSettlements.filter((value)=>value.startedAt!==null).length+liveRuns.filter((run)=>run.startedAt!==null).length,totalDurationMilliseconds:totalDurationMilliseconds.toString(),cpuRequestMillisMilliseconds:cpuRequestMillisMilliseconds.toString(),memoryRequestByteMilliseconds:memoryRequestByteMilliseconds.toString(),liveRuns}}};
+  }
+  async queryProjectEndpointUsagePage(query:import("../../ports/src/store.js").ProjectEndpointUsageStoreQuery):Promise<import("../../ports/src/store.js").ProjectEndpointUsageStorePage>{
+    const policy=this.policies.get(query.projectId);
+    if(!policy)return{items:[],total:0,hasMore:false};
+    const filtered=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===query.projectId&&providerDirectoryMatch([endpoint.id,endpoint.name],query.q)).sort(compareCreatedDirectoryDesc),total=filtered.length;
+    const remaining=filtered.filter((endpoint)=>!query.after||compareCreatedDirectoryToCursor(endpoint,query.after)>0),page=remaining.slice(0,query.limit);
+    const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===query.projectId&&value.actorId===query.userId);
+    return{total,hasMore:remaining.length>query.limit,items:page.map((endpoint)=>{
+      const settled=settlements.filter((value)=>value.endpointId===endpoint.id&&value.status==="settled"&&value.settledAt!==null&&value.settledAt>=query.periodStart&&value.settledAt<query.periodEnd);
+      const limits:import("../../contracts/src/api.js").ProjectUsageLimit[]=[];
+      for(const window of policy.endpointWindows??[]){
+        if(window.endpointId!==endpoint.id)continue;
+        const cutoff=new Date(Date.parse(query.measuredAt)-window.windowSeconds*1000).toISOString();
+        const inWindow=settlements.filter((value)=>value.endpointId===endpoint.id&&value.status!=="failed"&&value.reservedAt>=cutoff).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||compareC(left.id,right.id));
+        const current=inWindow.reduce((sum,value)=>sum+providerWindowValue(value,window.metric),0),oldestReservedAt=inWindow[0]?.reservedAt??null;
+        limits.push({metric:window.metric,current,limit:window.limit,remaining:Math.max(0,window.limit-current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt:oldestReservedAt?new Date(Date.parse(oldestReservedAt)+window.windowSeconds*1000).toISOString():null}});
+      }
+      return{endpointId:endpoint.id,endpointName:endpoint.name,requests:settled.length,tokens:settled.reduce((sum,value)=>sum+(value.usage?.tokens??0),0),cost:settled.reduce((sum,value)=>sum+(value.usage?.cost??0),0),limits,cursorCreatedAt:endpoint.createdAt,cursorId:endpoint.id};
+    })};
   }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&(value.actorId??null)===input.actorId&&value.status!=="failed"&&value.reservedAt>=input.since).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||left.id.localeCompare(right.id));return{current:settlements.reduce((sum,value)=>sum+providerWindowValue(value,input.metric),0),oldestReservedAt:settlements[0]?.reservedAt??null};}
   async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlertType; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
@@ -681,12 +684,12 @@ export class InMemoryProductStore implements ProductStore {
     const activeCount=snapshot.filter((alert)=>alert.status==="active").length;
     const filtered=snapshot.filter((alert)=>(query.view==="active"?alert.status==="active":alert.status!=="active")&&(!query.after||alert.createdAt<query.after.createdAt||alert.createdAt===query.after.createdAt&&compareC(alert.id,query.after.id)<0)).sort((left,right)=>compareOrdinal(right.createdAt,left.createdAt)||compareC(right.id,left.id));
     const page=filtered.slice(0,query.limit);
-    return{items:page,hasMore:filtered.length>query.limit,activeCount};
+    return{items:page.map((alert)=>this.alertView(alert)),hasMore:filtered.length>query.limit,activeCount};
   }
   async findActiveProjectAlert(projectId:string,type:ProjectAlertType,ruleId:string|null,endpointId:string|null,subjectActorId:string|null):Promise<ActiveProjectAlert|null>{const active=[...this.alerts.values()].filter((value):value is ActiveProjectAlert=>value.status==="active");const alert=active.find((value)=>value.projectId===projectId&&value.type===type&&(value.ruleId??null)===ruleId&&(value.endpointId??null)===endpointId&&(value.subjectActorId??null)===subjectActorId);return alert?clone(alert):null}
-  async findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null> { const alert=this.alerts.get(id);return alert?.projectId===projectId?clone(alert):null; }
-  async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.status !== "active") return null; const next = { ...alert, status, updatedAt, ...(status === "resolved" ? { resolvedAt: updatedAt } : { dismissedAt: updatedAt }) }; this.alerts.set(id, clone(next)); return clone(next); }
-  async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const alert=this.alerts.get(id);if(!alert||alert.projectId!==projectId||alert.status!=="active")return null;const next={...alert,...input,updatedAt};this.alerts.set(id,clone(next));return clone(next)}
+  async findProjectAlert(projectId: string, id: string): Promise<ProjectAlert | null> { const alert=this.alerts.get(id);return alert?.projectId===projectId?this.alertView(alert):null; }
+  async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId || alert.status !== "active") return null; const next = { ...alert, status, updatedAt, ...(status === "resolved" ? { resolvedAt: updatedAt } : { dismissedAt: updatedAt }) }; this.alerts.set(id, clone(next)); return this.alertView(next); }
+  async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const alert=this.alerts.get(id);if(!alert||alert.projectId!==projectId||alert.status!=="active")return null;const next={...alert,...input,updatedAt};this.alerts.set(id,clone(next));return this.alertView(next)}
   async updateProjectAlertDeliveryStatus(projectId: string, id: string, status: ProjectAlert["deliveryStatus"], updatedAt: string): Promise<ProjectAlert | null> { const alert = this.alerts.get(id); if (!alert || alert.projectId !== projectId) return null; const next = { ...alert, deliveryStatus: status, updatedAt }; this.alerts.set(id, clone(next)); return clone(next); }
   async appendProjectAuditEvent(event: ProjectAuditEvent): Promise<void> { if(this.auditEvents.some(current=>current.id===event.id))return;this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)})); }
   async queryProjectAuditEvents(projectId:string,query:import("../../ports/src/store.js").ProjectAuditStoreQuery):Promise<import("../../ports/src/store.js").ProjectAuditStorePage>{
@@ -755,8 +758,11 @@ export class InMemoryProductStore implements ProductStore {
   }
   async listSandboxUsageSettlements(projectId:string,startedByUserId:string):Promise<SandboxUsageSettlement[]>{return[...this.sandboxUsageSettlements.values()].filter((value)=>value.projectId===projectId&&value.startedByUserId===startedByUserId).sort((a,b)=>b.releasedAt.localeCompare(a.releasedAt)||b.runId.localeCompare(a.runId)).map(clone)}
   async createProjectCredential(v:StoredProjectCredential): Promise<ProjectCredential> { this.credentials.set(v.id,clone(v)); return publicCredential(v); }
-  async findProjectCredential(id:string): Promise<StoredProjectCredential | null> { return clone(this.credentials.get(id) ?? null); }
-  async listProjectCredentials(id:string): Promise<ProjectCredential[]> { return [...this.credentials.values()].filter(v=>v.projectId===id).map(publicCredential); }
+  async findStoredProjectCredential(projectId:string,id:string):Promise<StoredProjectCredential|null>{const value=this.credentials.get(id);return clone(value?.projectId===projectId?value:null)}
+  async findProjectCredentialView(projectId:string,id:string):Promise<ProjectCredential|null>{const value=this.credentials.get(id);return value?.projectId===projectId?publicCredential(value):null}
+  async listProjectCredentialDirectoryPage(projectId:string,query:import("../../ports/src/store.js").CreatedDirectoryStoreQuery):Promise<ProjectCredential[]>{
+    return[...this.credentials.values()].filter((value)=>value.projectId===projectId&&providerDirectoryMatch([value.id,value.name,value.baseUrl],query.q)).sort(compareCreatedDirectoryDesc).filter((value)=>!query.after||compareCreatedDirectoryToCursor(value,query.after)>0).slice(0,query.limit).map(publicCredential);
+  }
   async updateProjectCredential(v:StoredProjectCredential,expectedVersion:number): Promise<ProjectCredential | "not_found" | "version_conflict"> { const current=this.credentials.get(v.id); if(!current)return "not_found"; if(current.projectId!==v.projectId||current.version!==expectedVersion)return "version_conflict"; this.credentials.set(v.id,clone(v));for(const [id,endpoint] of this.endpoints){if(endpoint.credentialId===v.id)this.endpoints.set(id,clone({...endpoint,health:{status:"unknown",checkedAt:null,errorCategory:null},updatedAt:v.updatedAt}))}return publicCredential(v); }
   async deleteProjectCredential(id:string,projectId:string,expectedVersion:number): Promise<DeleteProjectCredentialResult> { const current=this.credentials.get(id);if(!current||current.projectId!==projectId)return "not_found";if(current.version!==expectedVersion)return "version_conflict";if([...this.endpoints.values()].some(endpoint=>endpoint.credentialId===id))return "referenced_by_endpoints";this.credentials.delete(id);return "deleted"; }
   async createProjectContextEntry(v:ProjectContextEntry){if(this.contextKeyExists(v))return null;this.contexts.set(v.id,clone(v));return clone(v)}
@@ -863,12 +869,25 @@ export class InMemoryProductStore implements ProductStore {
     return "deleted";
   }
 
-  async listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]> {
-    return [...this.endpoints.values()].filter((endpoint) => endpoint.projectId === projectId).map(clone);
-  }
-
   async findEndpoint(id: string): Promise<ModelEndpoint | null> {
     return clone(this.endpoints.get(id) ?? null);
+  }
+  async findEndpointView(projectId:string,id:string):Promise<import("../../contracts/src/api.js").EndpointView|null>{const endpoint=this.endpoints.get(id);return endpoint?.projectId===projectId?this.endpointView(endpoint):null}
+  async listEndpointDirectoryPage(projectId:string,query:import("../../ports/src/store.js").EndpointDirectoryStoreQuery):Promise<import("../../ports/src/store.js").EndpointDirectoryStorePage>{
+    const filtered=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===projectId&&providerDirectoryMatch([endpoint.id,endpoint.name,endpoint.model,endpoint.baseUrl],query.q)&&(query.mode==="all"||taskReadyEndpoint(endpoint))).sort(compareCreatedDirectoryDesc);
+    return{items:filtered.filter((endpoint)=>!query.after||compareCreatedDirectoryToCursor(endpoint,query.after)>0).slice(0,query.limit).map((endpoint)=>this.endpointView(endpoint)),total:filtered.length};
+  }
+  async projectEndpointNameExists(projectId:string,normalizedName:string,excludeId?:string):Promise<boolean>{return[...this.endpoints.values()].some((endpoint)=>endpoint.projectId===projectId&&endpoint.id!==excludeId&&endpoint.name.trim().toLocaleLowerCase("en-US")===normalizedName)}
+  async findProjectEndpointIds(projectId:string,ids:string[]):Promise<string[]>{const wanted=new Set(ids);return[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===projectId&&wanted.has(endpoint.id)).map((endpoint)=>endpoint.id).sort(compareC)}
+  async getProjectEndpointReadiness(projectId:string):Promise<{total:number;taskReady:number}>{const endpoints=[...this.endpoints.values()].filter((endpoint)=>endpoint.projectId===projectId);return{total:endpoints.length,taskReady:endpoints.filter(taskReadyEndpoint).length}}
+
+  private endpointView(endpoint:ModelEndpoint):import("../../contracts/src/api.js").EndpointView{
+    const credential=this.credentials.get(endpoint.credentialId);
+    return{...clone(endpoint),hasCredentialRef:endpoint.credentialId.length>0,taskEligible:taskReadyEndpoint(endpoint),credential:credential?.projectId===endpoint.projectId?{id:credential.id,name:credential.name,baseUrl:credential.baseUrl,version:credential.version}:null};
+  }
+  private alertView(alert:ProjectAlert):ProjectAlert{
+    const endpoint=alert.endpointId?this.endpoints.get(alert.endpointId):undefined;
+    return clone({...alert,endpointName:endpoint?.projectId===alert.projectId?endpoint.name:null});
   }
 
   async createTaskAtomically(input: AtomicTaskCreateInput) {
@@ -1913,6 +1932,10 @@ function compareProjectDirectoryItemToCursor(item:ProjectDirectoryItem,cursor:{p
 function membershipMatchesQuery(member:{userId:string;displayName:string|null;email:string},query:string):boolean{return query===""||member.userId.toLowerCase().includes(query)||member.email.toLowerCase().includes(query)||(member.displayName?.toLowerCase().includes(query)??false)}
 function compareMembershipDirectoryItems(left:{createdAt:string;userId:string},right:{createdAt:string;userId:string}):number{return compareOrdinal(left.createdAt,right.createdAt)||compareC(left.userId,right.userId)}
 function compareMembershipToCursor(item:{createdAt:string;userId:string},cursor:{createdAt:string;userId:string}):number{return compareOrdinal(item.createdAt,cursor.createdAt)||compareC(item.userId,cursor.userId)}
+function providerDirectoryMatch(values:string[],query:string):boolean{return query===""||values.some((value)=>value.toLowerCase().includes(query))}
+function compareCreatedDirectoryDesc(left:{createdAt:string;id:string},right:{createdAt:string;id:string}):number{return compareOrdinal(right.createdAt,left.createdAt)||compareC(right.id,left.id)}
+function compareCreatedDirectoryToCursor(item:{createdAt:string;id:string},cursor:{createdAt:string;id:string}):number{return compareOrdinal(cursor.createdAt,item.createdAt)||compareC(cursor.id,item.id)}
+function taskReadyEndpoint(endpoint:ModelEndpoint):boolean{return endpoint.credentialId.length>0&&endpoint.health?.status==="healthy"&&endpoint.capabilities.includes("text")&&endpoint.capabilities.includes("tool_calls")}
 
 function failureEventMatches(type:ProjectAlertType,event:ProjectAuditEvent):boolean {
   if(type==="provider_failure")return event.action==="provider.request"&&event.status==="rejected"&&event.resourceKind==="provider"&&event.detail?.errorCategory!==undefined;

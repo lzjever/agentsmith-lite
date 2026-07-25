@@ -47,7 +47,10 @@ import type {
   ProjectSandboxLiveRun,
   ProjectSandboxSettledRun,
   ProjectUsageDay,
-  ProjectUsageEndpoint
+  ProjectUsageEndpoint,
+  EndpointDirectoryMode,
+  EndpointReadiness,
+  EndpointView
 } from "../../contracts/src/api.js";
 
 export interface PersistedDeliveryReceipt {
@@ -126,6 +129,21 @@ export interface ProjectMembershipCandidateStoreQuery {
 
 export interface ProjectMembershipCandidateStoreItem extends ProjectMembershipCandidate {
   createdAt: string;
+}
+
+export interface CreatedDirectoryStoreQuery {
+  q:string;
+  after?:{createdAt:string;id:string};
+  limit:number;
+}
+
+export interface EndpointDirectoryStoreQuery extends CreatedDirectoryStoreQuery {
+  mode:EndpointDirectoryMode;
+}
+
+export interface EndpointDirectoryStorePage {
+  items:EndpointView[];
+  total:number;
 }
 
 export interface ProjectAuditStoreQuery {
@@ -405,7 +423,7 @@ export interface ProjectUsageOverviewReadInput {
 export interface ProjectProviderUsageRead {
   daily: ProjectUsageDay[];
   totals: { requests: number; tokens: number; cost: number };
-  endpoints: ProjectUsageEndpoint[];
+  selectedEndpoint:{id:string;name:string}|null;
 }
 
 export interface ProjectSandboxUsageOverviewRead {
@@ -428,6 +446,20 @@ export interface ProjectUsageOverviewRead {
 export type ProjectUsageOverviewReadResult =
   | { kind: "available"; value: ProjectUsageOverviewRead }
   | { kind: "project_not_found" | "policy_not_found" | "endpoint_not_found" | "selected_member_not_found" | "integrity_error" };
+
+export interface ProjectEndpointUsageStoreQuery {
+  projectId:string;
+  userId:string;
+  periodStart:string;
+  periodEnd:string;
+  measuredAt:string;
+  q:string;
+  after?:{createdAt:string;id:string};
+  limit:number;
+}
+
+export interface ProjectEndpointUsageStoreItem extends ProjectUsageEndpoint {cursorCreatedAt:string;cursorId:string}
+export interface ProjectEndpointUsageStorePage {items:ProjectEndpointUsageStoreItem[];total:number;hasMore:boolean}
 
 export interface ProjectSandboxSettlementQuery {
   projectId: string;
@@ -643,6 +675,7 @@ export interface ProductStore {
   pruneProjectProviderSettlements(before: string, limit: number): Promise<number>;
   listSettledProjectProviderSettlements(projectId: string, since: string, endpointId?: string): Promise<ProjectProviderSettlement[]>;
   readProjectUsageOverview(input: ProjectUsageOverviewReadInput): Promise<ProjectUsageOverviewReadResult>;
+  queryProjectEndpointUsagePage(query:ProjectEndpointUsageStoreQuery):Promise<ProjectEndpointUsageStorePage>;
   measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>;
   measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:import("../../contracts/src/api.js").AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>;
   upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert>;
@@ -664,8 +697,9 @@ export interface ProductStore {
   listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;
 
   createProjectCredential(value: StoredProjectCredential): Promise<ProjectCredential>;
-  findProjectCredential(id: string): Promise<StoredProjectCredential | null>;
-  listProjectCredentials(projectId: string): Promise<ProjectCredential[]>;
+  findStoredProjectCredential(projectId:string,id:string):Promise<StoredProjectCredential|null>;
+  findProjectCredentialView(projectId:string,id:string):Promise<ProjectCredential|null>;
+  listProjectCredentialDirectoryPage(projectId:string,query:CreatedDirectoryStoreQuery):Promise<ProjectCredential[]>;
   updateProjectCredential(value: StoredProjectCredential, expectedVersion: number): Promise<ProjectCredential | "not_found" | "version_conflict">;
   deleteProjectCredential(id: string, projectId: string, expectedVersion: number): Promise<DeleteProjectCredentialResult>;
 
@@ -673,8 +707,12 @@ export interface ProductStore {
   updateEndpoint(endpoint: ModelEndpoint, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null>;
   updateEndpointHealth(id: string, projectId: string, health: EndpointHealth, updatedAt: string, expectedUpdatedAt?: string, expectedCredentialVersion?: number): Promise<ModelEndpoint | null>;
   deleteEndpoint(id: string): Promise<DeleteEndpointResult>;
-  listEndpointsForProject(projectId: string): Promise<ModelEndpoint[]>;
   findEndpoint(id: string): Promise<ModelEndpoint | null>;
+  findEndpointView(projectId:string,id:string):Promise<EndpointView|null>;
+  listEndpointDirectoryPage(projectId:string,query:EndpointDirectoryStoreQuery):Promise<EndpointDirectoryStorePage>;
+  projectEndpointNameExists(projectId:string,normalizedName:string,excludeId?:string):Promise<boolean>;
+  findProjectEndpointIds(projectId:string,ids:string[]):Promise<string[]>;
+  getProjectEndpointReadiness(projectId:string):Promise<{total:number}&EndpointReadiness>;
 
   createTaskAtomically(input: AtomicTaskCreateInput): Promise<AtomicTaskCreateResult>;
   restartTaskSandboxAtomically(input: AtomicTaskSandboxRestartInput): Promise<AtomicTaskSandboxRestartResult>;

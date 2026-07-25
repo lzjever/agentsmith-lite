@@ -1,9 +1,10 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditIdentityPage, type ProjectAuditIdentityQuery, type ProjectAuditQuery, type ProjectAuditResourceKind, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditIdentityPage, type ProjectAuditIdentityQuery, type ProjectAuditQuery, type ProjectAuditResourceKind, type ProjectEndpointUsagePage, type ProjectEndpointUsageQuery, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
+import { decodeProviderDirectoryCursor, encodeProviderDirectoryCursor, normalizeProviderDirectoryQuery, providerDirectoryLimit } from "./endpointCredentialDirectory.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
@@ -82,7 +83,7 @@ export class ProjectPolicyService {
         const dailyByDate = new Map(daily.map((day) => [day.date, day]));
         for(const aggregate of read.value.provider.daily){const day=dailyByDate.get(aggregate.date);if(day)Object.assign(day,aggregate)}
         const {projectCreatedAt,policy,provider,sandbox}=read.value,usage=read.value.usage??zeroUsage(projectId);
-        return{projectId,canSelectMemberUsage:access.canAdmin,limits:usageLimits(policy,usage,projectCreatedAt),fileStorage:fileStorageUsage(policy,usage),provider:{userId,periodStart,periodEnd,selectedEndpointId:endpointId??null,daily,totals:provider.totals,endpoints:provider.endpoints},sandbox:{selectedUserId,summaryStartedAt:projectCreatedAt,measuredAt,unreleasedCount:sandbox.unreleasedCount,launches:sandbox.launches,totalDurationSeconds:formatDecimal(BigInt(sandbox.totalDurationMilliseconds),3),cpuRequestSeconds:formatDecimal(BigInt(sandbox.cpuRequestMillisMilliseconds),6),memoryRequestByteSeconds:formatDecimal(BigInt(sandbox.memoryRequestByteMilliseconds),3),liveRuns:sandbox.liveRuns}};
+        return{projectId,canSelectMemberUsage:access.canAdmin,limits:usageLimits(policy,usage,projectCreatedAt),fileStorage:fileStorageUsage(policy,usage),provider:{userId,periodStart,periodEnd,selectedEndpointId:endpointId??null,selectedEndpoint:provider.selectedEndpoint,daily,totals:provider.totals},sandbox:{selectedUserId,summaryStartedAt:projectCreatedAt,measuredAt,unreleasedCount:sandbox.unreleasedCount,launches:sandbox.launches,totalDurationSeconds:formatDecimal(BigInt(sandbox.totalDurationMilliseconds),3),cpuRequestSeconds:formatDecimal(BigInt(sandbox.cpuRequestMillisMilliseconds),6),memoryRequestByteSeconds:formatDecimal(BigInt(sandbox.memoryRequestByteMilliseconds),3),liveRuns:sandbox.liveRuns}};
       }
       case "project_not_found":throw new ProductError("Project not found",404);
       case "policy_not_found":throw new ProductError("Project policy not found",409);
@@ -94,6 +95,21 @@ export class ProjectPolicyService {
         return exhaustive;
       }
     }
+  }
+  async getEndpointUsagePage(userId:string,projectId:string,query:ProjectEndpointUsageQuery={}):Promise<ProjectEndpointUsagePage>{
+    const selectedUserId=query.userId??userId;
+    await this.requireUsageScope(userId,projectId,selectedUserId);
+    const q=normalizeProviderDirectoryQuery(query.q),limit=providerDirectoryLimit(query.limit);
+    const scope={actorId:userId,projectId,kind:"endpoint-usage" as const,q,mode:selectedUserId};
+    const after=query.cursor!==undefined?decodeProviderDirectoryCursor(query.cursor,scope):undefined;
+    const measuredAt=nowIso(),today=new Date(measuredAt);today.setUTCHours(0,0,0,0);
+    const firstDay=new Date(today);firstDay.setUTCDate(firstDay.getUTCDate()-29);
+    const page=await this.store.queryProjectEndpointUsagePage({
+      projectId,userId:selectedUserId,periodStart:firstDay.toISOString(),
+      periodEnd:new Date(today.getTime()+24*60*60_000).toISOString(),measuredAt,q,...(after?{after}:{}),limit
+    });
+    const last=page.items.at(-1);
+    return{items:page.items.map(({cursorCreatedAt:_,cursorId:__,...item})=>item),nextCursor:page.hasMore&&last?encodeProviderDirectoryCursor(scope,{createdAt:last.cursorCreatedAt,id:last.cursorId}):null,total:page.total};
   }
   async getSandboxRunHistory(userId:string,projectId:string,query:Readonly<{selectedUserId?:string;cursor?:string;limit?:number}>={}):Promise<ProjectSandboxRunHistoryPage>{
     const selectedUserId=query.selectedUserId??userId,access=await this.requireUsageScope(userId,projectId,selectedUserId),limit=query.limit??20;
@@ -186,7 +202,7 @@ export class ProjectPolicyService {
         const updated = validatePolicyInput(policyInput);
         previous = await this.requirePolicy(projectId);
         const expected = expectedPolicyTimestamp(expectedUpdatedAt, previous.updatedAt);
-        if(updated.endpointWindows){const endpoints=await this.store.listEndpointsForProject(projectId);const endpointIds=new Set(endpoints.map(endpoint=>endpoint.id));if(updated.endpointWindows.some(window=>!endpointIds.has(window.endpointId)))throw new ProductError("Endpoint policy window endpoint not found",404)}
+        if(updated.endpointWindows){const submitted=[...new Set(updated.endpointWindows.map((window)=>window.endpointId))],found=new Set(await this.store.findProjectEndpointIds(projectId,submitted));if(submitted.some((id)=>!found.has(id)))throw new ProductError("Endpoint policy window endpoint not found",404)}
         if (Object.keys(updated).length === 0) throw new ProductError("Project policy update requires at least one limit");
         const patched = await this.store.patchProjectResourcePolicy(projectId, updated, nextTimestamp(previous.updatedAt), expected);
         if (!patched) {

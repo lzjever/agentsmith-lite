@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Copy, ExternalLink, RefreshCw } from "lucide-react";
+import { Check, Copy, ExternalLink, RefreshCw, Search } from "lucide-react";
 import {
   Banner,
   Button,
@@ -16,11 +16,14 @@ import {
   TableHeaderCell,
   TableRow,
   Text,
+  TextInput,
 } from "@astryxdesign/core";
-import { useId, useState } from "react";
-import type {
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { apiClient, type
   ProjectMemberCandidate,
+  ProjectEndpointUsagePage,
   ProjectSandboxRunHistoryPage,
+  ProjectUsageEndpoint,
   ProjectUsageOverview,
   ProjectUsageWindow,
 } from "../../lib/api/client";
@@ -30,6 +33,7 @@ import {
   formatLocalTime,
 } from "../../lib/format/date";
 import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
+import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 
 const labels = {
   activeTasks: "Active tasks",
@@ -140,6 +144,7 @@ export function UsageView({
             onMeasureFileStorage={onMeasureFileStorage}
           />
           <ProviderUsage
+            projectId={projectId}
             overview={overview}
             selectedEndpointId={selectedEndpointId}
             onEndpointChange={onEndpointChange}
@@ -246,10 +251,12 @@ function ProjectLimits({
 }
 
 function ProviderUsage({
+  projectId,
   overview,
   selectedEndpointId,
   onEndpointChange,
 }: {
+  projectId:string;
   overview: ProjectUsageOverview;
   selectedEndpointId: string;
   onEndpointChange: (endpointId: string) => void;
@@ -257,8 +264,7 @@ function ProviderUsage({
   const provider = overview.provider;
   const peak = Math.max(1, ...provider.daily.map((day) => day.requests));
   const hasTrend = provider.daily.some((day) => day.requests > 0 || day.tokens > 0 || day.cost > 0);
-  const selectedEndpoint = provider.endpoints.find((endpoint) => endpoint.endpointId === provider.selectedEndpointId);
-  const scopeLabel = provider.selectedEndpointId === null ? "All endpoints" : (selectedEndpoint?.endpointName ?? provider.selectedEndpointId);
+  const scopeLabel = provider.selectedEndpointId === null ? "All endpoints" : (provider.selectedEndpoint?.name ?? provider.selectedEndpointId);
   const firstDay = provider.daily[0]?.date;
   const lastDay = provider.daily.at(-1)?.date;
   return (
@@ -273,19 +279,7 @@ function ProviderUsage({
             {firstDay && lastDay ? `30-day period: ${formatProviderDay(firstDay)} through ${formatProviderDay(lastDay)}` : "30-day period"}
           </Text>
         </div>
-        <Selector
-          label="Endpoint"
-          options={[
-            { value: "all", label: "All endpoints" },
-            ...provider.endpoints
-              .filter((endpoint) => endpoint.endpointId !== null)
-              .map((endpoint) => ({ value: endpoint.endpointId!, label: endpoint.endpointName })),
-          ]}
-          value={selectedEndpointId}
-          onChange={onEndpointChange}
-          size="lg"
-          className="w-64 max-w-full"
-        />
+        <div className="w-full max-w-sm space-y-2"><Button label="All endpoints" variant={selectedEndpointId==="all"?"primary":"secondary"} size="sm" onClick={()=>onEndpointChange("all")}/><EndpointPicker projectId={projectId} value={selectedEndpointId==="all"?"":selectedEndpointId} label="Filter to endpoint" onChange={(endpoint)=>onEndpointChange(endpoint.id)}/></div>
       </div>
       {hasTrend ? (
         <>
@@ -304,60 +298,44 @@ function ProviderUsage({
           description="No settled provider usage in this 30-day period."
         />
       )}
-      <div>
-        <Heading level={3}>Endpoint totals</Heading>
-        <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
-          Your settled totals for the same 30-day period, including activity not tied to a current endpoint.
-        </Text>
-        {provider.endpoints.length === 0 ? (
-          <EmptyState className="mt-3" isCompact title="No endpoint usage" description="No endpoint usage in this period." />
-        ) : (
-          <>
-            <ul className="mt-4 divide-y divide-border border-y border-border md:hidden" aria-label="Your endpoint usage">
-              {provider.endpoints.map((endpoint) => (
-                <li className="py-4" key={endpoint.endpointId ?? "unassigned-endpoints"}>
-                  <Text weight="semibold" wordBreak="break-word">{endpoint.endpointName}</Text>
-                  <dl className="mt-3 grid gap-4">
-                    <div>
-                      <dt><Text type="supporting" color="secondary">Settled totals</Text></dt>
-                      <dd className="mt-1"><EndpointSettledTotals endpoint={endpoint} /></dd>
-                    </div>
-                    <div>
-                      <dt><Text type="supporting" color="secondary">Your rolling limits</Text></dt>
-                      <dd className="mt-1"><EndpointRollingLimits endpoint={endpoint} /></dd>
-                    </div>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-4 hidden overflow-x-auto md:block">
-              <Table aria-label="Your endpoint usage" density="balanced" dividers="rows" verticalAlign="top">
-                <TableHeader>
-                  <TableRow isHeaderRow>
-                    <TableHeaderCell>Endpoint</TableHeaderCell>
-                    <TableHeaderCell>Settled totals</TableHeaderCell>
-                    <TableHeaderCell>Your rolling limits</TableHeaderCell>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {provider.endpoints.map((endpoint) => (
-                    <TableRow key={endpoint.endpointId ?? "unassigned-endpoints"}>
-                      <TableCell>{endpoint.endpointName}</TableCell>
-                      <TableCell><EndpointSettledTotals endpoint={endpoint} /></TableCell>
-                      <TableCell><EndpointRollingLimits endpoint={endpoint} /></TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          </>
-        )}
-      </div>
+      <EndpointUsageDirectory projectId={projectId} userId={provider.userId}/>
     </section>
   );
 }
 
-type ProviderEndpoint = ProjectUsageOverview["provider"]["endpoints"][number];
+type ProviderEndpoint = ProjectUsageEndpoint;
+
+function EndpointUsageDirectory({projectId,userId}:{projectId:string;userId:string}){
+  const [query,setQuery]=useState(""),[committedQuery,setCommittedQuery]=useState("");
+  const [cursor,setCursor]=useState<string|undefined>(),[history,setHistory]=useState<Array<string|undefined>>([]);
+  const [loadedCursor,setLoadedCursor]=useState<string|undefined>(),[loadedHistory,setLoadedHistory]=useState<Array<string|undefined>>([]);
+  const [page,setPage]=useState<ProjectEndpointUsagePage>({items:[],nextCursor:null,total:0});
+  const [state,setState]=useState<"loading"|"ready"|"error">("loading"),[refreshing,setRefreshing]=useState(false),[error,setError]=useState("");
+  const revision=useRef(0),hasContent=useRef(false);
+  useEffect(()=>{const timer=window.setTimeout(()=>{setCommittedQuery(query.trim());setHistory([]);setCursor(undefined)},250);return()=>window.clearTimeout(timer)},[query]);
+  useEffect(()=>{revision.current+=1;hasContent.current=false;setQuery("");setCommittedQuery("");setCursor(undefined);setHistory([]);setLoadedCursor(undefined);setLoadedHistory([]);setPage({items:[],nextCursor:null,total:0})},[projectId,userId]);
+  const load=useCallback(async()=>{
+    const request=++revision.current,preserve=hasContent.current;
+    preserve?setRefreshing(true):setState("loading");setError("");
+    try{
+      const loaded=await apiClient.endpointUsage(projectId,{q:committedQuery,...(cursor!==undefined?{cursor}:{}),limit:20,userId});
+      if(request!==revision.current)return;
+      setPage(loaded);setLoadedCursor(cursor);setLoadedHistory(history);setState("ready");hasContent.current=true;
+    }catch(reason){if(request!==revision.current)return;setError(reason instanceof Error?reason.message:"Endpoint usage could not be loaded.");if(!preserve)setState("error")}
+    finally{if(request===revision.current)setRefreshing(false)}
+  },[committedQuery,cursor,history,projectId,userId]);
+  useEffect(()=>{void load()},[load]);
+  return <div>
+    <Heading level={3}>Endpoint totals</Heading>
+    <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Settled totals and rolling limits for the same 30-day period.</Text>
+    <TextInput label="Search endpoint totals" isLabelHidden startIcon={<Search size={15}/>} value={query} onChange={(value)=>{revision.current+=1;setQuery(value)}} placeholder="Search endpoint totals" className="mt-3 max-w-sm" size="lg"/>
+    {error?<Banner className="mt-3" status="error" title="Endpoint totals unavailable" description={error} endContent={<Button label="Retry" variant="ghost" onClick={()=>void load()}/>}/>:null}
+    {state==="loading"?<Text as="p" type="supporting" color="secondary" className="mt-3">Loading endpoint totals...</Text>:null}
+    {state==="ready"&&page.items.length===0?<EmptyState className="mt-3" isCompact title="No endpoint totals" description={query?"No endpoints match this search.":"No endpoints are configured."}/>:null}
+    {state==="ready"&&page.items.length>0?<><ul className="mt-4 divide-y divide-border border-y border-border md:hidden" aria-label="Your endpoint usage">{page.items.map((endpoint)=><li className="py-4" key={endpoint.endpointId}><Text weight="semibold" wordBreak="break-word">{endpoint.endpointName}</Text><dl className="mt-3 grid gap-4"><div><dt><Text type="supporting" color="secondary">Settled totals</Text></dt><dd className="mt-1"><EndpointSettledTotals endpoint={endpoint}/></dd></div><div><dt><Text type="supporting" color="secondary">Your rolling limits</Text></dt><dd className="mt-1"><EndpointRollingLimits endpoint={endpoint}/></dd></div></dl></li>)}</ul><div className="mt-4 hidden overflow-x-auto md:block"><Table aria-label="Your endpoint usage" density="balanced" dividers="rows" verticalAlign="top"><TableHeader><TableRow isHeaderRow><TableHeaderCell>Endpoint</TableHeaderCell><TableHeaderCell>Settled totals</TableHeaderCell><TableHeaderCell>Your rolling limits</TableHeaderCell></TableRow></TableHeader><TableBody>{page.items.map((endpoint)=><TableRow key={endpoint.endpointId}><TableCell>{endpoint.endpointName}</TableCell><TableCell><EndpointSettledTotals endpoint={endpoint}/></TableCell><TableCell><EndpointRollingLimits endpoint={endpoint}/></TableCell></TableRow>)}</TableBody></Table></div></>:null}
+    {loadedHistory.length>0||page.nextCursor?<div className="mt-3 flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={refreshing||Boolean(error)||loadedHistory.length===0} onClick={()=>{setCursor(loadedHistory.at(-1));setHistory(loadedHistory.slice(0,-1))}}/><Text type="supporting" color="secondary">Page {loadedHistory.length+1} · {page.total} endpoints</Text><Button label="Next" variant="secondary" size="sm" isDisabled={refreshing||Boolean(error)||query.trim()!==committedQuery||!page.nextCursor} onClick={()=>{if(page.nextCursor){setHistory([...loadedHistory,loadedCursor]);setCursor(page.nextCursor)}}}/></div>:null}
+  </div>;
+}
 
 function EndpointSettledTotals({ endpoint }: { endpoint: ProviderEndpoint }) {
   return (

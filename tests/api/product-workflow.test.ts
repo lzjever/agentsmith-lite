@@ -72,8 +72,8 @@ describe("api product workflow", () => {
 
     const endpoints = await requestJson("GET", `/api/v1/projects/${project.id}/endpoints`, undefined, cookie);
     assertNoApiKeySecretRef(endpoints);
-    assert.equal(endpoints[0]?.hasCredentialRef, true);
-    assert.equal(endpoints[0]?.credentialId, credential.id);
+    assert.equal(endpoints.items[0]?.hasCredentialRef, true);
+    assert.equal(endpoints.items[0]?.credentialId, credential.id);
     const updatedEndpoint = await requestJson("PATCH", `/api/v1/projects/${project.id}/endpoints/${endpoint.id}`, {
       name: "Updated endpoint",
       protocol: "openai_chat_completions",

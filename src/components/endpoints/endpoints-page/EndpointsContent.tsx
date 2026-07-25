@@ -2,6 +2,7 @@
 
 import {
   Badge,
+  Button,
   Divider,
   EmptyState,
   IconButton,
@@ -15,17 +16,20 @@ import {
   TextInput,
 } from "@astryxdesign/core";
 import { KeyRound, Pencil, RefreshCw, Search, Trash2 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type {
   Endpoint,
   EndpointCapability,
-  ProjectCredential,
 } from "../../../lib/api/client";
 import { EndpointStatusBadge } from "../EndpointStatusBadge";
 
 export function EndpointsContent({
   endpoints,
-  credentials,
+  query,
+  refreshing,
+  pageNumber,
+  hasPrevious,
+  hasNext,
   focusedEndpointId,
   canManage,
   canEdit,
@@ -34,9 +38,16 @@ export function EndpointsContent({
   onEdit,
   onRecheck,
   onDelete,
+  onQueryChange,
+  onPrevious,
+  onNext,
 }: {
   endpoints: Endpoint[];
-  credentials: ProjectCredential[];
+  query:string;
+  refreshing:boolean;
+  pageNumber:number;
+  hasPrevious:boolean;
+  hasNext:boolean;
   focusedEndpointId: string | null;
   canManage: boolean;
   canEdit: boolean;
@@ -45,35 +56,18 @@ export function EndpointsContent({
   onEdit: (endpoint: Endpoint) => void;
   onRecheck: (endpoint: Endpoint) => void;
   onDelete: (endpoint: Endpoint) => void;
+  onQueryChange:(query:string)=>void;
+  onPrevious:()=>void;
+  onNext:()=>void;
 }) {
-  const [query, setQuery] = useState("");
   const [highlightedEndpointId, setHighlightedEndpointId] = useState<
     string | null
   >(null);
-  const credentialsById = useMemo(
-    () => new Map(credentials.map((credential) => [credential.id, credential])),
-    [credentials],
-  );
-  const filtered = useMemo(
-    () => endpoints.filter((endpoint) =>
-      `${endpoint.name} ${endpoint.model} ${endpoint.baseUrl}`
-        .toLowerCase()
-        .includes(query.trim().toLowerCase())),
-    [endpoints, query],
-  );
 
   useEffect(() => {
     if (
-      focusedEndpointId &&
-      endpoints.some((endpoint) => endpoint.id === focusedEndpointId) &&
-      !filtered.some((endpoint) => endpoint.id === focusedEndpointId)
-    ) {
-      setQuery("");
-      return;
-    }
-    if (
       !focusedEndpointId ||
-      !filtered.some((endpoint) => endpoint.id === focusedEndpointId)
+      !endpoints.some((endpoint) => endpoint.id === focusedEndpointId)
     ) {
       setHighlightedEndpointId(null);
       return;
@@ -99,7 +93,7 @@ export function EndpointsContent({
       cancelAnimationFrame(frame);
       window.clearTimeout(timeout);
     };
-  }, [endpoints, filtered, focusedEndpointId]);
+  }, [endpoints, focusedEndpointId]);
 
   return (
     <section aria-label="Project endpoints" className="space-y-4">
@@ -108,12 +102,12 @@ export function EndpointsContent({
         isLabelHidden
         startIcon={<Search size={16} />}
         value={query}
-        onChange={setQuery}
+        onChange={onQueryChange}
         className="max-w-sm"
         placeholder="Search endpoints"
         size="lg"
       />
-      {filtered.length === 0 ? (
+      {endpoints.length === 0 ? (
         <EmptyState
           isCompact
           title="No endpoints match this search"
@@ -141,7 +135,7 @@ export function EndpointsContent({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((endpoint) => (
+                {endpoints.map((endpoint) => (
                   <TableRow
                     id={endpointElementId(endpoint.id, "table")}
                     tabIndex={endpoint.id === focusedEndpointId ? -1 : undefined}
@@ -175,7 +169,7 @@ export function EndpointsContent({
                     <TableCell>
                       <Credential
                         endpoint={endpoint}
-                        credential={credentialsById.get(endpoint.credentialId)}
+                        credential={endpoint.credential}
                       />
                     </TableCell>
                     <TableCell><EndpointStatusBadge endpoint={endpoint} /></TableCell>
@@ -198,12 +192,12 @@ export function EndpointsContent({
             </Table>
           </div>
           <div className="md:hidden">
-            {filtered.map((endpoint, index) => (
+            {endpoints.map((endpoint, index) => (
               <Fragment key={endpoint.id}>
                 {index > 0 ? <Divider /> : null}
                 <EndpointCard
                   endpoint={endpoint}
-                  credential={credentialsById.get(endpoint.credentialId)}
+                  credential={endpoint.credential}
                   focused={endpoint.id === focusedEndpointId}
                   highlighted={endpoint.id === highlightedEndpointId}
                   canManage={canManage}
@@ -217,6 +211,7 @@ export function EndpointsContent({
               </Fragment>
             ))}
           </div>
+          {hasPrevious||hasNext?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={refreshing||!hasPrevious} onClick={onPrevious}/><Text type="supporting" color="secondary">Page {pageNumber}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={refreshing||!hasNext} onClick={onNext}/></div>:null}
         </>
       )}
     </section>
@@ -237,7 +232,7 @@ function EndpointCard({
   onDelete,
 }: {
   endpoint: Endpoint;
-  credential: ProjectCredential | undefined;
+  credential: Endpoint["credential"];
   focused: boolean;
   highlighted: boolean;
   canManage: boolean;
@@ -346,7 +341,7 @@ function Credential({
   credential,
 }: {
   endpoint: Endpoint;
-  credential: ProjectCredential | undefined;
+  credential: Endpoint["credential"];
 }) {
   if (credential) {
     return (
@@ -361,7 +356,7 @@ function Credential({
             display="block"
             maxLines={1}
           >
-            {credential.fingerprint}
+            Version {credential.version}
           </Text>
         </span>
       </span>

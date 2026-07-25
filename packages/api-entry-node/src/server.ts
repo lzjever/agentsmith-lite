@@ -603,8 +603,9 @@ async function routeApi(
       }
     }
     if (segments[4] === "credentials") {
-      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.list(user.id, projectId)); }
+      if (!segments[5] && method === "GET") { assertOnlySearchParams(url,["q","cursor","limit"]);const q=url.searchParams.get("q"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit");return sendJson(res, 200, await services.credentials.list(user.id, projectId,{...(q!==null?{q}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})})); }
       if (!segments[5] && method === "POST") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.create(user.id, projectId, asCredentialCreateInput(await readJson(req)), requireIdempotencyKey(req))); }
+      if (segments[5] && !segments[6] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res,200,await services.credentials.get(user.id,projectId,segments[5])); }
       if (segments[5] && segments[6] === "rotate" && !segments[7] && method === "POST") { assertOnlySearchParams(url,[]);return sendJson(res, 200, await services.credentials.rotate(user.id, projectId, segments[5], asCredentialRotateInput(await readJson(req)), requireIdempotencyKey(req))); }
       if (segments[5] && !segments[6] && method === "DELETE") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedVersion"]);await services.credentials.remove(user.id, projectId, segments[5],asPositiveInteger(body.expectedVersion,"expectedVersion"),requireIdempotencyKey(req)); return sendJson(res, 200, { deleted: true }); }
     }
@@ -615,23 +616,25 @@ async function routeApi(
       }
       if (segments[5] && segments[6] === "health" && !segments[7] && method === "POST") {
         assertOnlySearchParams(url,[]);
-        return sendJson(res, 200, toPublicEndpoint(await services.endpoints.recheckEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req))));
+        const endpoint=await services.endpoints.recheckEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req));
+        return sendJson(res, 200, await services.endpoints.getEndpoint(user.id,projectId,endpoint.id));
       }
       if (!segments[5] && method === "GET") {
-        assertOnlySearchParams(url,[]);
-        const endpoints = await services.endpoints.listEndpoints(user.id, projectId);
-        return sendJson(res, 200, endpoints.map(toPublicEndpoint));
+        assertOnlySearchParams(url,["q","mode","cursor","limit"]);
+        const q=url.searchParams.get("q"),mode=url.searchParams.get("mode"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit");
+        return sendJson(res,200,await services.endpoints.listEndpoints(user.id,projectId,{...(q!==null?{q}:{}),...(mode!==null?{mode:asEndpointDirectoryMode(mode)}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{})}));
       }
       if (!segments[5] && method === "POST") {
         assertOnlySearchParams(url,[]);
         const endpoint = await services.endpoints.createEndpoint(user.id, projectId, asEndpointInput(await readJson(req)), requireIdempotencyKey(req));
-        return sendJson(res, 200, toPublicEndpoint(endpoint));
+        return sendJson(res, 200, await services.endpoints.getEndpoint(user.id,projectId,endpoint.id));
       }
       if (segments[5] && !segments[6] && method === "PATCH") {
         assertOnlySearchParams(url,[]);
         const endpoint = await services.endpoints.updateEndpoint(user.id, projectId, segments[5], asEndpointUpdateInput(await readJson(req)), requireIdempotencyKey(req));
-        return sendJson(res, 200, toPublicEndpoint(endpoint));
+        return sendJson(res, 200, await services.endpoints.getEndpoint(user.id,projectId,endpoint.id));
       }
+      if (segments[5] && !segments[6] && method === "GET") { assertOnlySearchParams(url,[]);return sendJson(res,200,await services.endpoints.getEndpoint(user.id,projectId,segments[5])); }
       if (segments[5] && !segments[6] && method === "DELETE") {
         assertOnlySearchParams(url,[]);
         await services.endpoints.deleteEndpoint(user.id, projectId, segments[5], requireIdempotencyKey(req));
@@ -645,6 +648,11 @@ async function routeApi(
     if (segments[4] === "usage" && !segments[5] && method === "GET") {
       assertOnlySearchParams(url, ["endpointId","userId"]);
       return sendJson(res, 200, await services.policies.getUsageOverview(user.id, projectId, url.searchParams.get("endpointId") ?? undefined, optionalUserId(url.searchParams,"userId")??user.id));
+    }
+    if(segments[4]==="usage"&&segments[5]==="endpoints"&&!segments[6]&&method==="GET"){
+      assertOnlySearchParams(url,["q","cursor","limit","userId"]);
+      const q=url.searchParams.get("q"),cursor=url.searchParams.get("cursor"),limit=url.searchParams.get("limit"),selectedUserId=optionalUserId(url.searchParams,"userId");
+      return sendJson(res,200,await services.policies.getEndpointUsagePage(user.id,projectId,{...(q!==null?{q}:{}),...(cursor!==null?{cursor}:{}),...(limit!==null?{limit:asPositiveQueryInteger(limit,"limit")}:{}) ,...(selectedUserId!==undefined?{userId:selectedUserId}:{})}));
     }
     if(segments[4]==="usage"&&segments[5]==="file-storage"&&segments[6]==="refresh"&&!segments[7]&&method==="POST"){
       assertOnlySearchParams(url,[]);
@@ -1055,6 +1063,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/projects\/[^/]+(?:\/(?:pin|capabilities|overview|settings|members|credentials|endpoints|tasks|policy|usage|alerts|audit|alert-rules)(?:\/(?:archive|unarchive|transfer-owner))?)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/members\/candidates$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/audit\/identities$/.test(pathname) ||
+    /^\/api\/v1\/projects\/[^/]+\/usage\/endpoints$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/usage\/sandbox-runs$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/usage\/file-storage\/refresh$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/credentials\/[^/]+(?:\/rotate)?$/.test(pathname) ||
@@ -1428,6 +1437,7 @@ function asTaskArtifactListQuery(url:URL):TaskArtifactListQuery{
 }
 function asBoolean(value: unknown, field: string): boolean { if (typeof value !== "boolean") throw new ProductError(`${field} must be a boolean`); return value; }
 function asPositiveInteger(value:unknown,field:string):number{if(typeof value!=="number"||!Number.isInteger(value)||value<1)throw new ProductError(`${field} must be a positive integer`);return value;}
+function asEndpointDirectoryMode(value:string):import("../../contracts/src/api.js").EndpointDirectoryMode{if(value==="all"||value==="task_ready")return value;throw new ProductError("Endpoint directory mode must be all or task_ready",400)}
 function assertOnlyKeys(value:Record<string,unknown>,allowed:string[]):void{const unexpected=Object.keys(value).find((key)=>!allowed.includes(key));if(unexpected)throw new ProductError(`Unsupported field: ${unexpected}`,400);}
 
 function asTaskFileLibrary(value:unknown):CreateTaskInput["fileLibrary"]{

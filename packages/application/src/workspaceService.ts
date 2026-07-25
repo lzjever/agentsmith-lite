@@ -128,17 +128,17 @@ export class WorkspaceService {
 
   async projectOverview(userId: string, projectId: string): Promise<ProjectOverviewProjection> {
     const project = await this.authorization.requireProject(userId, projectId, "view");
-    const [capabilities, membership, owner, endpoints, workspace] = await Promise.all([
+    const [capabilities, membership, owner, readiness, workspace] = await Promise.all([
       this.authorization.projectCapabilities(userId, projectId),
       this.store.findProjectMembershipView(projectId,userId),
       this.store.findProjectMembershipView(projectId,project.ownerUserId),
-      this.store.listEndpointsForProject(projectId),
+      this.store.getProjectEndpointReadiness(projectId),
       this.store.findWorkspace(project.workspaceId)
     ]);
     if (!workspace) throw new NotFoundError("Workspace not found");
     if (!membership) throw new ProductError("Project membership changed while loading the overview", 409);
 
-    const taskReadyEndpointCount = endpoints.filter((endpoint) => endpoint.health?.status === "healthy" && endpoint.credentialId.trim() !== "" && endpoint.capabilities.includes("text") && endpoint.capabilities.includes("tool_calls")).length;
+    const taskReadyEndpointCount=readiness.taskReady;
     const recommendedActions: ProjectOverviewAction[] = [];
     if (capabilities.canCreateTasks && taskReadyEndpointCount > 0) recommendedActions.push("create_task");
     if (capabilities.canManageEndpoints && taskReadyEndpointCount === 0) recommendedActions.push("configure_endpoint");

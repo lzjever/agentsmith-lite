@@ -10,21 +10,21 @@ import {
   Text,
   useToast,
 } from "@astryxdesign/core";
-import { KeyRound, Plus, RefreshCw, Server } from "lucide-react";
+import { Plus, RefreshCw, Server } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities, type ProjectCredential } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { DeleteEndpointDialog } from "./DeleteEndpointDialog";
 import { EndpointDialog } from "./EndpointDialog";
-import { applyEndpointSave, emptyEndpointInput, endpointInputForEdit, endpointSummary, removeEndpoint } from "./endpoints-page-utils";
+import { applyEndpointSave, emptyEndpointInput, endpointInputForEdit, removeEndpoint } from "./endpoints-page-utils";
 import { EndpointsContent } from "./endpoints-page/EndpointsContent";
 
 type LoadState = "loading" | "ready" | "error";
 
-export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
+export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: string }) {
   const routeSearchParams = useSearchParams();
   const focusedEndpointId =
     routeSearchParams?.get("endpointId") ??
@@ -32,13 +32,15 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
       ? null
       : new URLSearchParams(window.location.search).get("endpointId"));
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
-  const [credentials, setCredentials] = useState<ProjectCredential[]>([]);
+  const [focusedEndpoint,setFocusedEndpoint]=useState<Endpoint>();
+  const [query,setQuery]=useState(""),[committedQuery,setCommittedQuery]=useState("");
+  const [cursor,setCursor]=useState<string|undefined>(),[cursorHistory,setCursorHistory]=useState<Array<string|undefined>>([]);
+  const [loadedCursor,setLoadedCursor]=useState<string|undefined>(),[loadedCursorHistory,setLoadedCursorHistory]=useState<Array<string|undefined>>([]);
+  const [nextCursor,setNextCursor]=useState<string|null>(null),[total,setTotal]=useState(0),[refreshing,setRefreshing]=useState(false);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [state, setState] = useState<LoadState>("loading");
-  const [credentialsState, setCredentialsState] = useState<LoadState>("loading");
   const [capabilitiesState, setCapabilitiesState] = useState<LoadState>("loading");
   const [error, setError] = useState("");
-  const [credentialsError, setCredentialsError] = useState("");
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const [input, setInput] = useState<EndpointInput>(emptyEndpointInput());
   const [editing, setEditing] = useState<Endpoint>();
@@ -54,12 +56,12 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   const [actionError, setActionError] = useState("");
   const discoveryRevision = useRef(0);
   const endpointsLoadRevision = useRef(0);
-  const credentialsLoadRevision = useRef(0);
   const capabilitiesLoadRevision = useRef(0);
   const projectRevision = useRef(0);
   const currentProjectId = useRef(projectId);
   const mutationKeys = useMutationKeys();
   const showToast = useToast();
+  const hasEndpointContent=useRef(false);
   if (currentProjectId.current !== projectId) {
     currentProjectId.current = projectId;
     projectRevision.current += 1;
@@ -72,23 +74,6 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
 
   const loadDependencies = useCallback(() => {
     const targetProjectId = projectId;
-    const credentialsRevision = ++credentialsLoadRevision.current;
-    setCredentialsState("loading");
-    setCredentialsError("");
-    void apiClient.credentials(projectId).then((listed) => {
-      if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
-      setCredentials(listed);
-      setInput((current) => current.credentialId && !listed.some((credential) => credential.id === current.credentialId)
-        ? { ...current, credentialId: "", baseUrl: "" }
-        : current);
-      setCredentialsState("ready");
-    }).catch((reason) => {
-      if (targetProjectId !== currentProjectId.current || credentialsRevision !== credentialsLoadRevision.current) return;
-      setCredentials([]);
-      setCredentialsError(message(reason));
-      setCredentialsState("error");
-    });
-
     const capabilitiesRevision = ++capabilitiesLoadRevision.current;
     setCapabilitiesState("loading");
     setCapabilitiesError("");
@@ -107,19 +92,31 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
   const load = useCallback(async () => {
     const targetProjectId = projectId;
     const revision = ++endpointsLoadRevision.current;
-    setState("loading");
+    hasEndpointContent.current?setRefreshing(true):setState("loading");
     setError("");
     try {
-      const listed = await apiClient.endpoints(projectId);
+      const listed = await apiClient.endpoints(projectId,{q:committedQuery,...(cursor!==undefined?{cursor}:{}),limit:20});
       if (targetProjectId !== currentProjectId.current || revision !== endpointsLoadRevision.current) return;
-      setEndpoints(listed);
+      setEndpoints(listed.items);setNextCursor(listed.nextCursor);setTotal(listed.total);
+      setLoadedCursor(cursor);setLoadedCursorHistory(cursorHistory);
+      hasEndpointContent.current=true;
       setState("ready");
     } catch (reason) {
       if (targetProjectId !== currentProjectId.current || revision !== endpointsLoadRevision.current) return;
       setError(message(reason));
-      setState("error");
+      if(!hasEndpointContent.current)setState("error");
+    }finally{
+      if(targetProjectId===currentProjectId.current&&revision===endpointsLoadRevision.current)setRefreshing(false);
     }
-  }, [projectId]);
+  }, [committedQuery,cursor,cursorHistory,projectId]);
+
+  useEffect(()=>{const timer=window.setTimeout(()=>{setCommittedQuery(query.trim());setCursorHistory([]);setCursor(undefined)},250);return()=>window.clearTimeout(timer)},[query]);
+  useEffect(()=>{
+    if(!focusedEndpointId){setFocusedEndpoint(undefined);return}
+    let live=true;
+    void apiClient.endpoint(projectId,focusedEndpointId).then((endpoint)=>{if(live)setFocusedEndpoint(endpoint)}).catch(()=>{if(live)setFocusedEndpoint(undefined)});
+    return()=>{live=false};
+  },[focusedEndpointId,projectId]);
 
   useEffect(() => {
     invalidateDiscovery();
@@ -132,12 +129,14 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     setFormError("");
     setActionError("");
     setSaving(false);
-    void load();
+    hasEndpointContent.current=false;
+    setQuery("");setCommittedQuery("");setCursor(undefined);setCursorHistory([]);setLoadedCursor(undefined);setLoadedCursorHistory([]);setFocusedEndpoint(undefined);
     loadDependencies();
-  }, [load, loadDependencies]);
+  }, [loadDependencies,projectId]);
+  useEffect(()=>{void load()},[load]);
 
   const canManage = capabilitiesState === "ready" && capabilities?.canManageEndpoints === true;
-  const canConfigure = canManage && credentialsState === "ready" && credentials.length > 0;
+  const canConfigure = canManage;
   const mutationBusy = saving || discovering || checkingId !== undefined;
   const nameConflict = endpoints.some((endpoint) => endpoint.id !== editing?.id && normalizeEndpointName(endpoint.name) === normalizeEndpointName(input.name));
 
@@ -205,29 +204,20 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     return true;
   }
   function refreshMissingCredential(reason: unknown) {
-    if (!isMissing(reason, "Credential not found")) return false;
-    loadDependencies();
-    return true;
+    return isMissing(reason, "Credential not found");
   }
   async function refreshStaleEndpoint(reason: unknown, endpointId: string) {
     if (!(reason instanceof ApiError && reason.status === 409 && reason.message === "Endpoint changed elsewhere. Reload and try again.")) return false;
     try {
-      const listed = await apiClient.endpoints(projectId);
+      const latest = await apiClient.endpoint(projectId,endpointId);
       if (currentProjectId.current !== projectId) return true;
-      setEndpoints(listed);
-      const latest = listed.find((endpoint) => endpoint.id === endpointId);
-      if (!latest) {
-        setDialogOpen(false);
-        setActionProjectId(undefined);
-        setEditing(undefined);
-        setActionError("Endpoint was removed elsewhere. The endpoint list has been refreshed.");
-        return true;
-      }
+      setEndpoints((items)=>applyEndpointSave(items,latest,true));
       invalidateDiscovery();
       setEditing(latest);
       setInput(endpointInputForEdit(latest));
       setFormError("Endpoint changed elsewhere. Latest configuration loaded; review and apply your change again.");
-    } catch {
+    } catch(reason) {
+      if(isMissing(reason,"Endpoint not found")){setDialogOpen(false);setActionProjectId(undefined);setEditing(undefined);setActionError("Endpoint was removed elsewhere. The endpoint list has been refreshed.");void resetPage();return true}
       setFormError("Endpoint changed elsewhere, and the latest configuration could not be loaded. Close this dialog and refresh endpoints.");
     }
     return true;
@@ -249,6 +239,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
       setEndpoints((items) => applyEndpointSave(items, saved, Boolean(editing)));
       setDialogOpen(false);
       setActionProjectId(undefined);
+      void resetPage();
       showToast({ body: editing ? "Endpoint updated" : "Endpoint created" });
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete(editing ? "endpoint.update" : "endpoint.create", editing?.id ?? projectId);
@@ -336,6 +327,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => removeEndpoint(items, deleting.id));
       setDeleting(undefined);
+      void resetPage();
       showToast({ body: "Endpoint deleted" });
     } catch (reason) {
       if (reason instanceof ApiError && deleting) mutationKeys.complete("endpoint.delete", deleting.id);
@@ -353,15 +345,9 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
     void load();
     loadDependencies();
   }
-
-  const needsCredential = credentialsState === "ready" && credentials.length === 0;
-  const emptyDescription = needsCredential
-    ? canManage
-      ? "Endpoints require a project credential. Add one before configuring an OpenAI-compatible connection."
-      : "Endpoints require a project credential. A project manager must add one before an endpoint can be configured."
-    : canManage
-      ? "Create an OpenAI-compatible endpoint before creating a task."
-      : "An administrator can add an endpoint before task work begins.";
+  async function resetPage(){setCursorHistory([]);setCursor(undefined);if(cursor===undefined)await load()}
+  const visibleEndpoints=focusedEndpoint&&!endpoints.some((endpoint)=>endpoint.id===focusedEndpoint.id)?[focusedEndpoint,...endpoints]:endpoints;
+  const emptyDescription=canManage?"Create an OpenAI-compatible endpoint before creating a task.":"An administrator can add an endpoint before task work begins.";
 
   return (
     <PageLayout
@@ -392,13 +378,6 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
         />
       }
     >
-      {credentialsState === "error" ? (
-        <Banner
-          status="warning"
-          title="Credentials unavailable"
-          description={`${credentialsError} Creating and editing endpoints is disabled until credentials can be loaded.`}
-        />
-      ) : null}
       {capabilitiesError ? (
         <Banner
           status="warning"
@@ -432,16 +411,14 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
           actions={<Button label="Try again" onClick={() => void load()} />}
         />
       ) : null}
-      {state === "ready" && endpoints.length === 0 ? (
+      {state === "ready" && total===0&&!query ? (
         <EmptyState
           data-testid="page-state__empty"
           data-page-state="empty"
-          icon={needsCredential ? <KeyRound size={20} /> : <Server size={20} />}
-          title={needsCredential ? "Create a credential first" : "No endpoints configured"}
+          icon={<Server size={20} />}
+          title="No endpoints configured"
           description={emptyDescription}
-          actions={needsCredential ? (
-            <CredentialsLink workspaceId={workspaceId} projectId={projectId} />
-          ) : canConfigure ? (
+          actions={canConfigure ? (
             <Button
               label="Create endpoint"
               icon={<Plus size={16} />}
@@ -450,22 +427,20 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
           ) : undefined}
         />
       ) : null}
-      {state === "ready" && endpoints.length > 0 ? (
+      {state === "ready" && (total>0||Boolean(query)) ? (
         <section className="space-y-4">
-          {needsCredential ? (
+          {error ? (
             <Banner
-              status="warning"
-              title="Project credentials required"
-              description={canManage
-                ? "Create a project credential before adding or editing endpoints."
-                : "No project credentials are available."}
-              endContent={<CredentialsLink workspaceId={workspaceId} projectId={projectId} />}
+              status="error"
+              title="Endpoints could not be refreshed"
+              description={error}
+              endContent={<Button label="Retry" variant="ghost" onClick={() => void load()} />}
             />
           ) : null}
           <div>
             <Divider />
             <div className="flex flex-wrap items-center justify-between gap-3 py-3">
-              <Text type="supporting">{endpointSummary(endpoints)}</Text>
+              <Text type="supporting">{total} {total===1?"endpoint":"endpoints"}</Text>
               <Text color="secondary">
                 {canManage ? "Management enabled." : "Read-only access."}
               </Text>
@@ -473,8 +448,12 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
             <Divider />
           </div>
           <EndpointsContent
-            endpoints={endpoints}
-            credentials={credentials}
+            endpoints={visibleEndpoints}
+            query={query}
+            refreshing={refreshing||Boolean(error)||query.trim()!==committedQuery}
+            pageNumber={loadedCursorHistory.length+1}
+            hasPrevious={loadedCursorHistory.length>0}
+            hasNext={nextCursor!==null}
             focusedEndpointId={focusedEndpointId}
             canManage={canManage}
             canEdit={canConfigure}
@@ -483,6 +462,9 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
             onEdit={edit}
             onRecheck={recheck}
             onDelete={setDeleting}
+            onQueryChange={(value)=>{endpointsLoadRevision.current+=1;setQuery(value)}}
+            onPrevious={()=>{setCursor(loadedCursorHistory.at(-1));setCursorHistory(loadedCursorHistory.slice(0,-1))}}
+            onNext={()=>{if(nextCursor){setCursorHistory([...loadedCursorHistory,loadedCursor]);setCursor(nextCursor)}}}
           />
         </section>
       ) : null}
@@ -498,7 +480,7 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
         canSave={(editing === undefined || endpointInputChanged(input, editing)) && !nameConflict}
         nameConflict={nameConflict}
         error={formError}
-        credentials={credentials}
+        projectId={projectId}
         onDiscoverModels={() => void discoverModels()}
         onDismissError={() => setFormError("")}
         onOpenChange={(open) => {
@@ -523,18 +505,6 @@ export function EndpointsPage({ workspaceId, projectId }: { workspaceId?: string
         onConfirm={remove}
       />
     </PageLayout>
-  );
-}
-
-function CredentialsLink({ workspaceId, projectId }: { workspaceId: string | undefined; projectId: string }) {
-  const href = workspaceId ? `/workspaces/${workspaceId}/projects/${projectId}/credentials` : "../credentials";
-  return (
-    <Button
-      label="Project credentials"
-      href={href}
-      variant="secondary"
-      icon={<KeyRound size={15} />}
-    />
   );
 }
 
