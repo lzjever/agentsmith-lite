@@ -56,7 +56,11 @@ export function validateTaskReturnTo(
     || !decoded[6]
   ) return null;
 
-  const canonicalScope: TaskPathScope = { ...scope, taskId: decoded[6] };
+  const canonicalScope: TaskPathScope = {
+    ...scope,
+    appBasePath: "",
+    taskId: decoded[6],
+  };
   const canonicalHash = canonicalTaskHash(hash);
   return canonicalTaskHref(canonicalScope, view, canonicalHash);
 }

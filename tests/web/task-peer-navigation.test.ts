@@ -35,6 +35,29 @@ describe("Task peer navigation", () => {
     );
   });
 
+  it("validates a based Task return path and returns a base-neutral Next route", () => {
+    const basedScope = { ...scope, appBasePath: "/app" };
+    assert.equal(
+      validateTaskReturnTo(
+        "/app/workspaces/workspace_1/projects/project_1/tasks/task_1?view=artifacts",
+        basedScope
+      ),
+      "/workspaces/workspace_1/projects/project_1/tasks/task_1?view=artifacts"
+    );
+
+    const invalid = [
+      "/workspaces/workspace_1/projects/project_1/tasks/task_1?view=artifacts",
+      "/other/workspaces/workspace_1/projects/project_1/tasks/task_1?view=artifacts",
+      "https://example.test/app/workspaces/workspace_1/projects/project_1/tasks/task_1",
+      "//example.test/app/workspaces/workspace_1/projects/project_1/tasks/task_1",
+      "/app/workspaces/workspace_1/projects/project_1/tasks/../task_1",
+      "/app/workspaces/workspace_1/projects/project_1/tasks/%E0%A4%A"
+    ];
+    for (const value of invalid) {
+      assert.equal(validateTaskReturnTo(value, basedScope), null, value);
+    }
+  });
+
   it("keeps the first validated returnTo while switching File Libraries", () => {
     const first = validateTaskReturnTo(
       "/workspaces/workspace_1/projects/project_1/tasks/task_1?view=terminal",
