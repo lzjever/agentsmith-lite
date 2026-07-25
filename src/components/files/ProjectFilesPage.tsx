@@ -4,12 +4,17 @@ import { ChevronLeft, ChevronRight, Download, FileText, Folder, FolderOpen, Fold
 import Link from "next/link";
 import { Banner, Button, Collapsible, EmptyState, FileInput, Heading, IconButton, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
-import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
+import {
+  createInlinePreviewRequest,
+  isInlinePreviewAvailable,
+  type InlinePreviewContent,
+  type InlinePreviewRequest
+} from "../media/inline-preview";
 import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 import {
   createFileBrowserState,
@@ -19,7 +24,6 @@ import {
 } from "./fileBrowserState";
 
 type LoadState = "loading" | "ready" | "error";
-const maxPreviewBytes = 512_000;
 const fileSortOptions = [
   { value: "name:asc", label: "Name A-Z" },
   { value: "name:desc", label: "Name Z-A" },
@@ -28,7 +32,7 @@ const fileSortOptions = [
   { value: "updatedAt:desc", label: "Recently updated" },
   { value: "updatedAt:asc", label: "Oldest updated" }
 ];
-export type FilePreview = { kind: "text" | "image"; value: string; name: string; path: string };
+export type FilePreview = InlinePreviewContent & { name: string; path: string };
 type FilePreviewState =
   | { status: "idle" }
   | { status: "loading"; path: string }
@@ -51,6 +55,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const libraryLoadVersion = useRef(0);
   const fileLoadVersion = useRef(0);
   const previewVersion = useRef(0);
+  const previewRequest = useRef<InlinePreviewRequest | undefined>(undefined);
   const input = useRef<HTMLInputElement>(null);
 
   const [libraries, setLibraries] = useState<FileLibrary[]>([]);
@@ -90,6 +95,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
 
   const clearPreview = useCallback(() => {
     previewVersion.current += 1;
+    previewRequest.current?.dispose();
+    previewRequest.current = undefined;
     setPreviewState({ status: "idle" });
   }, []);
 
@@ -154,6 +161,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       libraryLoadVersion.current += 1;
       fileLoadVersion.current += 1;
       previewVersion.current += 1;
+      previewRequest.current?.dispose();
+      previewRequest.current = undefined;
     };
   }, [loadLibraries]);
 
@@ -206,12 +215,6 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   useEffect(() => {
     if (librariesState === "ready") void loadFiles();
   }, [librariesState, loadFiles]);
-
-  useEffect(() => () => {
-    if (previewState.status === "ready" && previewState.preview.kind === "image") {
-      URL.revokeObjectURL(previewState.preview.value);
-    }
-  }, [previewState]);
 
   const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId);
   const selected = browser.entries.find((entry) => entry.path === browser.selectedPath);
@@ -328,41 +331,29 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (entry.type !== "file" || !selectedLibrary) return;
     const libraryId = selectedLibrary.id;
     const version = ++previewVersion.current;
+    previewRequest.current?.dispose();
     setPreviewState({ status: "loading", path: entry.path });
+    const request = createInlinePreviewRequest({
+      mediaType: entry.mediaType,
+      bytes: entry.size ?? 0,
+      load: (signal) => apiClient.previewLibraryFile(projectId, libraryId, entry.path, signal)
+    });
+    previewRequest.current = request;
     try {
-      const listedKind = classifyPreviewMediaType(entry.mediaType);
-      if (listedKind === null || (entry.size ?? 0) > maxPreviewBytes) throw new Error("This file type cannot be previewed safely.");
-      const blob = await apiClient.previewLibraryFile(projectId, libraryId, entry.path);
+      const preview = await request.result;
       if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
-      if (blob.size > maxPreviewBytes) throw new Error("This file is too large to preview.");
-      const downloadedKind = classifyPreviewMediaType(blob.type);
-      if (downloadedKind !== listedKind) throw new Error("The downloaded file type does not match its preview metadata. Download the file to inspect it safely.");
-      if (downloadedKind === "image") {
-        const value = URL.createObjectURL(blob);
-        if (version !== previewVersion.current) { URL.revokeObjectURL(value); return; }
-        setPreviewState({
-          status: "ready",
-          preview: { kind: "image", value, name: entry.name, path: entry.path }
-        });
-        return;
-      }
-      if (downloadedKind === "text") {
-        const value = (await blob.text()).slice(0, 16_000);
-        if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
-        setPreviewState({
-          status: "ready",
-          preview: { kind: "text", value, name: entry.name, path: entry.path }
-        });
-        return;
-      }
-      throw new Error("This file type cannot be previewed safely.");
+      setPreviewState({ status: "ready", preview: { ...preview, name: entry.name, path: entry.path } });
     } catch (error) {
       if (!mounted.current || version !== previewVersion.current) return;
       if (isMissingFile(error)) {
+        request.dispose();
+        if (previewRequest.current === request) previewRequest.current = undefined;
         forgetFile(libraryId, entry.path);
         setFilesNotice("File no longer exists. It was removed from this File Library view.");
         return;
       }
+      request.dispose();
+      if (previewRequest.current === request) previewRequest.current = undefined;
       setPreviewState({
         status: "error",
         path: entry.path,
@@ -625,7 +616,7 @@ function FileDetails({ entry, projectId, library, mutationBusy, previewState, on
   return <div className="space-y-4">
     <div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div>
     <dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>
-    {file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{classifyPreviewMediaType(entry.mediaType) !== null && (entry.size ?? 0) <= maxPreviewBytes ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} isLoading={previewState.status === "loading" && previewState.path === entry.path} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}
+    {file ? <div className="flex flex-wrap gap-2"><Button label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{isInlinePreviewAvailable({ mediaType: entry.mediaType, bytes: entry.size ?? 0 }) ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} isLoading={previewState.status === "loading" && previewState.path === entry.path} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}
     {previewForEntry ? <FilePreviewPanel state={previewState} entry={entry} onRetry={() => onPreview(entry)} onClose={onClosePreview} /> : null}
   </div>;
 }
@@ -639,8 +630,8 @@ function FilePreviewPanel({ state, entry, onRetry, onClose }: { state: FilePrevi
     <div className="h-48 min-h-0 overflow-auto">
       {state.status === "loading" ? <div className="space-y-2" aria-label="Loading file preview"><Skeleton height={32} /><Skeleton height={120} /></div> : null}
       {state.status === "error" ? <Banner status="error" title="File preview unavailable" description={state.message} endContent={<Button label="Try again" variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={onRetry} />} /> : null}
-      {state.status === "ready" && state.preview.kind === "image" ? <div className="grid h-full place-items-center"><img className="max-h-full max-w-full object-contain" src={state.preview.value} alt={state.preview.name} /></div> : null}
-      {state.status === "ready" && state.preview.kind === "text" ? <pre className="min-h-full whitespace-pre-wrap break-words"><Text type="code">{state.preview.value}</Text></pre> : null}
+      {state.status === "ready" && state.preview.kind === "image" ? <div className="grid h-full place-items-center"><img className="max-h-full max-w-full object-contain" src={state.preview.url} alt={state.preview.name} /></div> : null}
+      {state.status === "ready" && state.preview.kind === "text" ? <pre className="min-h-full whitespace-pre-wrap break-words"><Text type="code">{state.preview.text}</Text></pre> : null}
     </div>
   </section>;
 }

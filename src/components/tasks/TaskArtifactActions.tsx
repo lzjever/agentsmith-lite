@@ -3,14 +3,14 @@
 import { Download, Image as ImageIcon } from "lucide-react";
 import { Banner, Button, IconButton, Spinner, Text } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
-import { classifyPreviewMediaType } from "../../../packages/contracts/src/api";
 import { ApiError, apiClient } from "../../lib/api/client";
+import {
+  createInlinePreviewRequest,
+  inlinePreviewPolicy,
+  isInlinePreviewAvailable
+} from "../media/inline-preview";
 import { Dialog } from "../ui/Dialog";
 import { formatArtifactBytes } from "./task-ui";
-
-const MAX_TEXT_PREVIEW_BYTES = 512 * 1024;
-const MAX_IMAGE_PREVIEW_BYTES = 8 * 1024 * 1024;
-const MAX_TEXT_PREVIEW_CHARACTERS = 16_000;
 
 export type PreviewableTaskArtifact = {
   id: string;
@@ -23,9 +23,10 @@ export type PreviewableTaskArtifact = {
 export function TaskArtifactActions({ taskId, artifact, available = true, className }: { taskId: string; artifact: PreviewableTaskArtifact; available?: boolean; className?: string }) {
   const [textOpen, setTextOpen] = useState(false);
   const [imageOpen, setImageOpen] = useState(false);
-  const previewKind = classifyPreviewMediaType(artifact.mediaType);
-  const safeText = previewKind === "text" && (artifact.previewText !== null && artifact.previewText !== undefined || artifact.bytes <= MAX_TEXT_PREVIEW_BYTES);
-  const safeImage = previewKind === "image" && artifact.bytes <= MAX_IMAGE_PREVIEW_BYTES;
+  const previewPolicy = inlinePreviewPolicy(artifact.mediaType);
+  const previewAvailable = isInlinePreviewAvailable(artifact);
+  const safeText = previewPolicy?.kind === "text" && previewAvailable;
+  const safeImage = previewPolicy?.kind === "image" && previewAvailable;
 
   if (!available) return null;
 
@@ -37,34 +38,27 @@ export function TaskArtifactActions({ taskId, artifact, available = true, classN
 }
 
 function ArtifactTextPreview({ taskId, artifact }: { taskId: string; artifact: PreviewableTaskArtifact }) {
-  const [text, setText] = useState<string | null>(artifact.previewText?.slice(0, MAX_TEXT_PREVIEW_CHARACTERS) ?? null);
+  const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
-    setText(artifact.previewText?.slice(0, MAX_TEXT_PREVIEW_CHARACTERS) ?? null);
-    setError(null);
-  }, [artifact.id, artifact.previewText]);
-  useEffect(() => {
-    if (artifact.previewText !== undefined && artifact.previewText !== null) return;
     let cancelled = false;
-    const controller = new AbortController();
-    void apiClient.downloadTaskArtifact(taskId, artifact.id, controller.signal).then(async (blob) => {
-      if (blob.size > MAX_TEXT_PREVIEW_BYTES) {
-        if (!cancelled) setError("Text preview is too large.");
-        return;
-      }
-      if (classifyPreviewMediaType(artifact.mediaType) !== "text" || classifyPreviewMediaType(blob.type) !== "text") {
-        if (!cancelled) setError("The downloaded file type does not match its text preview metadata. Download the file to inspect it safely.");
-        return;
-      }
-      const value = await blob.text();
-      if (!cancelled) setText(value.slice(0, MAX_TEXT_PREVIEW_CHARACTERS));
-    }).catch((reason) => {
-      if (!cancelled) setError(reason instanceof ApiError ? reason.message : "Text preview could not be loaded.");
+    setText(null);
+    setError(null);
+    const request = createInlinePreviewRequest({
+      mediaType: artifact.mediaType,
+      bytes: artifact.bytes,
+      previewText: artifact.previewText,
+      load: (signal) => apiClient.downloadTaskArtifact(taskId, artifact.id, signal)
     });
-    return () => { cancelled = true; controller.abort(); };
-  }, [artifact.id, artifact.previewText, reloadKey, taskId]);
+    void request.result.then((preview) => {
+      if (!cancelled && preview.kind === "text") setText(preview.text);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof ApiError || reason instanceof Error ? reason.message : "Text preview could not be loaded.");
+    });
+    return () => { cancelled = true; request.dispose(); };
+  }, [artifact.bytes, artifact.id, artifact.mediaType, artifact.previewText, reloadKey, taskId]);
 
   if (error) return <div className="mt-3"><Banner status="error" title="Preview unavailable" description={error} /><Button className="mt-3" label="Try again" onClick={() => { setError(null); setText(null); setReloadKey((key) => key + 1); }} /></div>;
   if (text === null) return <div className="mt-3 grid min-h-24 place-items-center text-secondary"><Spinner size="sm" label="Loading preview..." /></div>;
@@ -77,27 +71,22 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
   const [loading, setLoading] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
-  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
   useEffect(() => {
     if (!open || url || loading) return;
     let cancelled = false;
-    const controller = new AbortController();
     setLoading(true); setError(null);
-    void apiClient.downloadTaskArtifact(taskId, artifact.id, controller.signal).then((blob) => {
-      if (cancelled) return;
-      if (blob.size > MAX_IMAGE_PREVIEW_BYTES) { setError("Image preview is too large."); return; }
-      if (classifyPreviewMediaType(artifact.mediaType) !== "image" || classifyPreviewMediaType(blob.type) !== "image") {
-        setError("The downloaded file type does not match its image preview metadata. Download the file to inspect it safely.");
-        return;
-      }
-      const nextUrl = URL.createObjectURL(blob);
-      if (cancelled) { URL.revokeObjectURL(nextUrl); return; }
-      setUrl(nextUrl);
+    const request = createInlinePreviewRequest({
+      mediaType: artifact.mediaType,
+      bytes: artifact.bytes,
+      load: (signal) => apiClient.downloadTaskArtifact(taskId, artifact.id, signal)
+    });
+    void request.result.then((preview) => {
+      if (!cancelled && preview.kind === "image") setUrl(preview.url);
     }).catch((reason) => {
-      if (!cancelled) setError(reason instanceof ApiError ? reason.message : "Image preview could not be loaded.");
+      if (!cancelled) setError(reason instanceof ApiError || reason instanceof Error ? reason.message : "Image preview could not be loaded.");
     }).finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; controller.abort(); };
-  }, [artifact.id, artifact.mediaType, open, reloadKey, taskId]);
+    return () => { cancelled = true; request.dispose(); };
+  }, [artifact.bytes, artifact.id, artifact.mediaType, open, reloadKey, taskId]);
 
   function close(nextOpen: boolean) {
     if (!nextOpen) {
