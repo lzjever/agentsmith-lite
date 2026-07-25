@@ -2,13 +2,12 @@
 
 import { FolderKanban, Plus } from "lucide-react";
 import Link from "next/link";
-import { Badge, Banner, Button, EmptyState, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
+import { Badge, Banner, Button, Dialog, DialogHeader, EmptyState, Spinner, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, apiClient, notifyDirectoryChanged, type WorkspaceDetail, type WorkspaceDirectoryItem, type WorkspaceMemberRole } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog } from "../ui/Dialog";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -105,7 +104,14 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
     mutationKeys.clear("workspace.create");
     onClose();
   };
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title="New workspace" subtitle="Create a home for one or more projects." busy={saving} primaryAction={<Button type="submit" form="workspace-create-form" label="Create workspace" variant="primary" isDisabled={saving || name.trim().length === 0} isLoading={saving} />}><form id="workspace-create-form" onSubmit={submit}><TextInput label="Name" value={name} onChange={(value) => setName(value.slice(0, 160))} isRequired hasAutoFocus isDisabled={saving} {...(error && { status: { type: "error", message: error } as const })} width="100%" /></form></Dialog>;
+  return <Dialog className="[&_button]:min-h-11 [&_button]:min-w-11" isOpen={open} onOpenChange={handleOpenChange} purpose="form" padding={0} width="min(34rem, calc(100dvw - 1rem))" maxHeight="calc(100dvh - 1rem)" aria-label="New workspace">
+    <DialogHeader title="New workspace" subtitle="Create a home for one or more projects." hasDivider {...(!saving ? { onOpenChange: handleOpenChange } : {})} />
+    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6"><form id="workspace-create-form" onSubmit={submit}><TextInput label="Name" value={name} onChange={(value) => setName(value.slice(0, 160))} isRequired hasAutoFocus data-autofocus="" isDisabled={saving} {...(error && { status: { type: "error", message: error } as const })} width="100%" /></form></div>
+    <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+      <Button type="button" label="Cancel" variant="ghost" size="lg" isDisabled={saving} onClick={() => handleOpenChange(false)} />
+      <Button type="submit" form="workspace-create-form" label="Create workspace" variant="primary" size="lg" isDisabled={saving || name.trim().length === 0} isLoading={saving} />
+    </div>
+  </Dialog>;
 }
 
 function errorMessage(reason: unknown, fallback: string): string {

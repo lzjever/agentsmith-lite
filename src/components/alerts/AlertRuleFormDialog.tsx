@@ -6,6 +6,8 @@ import {
   Banner,
   Button,
   CheckboxInput,
+  Dialog as AstryxDialog,
+  DialogHeader,
   NumberInput,
   Selector,
   TextInput,
@@ -13,7 +15,6 @@ import {
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
 import type { ProjectAlertType } from "../../lib/api/client";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
-import { Dialog } from "../ui/Dialog";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "sandbox_capacity", label: "Sandbox capacity", metric: "active_sandboxes", defaultWindowSeconds: null },
@@ -41,13 +42,129 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, saving, c
   const formId = useId();
 
   return (
-    <Dialog
+    <AstryxDialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={open}
       onOpenChange={handleOpenChange}
-      title={title}
-      subtitle={description}
-      busy={saving}
-      primaryAction={
+      purpose="form"
+      padding={0}
+      width="min(34rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label={title}
+    >
+      <DialogHeader
+        title={title}
+        subtitle={description}
+        hasDivider
+        {...(!saving ? { onOpenChange: handleOpenChange } : {})}
+      />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <form id={formId} className="grid gap-4" onSubmit={onSubmit}>
+          {error ? (
+            <Banner
+              status="error"
+              title="Alert rule could not be saved"
+              description={error}
+            />
+          ) : null}
+          <TextInput
+            label="Name"
+            value={value.name}
+            onChange={(name) => onChange({ ...value, name: name.slice(0, 80) })}
+            isRequired
+            hasAutoFocus
+            data-autofocus=""
+            isDisabled={saving}
+            width="100%"
+          />
+          <Selector
+            label="Alert type"
+            options={alertRuleTypes.map((type) => ({ value: type.value, label: type.label }))}
+            value={value.alertType}
+            onChange={(alertType) => {
+              const type = alertRuleType(alertType as ProjectAlertType);
+              onChange({
+                ...value,
+                alertType: type.value,
+                metric: type.metric,
+                windowSeconds: type.defaultWindowSeconds,
+                scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" },
+              });
+            }}
+            isDisabled={saving}
+            size="lg"
+          />
+          <TextInput
+            label="Metric"
+            value={value.metric === "active_sandboxes" ? "Active sandboxes" : value.metric.replaceAll("_", " ")}
+            isDisabled
+            disabledMessage="Metric is determined by the alert type."
+            width="100%"
+          />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NumberInput
+              label="Threshold"
+              value={value.threshold}
+              min={0}
+              onChange={(threshold) => onChange({ ...value, threshold })}
+              isRequired
+              isDisabled={saving}
+              size="lg"
+              width="100%"
+            />
+            <Selector
+              label="Window"
+              options={[
+                ...(value.metric !== "failure_count" ? [{ value: "current", label: "Current value" }] : []),
+                ...(value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds)
+                  ? [{ value: String(value.windowSeconds), label: `${value.windowSeconds} seconds (current)` }]
+                  : []),
+                { value: "3600", label: "Last hour" },
+                { value: "86400", label: "Last 24 hours" },
+                { value: "604800", label: "Last 7 days" },
+              ]}
+              value={value.windowSeconds === null ? "current" : String(value.windowSeconds)}
+              onChange={(next) => onChange({ ...value, windowSeconds: next === "current" ? null : Number(next) })}
+              isDisabled={saving}
+              size="lg"
+            />
+          </div>
+          <Selector
+            label="Scope"
+            options={[
+              { value: "project", label: "Entire project" },
+              ...(supportsEndpointScope(value.alertType)?[{value:"endpoint",label:"One endpoint"}]:[]),
+            ]}
+            value={value.scope.kind}
+            onChange={(next) =>
+              onChange({
+                ...value,
+                scope: next === "project"
+                  ? { kind: "project" }
+                  : { kind: "endpoint", endpointId: value.scope.kind==="endpoint"?value.scope.endpointId:"" },
+              })
+            }
+            isDisabled={saving || !supportsEndpointScope(value.alertType)}
+            size="lg"
+          />
+          {supportsEndpointScope(value.alertType)&&value.scope.kind==="endpoint"?<EndpointPicker projectId={projectId} value={value.scope.endpointId} label="Endpoint scope" disabled={saving} onChange={(endpoint)=>onChange({...value,scope:{kind:"endpoint",endpointId:endpoint.id}})} onUnavailable={()=>onChange({...value,scope:{kind:"endpoint",endpointId:""}})}/>:null}
+          <CheckboxInput
+            label="Enabled"
+            value={value.enabled}
+            isDisabled={saving}
+            onChange={(enabled) => onChange({ ...value, enabled })}
+          />
+        </form>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button
+          label="Cancel"
+          type="button"
+          variant="ghost"
+          size="lg"
+          isDisabled={saving}
+          onClick={() => handleOpenChange(false)}
+        />
         <Button
           label={saving ? "Saving..." : editing ? "Save changes" : "Create rule"}
           type="submit"
@@ -58,103 +175,8 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, saving, c
           isDisabled={saving || !canSave}
           isLoading={saving}
         />
-      }
-    >
-      <form id={formId} className="grid gap-4" onSubmit={onSubmit}>
-              {error ? (
-                <Banner
-                  status="error"
-                  title="Alert rule could not be saved"
-                  description={error}
-                />
-              ) : null}
-              <TextInput
-                label="Name"
-                value={value.name}
-                onChange={(name) => onChange({ ...value, name: name.slice(0, 80) })}
-                isRequired
-                isDisabled={saving}
-                width="100%"
-              />
-              <Selector
-                label="Alert type"
-                options={alertRuleTypes.map((type) => ({ value: type.value, label: type.label }))}
-                value={value.alertType}
-                onChange={(alertType) => {
-                  const type = alertRuleType(alertType as ProjectAlertType);
-                  onChange({
-                    ...value,
-                    alertType: type.value,
-                    metric: type.metric,
-                    windowSeconds: type.defaultWindowSeconds,
-                    scope: supportsEndpointScope(type.value) ? value.scope : { kind: "project" },
-                  });
-                }}
-                isDisabled={saving}
-                size="lg"
-              />
-              <TextInput
-                label="Metric"
-                value={value.metric === "active_sandboxes" ? "Active sandboxes" : value.metric.replaceAll("_", " ")}
-                isDisabled
-                disabledMessage="Metric is determined by the alert type."
-                width="100%"
-              />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <NumberInput
-                  label="Threshold"
-                  value={value.threshold}
-                  min={0}
-                  onChange={(threshold) => onChange({ ...value, threshold })}
-                  isRequired
-                  isDisabled={saving}
-                  size="lg"
-                  width="100%"
-                />
-                <Selector
-                  label="Window"
-                  options={[
-                    ...(value.metric !== "failure_count" ? [{ value: "current", label: "Current value" }] : []),
-                    ...(value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds)
-                      ? [{ value: String(value.windowSeconds), label: `${value.windowSeconds} seconds (current)` }]
-                      : []),
-                    { value: "3600", label: "Last hour" },
-                    { value: "86400", label: "Last 24 hours" },
-                    { value: "604800", label: "Last 7 days" },
-                  ]}
-                  value={value.windowSeconds === null ? "current" : String(value.windowSeconds)}
-                  onChange={(next) => onChange({ ...value, windowSeconds: next === "current" ? null : Number(next) })}
-                  isDisabled={saving}
-                  size="lg"
-                />
-              </div>
-              <Selector
-                label="Scope"
-                options={[
-                  { value: "project", label: "Entire project" },
-                  ...(supportsEndpointScope(value.alertType)?[{value:"endpoint",label:"One endpoint"}]:[]),
-                ]}
-                value={value.scope.kind}
-                onChange={(next) =>
-                  onChange({
-                    ...value,
-                    scope: next === "project"
-                      ? { kind: "project" }
-                      : { kind: "endpoint", endpointId: value.scope.kind==="endpoint"?value.scope.endpointId:"" },
-                  })
-                }
-                isDisabled={saving || !supportsEndpointScope(value.alertType)}
-                size="lg"
-              />
-              {supportsEndpointScope(value.alertType)&&value.scope.kind==="endpoint"?<EndpointPicker projectId={projectId} value={value.scope.endpointId} disabled={saving} onChange={(endpoint)=>onChange({...value,scope:{kind:"endpoint",endpointId:endpoint.id}})} onUnavailable={()=>onChange({...value,scope:{kind:"endpoint",endpointId:""}})}/>:null}
-              <CheckboxInput
-                label="Enabled"
-                value={value.enabled}
-                isDisabled={saving}
-                onChange={(enabled) => onChange({ ...value, enabled })}
-              />
-      </form>
-    </Dialog>
+      </div>
+    </AstryxDialog>
   );
 }
 

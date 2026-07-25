@@ -16,7 +16,6 @@ import {
   type InlinePreviewContent,
   type InlinePreviewRequest
 } from "../media/inline-preview";
-import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 import { filesReturnToAfterNavigation } from "../tasks/task-peer-navigation";
 import {
   createFileBrowserState,
@@ -828,18 +827,19 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       {selectedLibraryPresentation?.kind !== "deleting" ? <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></aside> : null}
     </div>
     <AstryxDialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={narrow && mobileDetailsOpen && Boolean(selected)}
       onOpenChange={(open) => { if (!open) closeMobileDetails(); }}
-      position={{ right: 0, top: 0, bottom: 0 }}
-      width="min(26rem, 100vw)"
-      maxHeight="100dvh"
+      position={{ right: "0.5rem", top: "0.5rem", bottom: "0.5rem" }}
+      width="min(26rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
       padding={0}
       purpose="info"
       aria-label={selected ? `${selected.type === "directory" ? "Folder" : "File"} details for ${selected.name}` : "Entry details"}
-      style={{ height: "100dvh", maxWidth: "100vw", borderRadius: 0 }}
+      style={{ height: "calc(100dvh - 1rem)" }}
     >
       <DialogHeader title="Details" {...(selected ? { subtitle: selected.name } : {})} hasDivider onOpenChange={(open) => { if (!open) closeMobileDetails(); }} />
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4">
         <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} />
       </div>
     </AstryxDialog>
@@ -921,7 +921,28 @@ function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onN
   const subtitle = create ? "Libraries keep project files organized and can be assigned to Tasks." : "The library root and its files will not move.";
   const handleOpenChange = (next: boolean) => { if (!pending) onOpenChange(next); };
   const formId = useId();
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title={title} subtitle={subtitle} busy={pending} primaryAction={<Button label={create ? "Create" : "Save"} type="submit" form={formId} variant="primary" size="lg" isLoading={pending} isDisabled={pending || !name.trim()} />}>{error ? <Banner className="mb-4" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}<form id={formId} onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus isDisabled={pending} width="100%" /></form></Dialog>;
+  return <AstryxDialog
+    className="[&_button]:min-h-11 [&_button]:min-w-11"
+    isOpen={open}
+    onOpenChange={handleOpenChange}
+    purpose="form"
+    padding={0}
+    width="min(34rem, calc(100dvw - 1rem))"
+    maxHeight="calc(100dvh - 1rem)"
+    aria-label={title}
+  >
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <DialogHeader title={title} subtitle={subtitle} hasDivider {...(!pending ? { onOpenChange: handleOpenChange } : {})} />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
+        {error ? <Banner className="mb-4" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}
+        <form id={formId} onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus data-autofocus="" isDisabled={pending} width="100%" /></form>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} />
+        <Button label={create ? "Create" : "Save"} type="submit" form={formId} variant="primary" size="lg" isLoading={pending} isDisabled={pending || !name.trim()} />
+      </div>
+    </div>
+  </AstryxDialog>;
 }
 
 function InlineError({ message, onDismiss }: { message: string; onDismiss: () => void }) {
@@ -1023,15 +1044,21 @@ function FilePreviewPanel({ state, entry, onRetry, onClose }: { state: FilePrevi
 
 export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { entry: ProjectFile | undefined; deleting: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const [error, setError] = useState("");
+  const submitPending = useRef(false);
+  const descriptionId = useId();
   const folder = entry?.type === "directory";
   const objectLabel = folder ? "Folder" : "File";
   useEffect(() => setError(""), [entry?.path]);
   async function confirm() {
+    if (!entry || deleting || submitPending.current) return;
+    submitPending.current = true;
     setError("");
     try {
       await onConfirm();
     } catch (cause) {
       setError(errorMessage(cause, `${objectLabel} could not be deleted.`));
+    } finally {
+      submitPending.current = false;
     }
   }
   const handleOpenChange = (open: boolean) => {
@@ -1040,28 +1067,111 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
       onCancel();
     }
   };
-  return <ConfirmationDialog
+  return <AstryxDialog
+    className="[&_button]:min-h-11 [&_button]:min-w-11"
     isOpen={entry !== undefined}
     onOpenChange={handleOpenChange}
-    title={folder ? "Delete folder?" : "Delete file?"}
-    description={<Text as="p" color="secondary">{folder ? "This permanently deletes the folder and everything inside it." : "This permanently deletes the file."}</Text>}
-    actionLabel={folder ? "Delete folder" : "Delete file"}
-    busy={deleting}
-    onAction={() => void confirm()}
+    purpose={deleting ? "required" : "form"}
+    role="alertdialog"
+    padding={0}
+    width="min(32rem, calc(100dvw - 1rem))"
+    maxHeight="calc(100dvh - 1rem)"
+    aria-label={folder ? "Delete folder?" : "Delete file?"}
+    aria-describedby={descriptionId}
   >
-    {entry ? <Text as="p" display="block" wordBreak="break-all">{objectLabel}: <Text weight="semibold">{entry.path}</Text></Text> : null}
-    {error ? <Banner status="error" title={`${objectLabel} could not be deleted`} description={error} /> : null}
-  </ConfirmationDialog>;
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <DialogHeader title={folder ? "Delete folder?" : "Delete file?"} hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+        <Text id={descriptionId} as="p" display="block" color="secondary">{folder ? "This permanently deletes the folder and everything inside it." : "This permanently deletes the file."}</Text>
+        {entry ? <Text as="p" display="block" wordBreak="break-all">{objectLabel}: <Text weight="semibold">{entry.path}</Text></Text> : null}
+        {error ? <Banner status="error" title={`${objectLabel} could not be deleted`} description={error} /> : null}
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleting} onClick={onCancel} />
+        <Button label={folder ? "Delete folder" : "Delete file"} type="button" variant="destructive" size="lg" isLoading={deleting} isDisabled={deleting} onClick={() => void confirm()} />
+      </div>
+    </div>
+  </AstryxDialog>;
 }
 
 function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm }: { library: FileLibrary | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
-  return <ConfirmationDialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} title={fileLibraryDeleteCopy.title} description={<Text as="p" color="secondary">{fileLibraryDeleteCopy.body}</Text>} actionLabel={fileLibraryDeleteCopy.action} busy={pending} onAction={() => void onConfirm()}>{library ? <Text as="p" display="block" wordBreak="break-all">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner status="error" title="File Library could not be deleted" description={error} /> : null}</ConfirmationDialog>;
+  const submitPending = useRef(false);
+  const descriptionId = useId();
+  async function confirm() {
+    if (!library || pending || submitPending.current) return;
+    submitPending.current = true;
+    try {
+      await onConfirm();
+    } finally {
+      submitPending.current = false;
+    }
+  }
+  return <AstryxDialog
+    className="[&_button]:min-h-11 [&_button]:min-w-11"
+    isOpen={Boolean(library)}
+    onOpenChange={handleOpenChange}
+    purpose={pending ? "required" : "form"}
+    role="alertdialog"
+    padding={0}
+    width="min(32rem, calc(100dvw - 1rem))"
+    maxHeight="calc(100dvh - 1rem)"
+    aria-label={fileLibraryDeleteCopy.title}
+    aria-describedby={descriptionId}
+  >
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <DialogHeader title={fileLibraryDeleteCopy.title} hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+        <Text id={descriptionId} as="p" display="block" color="secondary">{fileLibraryDeleteCopy.body}</Text>
+        {library ? <Text as="p" display="block" wordBreak="break-all">Library: <Text weight="semibold">{library.name}</Text></Text> : null}
+        {error ? <Banner status="error" title="File Library could not be deleted" description={error} /> : null}
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} />
+        <Button label={error ? "Try delete again" : fileLibraryDeleteCopy.action} type="button" variant="destructive" size="lg" isLoading={pending} isDisabled={pending} onClick={() => void confirm()} />
+      </div>
+    </div>
+  </AstryxDialog>;
 }
 
 function ReplaceFileDialog({ target, pending, error, onOpenChange, onConfirm }: { target: { file: File } | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> | undefined }) {
   const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
-  return <ConfirmationDialog isOpen={Boolean(target)} onOpenChange={handleOpenChange} title={`Replace ${target?.file.name ?? "file"}?`} description={<Text as="p" color="secondary">A file with this name already exists in this folder. This permanently replaces its contents.</Text>} actionLabel="Replace file" actionVariant="primary" busy={pending} onAction={() => void onConfirm()}>{error ? <Banner status="error" title="File could not be replaced" description={error} /> : null}</ConfirmationDialog>;
+  const submitPending = useRef(false);
+  const descriptionId = useId();
+  async function confirm() {
+    if (!target || pending || submitPending.current) return;
+    submitPending.current = true;
+    try {
+      await onConfirm();
+    } finally {
+      submitPending.current = false;
+    }
+  }
+  const title = `Replace ${target?.file.name ?? "file"}?`;
+  return <AstryxDialog
+    className="[&_button]:min-h-11 [&_button]:min-w-11"
+    isOpen={Boolean(target)}
+    onOpenChange={handleOpenChange}
+    purpose={pending ? "required" : "form"}
+    role="alertdialog"
+    padding={0}
+    width="min(32rem, calc(100dvw - 1rem))"
+    maxHeight="calc(100dvh - 1rem)"
+    aria-label={title}
+    aria-describedby={descriptionId}
+  >
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <DialogHeader title={title} hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+        <Text id={descriptionId} as="p" display="block" color="secondary">A file with this name already exists in this folder. This permanently replaces its contents.</Text>
+        {error ? <Banner status="error" title="File could not be replaced" description={error} /> : null}
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={pending} onClick={() => handleOpenChange(false)} />
+        <Button label={error ? "Try replace again" : "Replace file"} type="button" variant="destructive" size="lg" isLoading={pending} isDisabled={pending} onClick={() => void confirm()} />
+      </div>
+    </div>
+  </AstryxDialog>;
 }
 
 function normalizeLibraryPath(input: string | null | undefined): string {

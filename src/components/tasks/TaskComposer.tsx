@@ -1,10 +1,9 @@
 "use client";
 
 import { Pencil, Send, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { Banner, Button, IconButton, Text, TextArea } from "@astryxdesign/core";
+import { useEffect, useId, useRef, useState } from "react";
+import { Banner, Button, Dialog, DialogHeader, IconButton, Text, TextArea } from "@astryxdesign/core";
 import type { TaskCapabilities, TaskQueuedMessage } from "../../lib/api/client";
-import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 import {
   clearTaskDraft,
   restoreTaskDraft,
@@ -37,6 +36,7 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
   const editChanged = Boolean(editing) && nextEdit !== editing?.content.trim();
   const draftIdentity: TaskDraftIdentity = { userId, projectId, taskId };
   const previousDraftIdentity = useRef<TaskDraftIdentity | undefined>(undefined);
+  const removeDescriptionId = useId();
 
   useEffect(() => {
     const previous = previousDraftIdentity.current;
@@ -123,6 +123,7 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
     try {
       await onDeleteQueued(removing.id);
       setRemoving(undefined);
+      requestAnimationFrame(() => input.current?.focus({ preventScroll: true }));
     } catch (reason) {
       setRemoveError(errorMessage(reason, "The queued message could not be deleted."));
     } finally {
@@ -146,10 +147,56 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
     {sendError && !capacityRecovery ? <Banner className="mb-3" status="error" title={sendErrorTitle} description={sendError} /> : null}
     {draftNotice ? <Text as="p" display="block" type="supporting" color="secondary" className="mb-2" role="status">{draftNotice}</Text> : null}
     <form className="flex items-end gap-2" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="min-w-0 flex-1"><TextArea ref={input} label="Message" isLabelHidden value={draft} onChange={changeDraft} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} isDisabled={!capabilities.sendMessage || busy || saving || deleting} placeholder={capabilities.sendMessage ? "Message the task" : unavailableMessage} rows={2} width="100%" /></div><IconButton type="submit" label="Send message" tooltip="Send message" size="lg" icon={<Send size={16} />} isDisabled={!capabilities.sendMessage || messageBusy || !draft.trim()} /></form>
-    <Dialog isOpen={Boolean(editing)} onOpenChange={(open) => { if (!open && !messageBusy) closeEdit(); }} title="Edit queued message" subtitle="Only messages the server still accepts can be changed." busy={messageBusy} primaryAction={<Button type="submit" form="queued-message-edit-form" label={saving ? "Saving..." : "Save message"} size="lg" isDisabled={messageBusy || !nextEdit || !editChanged} />}><form id="queued-message-edit-form" onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}><div className="grid gap-4">{editError ? <Banner status="error" title="Message could not be updated" description={editError} /> : null}<TextArea label="Queued message" isLabelHidden value={editDraft} onChange={setEditDraft} isDisabled={messageBusy} rows={5} hasAutoFocus width="100%" /></div></form></Dialog>
-    <ConfirmationDialog isOpen={Boolean(removing)} onOpenChange={(open) => { if (!open && !deleting) closeRemove(); }} title="Delete queued message?" description={<Text as="p" display="block" color="secondary">This message has not started delivery and can be removed.</Text>} actionLabel={deleting ? "Deleting" : removeError ? "Try delete again" : "Delete message"} busy={deleting} onAction={() => void remove()}>
-      {removeError ? <Banner status="error" title="Queued message could not be deleted" description={removeError} /> : null}
-    </ConfirmationDialog>
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
+      isOpen={Boolean(editing)}
+      onOpenChange={(open) => { if (!open && !messageBusy) closeEdit(); }}
+      purpose="form"
+      padding={0}
+      width="min(34rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Edit queued message"
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <DialogHeader title="Edit queued message" subtitle="Only messages the server still accepts can be changed." hasDivider {...(!messageBusy ? { onOpenChange: (open: boolean) => { if (!open) closeEdit(); } } : {})} />
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          <form id="queued-message-edit-form" onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}>
+            <div className="grid gap-4">
+              {editError ? <Banner status="error" title="Message could not be updated" description={editError} /> : null}
+              <TextArea label="Queued message" value={editDraft} onChange={setEditDraft} isDisabled={messageBusy} rows={5} hasAutoFocus data-autofocus="" width="100%" />
+            </div>
+          </form>
+        </div>
+        <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+          <Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={messageBusy} onClick={closeEdit} />
+          <Button type="submit" form="queued-message-edit-form" label={saving ? "Saving..." : "Save message"} variant="primary" size="lg" isLoading={saving} isDisabled={messageBusy || !nextEdit || !editChanged} />
+        </div>
+      </div>
+    </Dialog>
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
+      isOpen={Boolean(removing)}
+      onOpenChange={(open) => { if (!open && !deleting) closeRemove(); }}
+      purpose={deleting ? "required" : "form"}
+      role="alertdialog"
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Delete queued message?"
+      aria-describedby={removeDescriptionId}
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <DialogHeader title="Delete queued message?" hasDivider />
+        <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+          <Text id={removeDescriptionId} as="p" display="block" color="secondary">This message has not started delivery and can be removed.</Text>
+          {removeError ? <Banner status="error" title="Queued message could not be deleted" description={removeError} /> : null}
+        </div>
+        <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+          <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleting} onClick={closeRemove} />
+          <Button label={deleting ? "Deleting" : removeError ? "Try delete again" : "Delete message"} type="button" variant="destructive" size="lg" isLoading={deleting} isDisabled={deleting} onClick={() => void remove()} />
+        </div>
+      </div>
+    </Dialog>
   </section>;
 }
 

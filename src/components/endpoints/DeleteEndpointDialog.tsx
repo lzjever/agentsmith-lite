@@ -1,7 +1,6 @@
-import { Banner, Text } from "@astryxdesign/core";
-import { useEffect, useState } from "react";
+import { Banner, Button, Dialog, DialogHeader, Text } from "@astryxdesign/core";
+import { useEffect, useId, useState } from "react";
 import type { Endpoint } from "../../lib/api/client";
-import { ConfirmationDialog } from "../ui/Dialog";
 
 export function DeleteEndpointDialog({
   endpoint,
@@ -17,6 +16,7 @@ export function DeleteEndpointDialog({
   onConfirm: () => Promise<void>;
 }) {
   const [failure, setFailure] = useState("");
+  const descriptionId = useId();
 
   useEffect(() => {
     setFailure("");
@@ -33,35 +33,48 @@ export function DeleteEndpointDialog({
     setFailure("");
     try {
       await onConfirm();
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>('[aria-label="Project endpoints"] input')?.focus();
+      });
     } catch (reason) {
       setFailure(reason instanceof Error ? reason.message : "Endpoint could not be deleted.");
     }
   };
 
   return (
-    <ConfirmationDialog
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={Boolean(endpoint)}
       onOpenChange={handleOpenChange}
-      title="Delete endpoint"
-      description={
-        <Text as="p" display="block" color="secondary">
+      role="alertdialog"
+      purpose={deleting ? "required" : "form"}
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Delete endpoint"
+      aria-describedby={descriptionId}
+    >
+      <DialogHeader title="Delete endpoint" hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <Text id={descriptionId} as="p" display="block" color="secondary">
           {endpoint
-            ? `Remove ${endpoint.name}? This also removes its rolling limits and endpoint alert rules, and resolves active endpoint alerts. Tasks that reference it must be deleted first.`
+            ? `Permanently delete ${endpoint.name}? This removes its rolling limits and endpoint alert rules, and resolves its active alerts. Tasks that reference this endpoint must be deleted first.`
             : ""}
         </Text>
-      }
-      actionLabel={deleting ? "Deleting" : "Delete endpoint"}
-      isActionDisabled={!canConfirm}
-      busy={deleting}
-      onAction={() => void confirm()}
-    >
-      {failure ? (
-        <Banner
-          status="error"
-          title="Endpoint could not be deleted"
-          description={failure}
-        />
-      ) : null}
-    </ConfirmationDialog>
+        <div className="mt-4">
+          {failure ? (
+            <Banner
+              status="error"
+              title="Endpoint could not be deleted"
+              description={failure}
+            />
+          ) : null}
+        </div>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleting} onClick={() => handleOpenChange(false)} />
+        <Button label={deleting ? "Deleting" : "Delete endpoint"} type="button" variant="destructive" size="lg" isDisabled={!canConfirm || deleting} isLoading={deleting} onClick={() => void confirm()} />
+      </div>
+    </Dialog>
   );
 }

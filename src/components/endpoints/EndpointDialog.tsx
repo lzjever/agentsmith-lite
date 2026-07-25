@@ -6,6 +6,8 @@ import {
   Banner,
   Button,
   CheckboxInput,
+  Dialog,
+  DialogHeader,
   IconButton,
   NumberInput,
   Selector,
@@ -17,7 +19,6 @@ import type {
   EndpointInput,
 } from "../../lib/api/client";
 import { CredentialPicker } from "../providers/ProviderDirectoryPicker";
-import { Dialog } from "../ui/Dialog";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -76,12 +77,161 @@ export function EndpointDialog({
 
   return (
     <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={open}
       onOpenChange={handleOpenChange}
-      title={title}
-      subtitle="Configure an OpenAI-compatible model connection."
-      busy={saving || discovering}
-      primaryAction={
+      purpose="form"
+      padding={0}
+      width="min(42rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label={title}
+    >
+      <DialogHeader
+        title={title}
+        subtitle="Configure an OpenAI-compatible model connection."
+        hasDivider
+        {...(!saving && !discovering ? { onOpenChange: handleOpenChange } : {})}
+      />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <form id={formId} onSubmit={onSubmit}>
+          {error ? (
+            <Banner
+              className="mb-4"
+              status="error"
+              title="Endpoint could not be saved"
+              description={error}
+              endContent={
+                <IconButton
+                  type="button"
+                  variant="ghost"
+                  size="lg"
+                  label="Dismiss endpoint error"
+                  tooltip="Dismiss endpoint error"
+                  icon={<X size={15} />}
+                  onClick={onDismissError}
+                />
+              }
+            />
+          ) : null}
+          <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+            <TextInput
+              label="Name"
+              value={input.name}
+              onChange={(value) => set("name", value.slice(0, 160))}
+              isRequired
+              hasAutoFocus
+              data-autofocus=""
+              isDisabled={saving}
+              {...(nameConflict && { status: { type: "error", message: "An endpoint already uses this name." } as const })}
+              width="100%"
+            />
+            <div>
+              <TextInput
+                label="Model"
+                value={input.model}
+                onChange={(value) => set("model", value)}
+                isRequired
+                isDisabled={saving}
+                width="100%"
+              />
+              {discoveryGuidance ? (
+                <Text
+                  as="p"
+                  type="supporting"
+                  color="secondary"
+                  display="block"
+                  className="mt-1"
+                  role="status"
+                >
+                  {discoveryGuidance}
+                </Text>
+              ) : null}
+            </div>
+            <div className="sm:col-span-2">
+              <TextInput
+                label="Base URL"
+                value={input.baseUrl}
+                isRequired
+                isDisabled
+                disabledMessage="Base URL is provided by the selected credential."
+                width="100%"
+              />
+            </div>
+            <CredentialPicker projectId={projectId} value={input.credentialId} label="Endpoint credential" disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})} onUnavailable={()=>onChange({...input,credentialId:"",baseUrl:""})}/>
+            <div className="min-w-0">
+              <NumberInput
+                label="Timeout (seconds)"
+                value={input.requestTimeoutSecs}
+                onChange={(value) => set("requestTimeoutSecs", value)}
+                min={1}
+                isRequired
+                isDisabled={saving}
+                size="lg"
+                width="100%"
+              />
+            </div>
+            <div className="grid items-end gap-2 sm:col-span-2 sm:grid-cols-[auto_minmax(0,1fr)]">
+              <Button
+                type="button"
+                variant="ghost"
+                size="lg"
+                label={discovering ? "Checking" : "Discover models"}
+                icon={<RefreshCw size={15} />}
+                isLoading={discovering}
+                onClick={onDiscoverModels}
+                isDisabled={
+                  !canSubmit ||
+                  saving ||
+                  discovering ||
+                  !input.baseUrl ||
+                  !input.credentialId
+                }
+              />
+              {models.length > 0 ? (
+                <Selector
+                  label="Discovered models"
+                  options={models.map((model) => ({ value: model, label: model }))}
+                  value={models.includes(input.model) ? input.model : ""}
+                  onChange={(model) => set("model", model)}
+                  placeholder="Choose discovered model"
+                  isDisabled={saving || discovering}
+                  size="lg"
+                  width="100%"
+                />
+              ) : null}
+            </div>
+            <fieldset className="grid gap-2 sm:col-span-2">
+              <legend><Text type="label">Capabilities</Text></legend>
+              <div className="flex flex-wrap gap-x-5 gap-y-2">
+                {endpointCapabilities.map((capability) => (
+                  <CheckboxInput
+                    key={capability}
+                    label={capability === "tool_calls"
+                      ? "Tool calls"
+                      : capability[0]!.toUpperCase() + capability.slice(1)}
+                    value={input.capabilities.includes(capability)}
+                    isDisabled={
+                      saving ||
+                      (input.capabilities.length === 1 &&
+                        input.capabilities.includes(capability))
+                    }
+                    onChange={() => toggle(capability)}
+                  />
+                ))}
+              </div>
+            </fieldset>
+          </div>
+        </form>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button
+          type="button"
+          variant="ghost"
+          size="lg"
+          label="Cancel"
+          isDisabled={saving || discovering}
+          onClick={() => handleOpenChange(false)}
+        />
         <Button
           type="submit"
           form={formId}
@@ -97,138 +247,9 @@ export function EndpointDialog({
             !input.credentialId ||
             input.capabilities.length === 0
           }
+          isLoading={saving}
         />
-      }
-    >
-      <form id={formId} onSubmit={onSubmit}>
-              {error ? (
-                <Banner
-                  className="mb-4"
-                  status="error"
-                  title="Endpoint could not be saved"
-                  description={error}
-                  endContent={
-                    <IconButton
-                      type="button"
-                      variant="ghost"
-                      size="lg"
-                      label="Dismiss endpoint error"
-                      tooltip="Dismiss endpoint error"
-                      icon={<X size={15} />}
-                      onClick={onDismissError}
-                    />
-                  }
-                />
-              ) : null}
-              <div className="grid min-w-0 gap-4 sm:grid-cols-2">
-                <TextInput
-                  label="Name"
-                  value={input.name}
-                  onChange={(value) => set("name", value.slice(0, 160))}
-                  isRequired
-                  isDisabled={saving}
-                  {...(nameConflict && { status: { type: "error", message: "An endpoint already uses this name." } as const })}
-                  width="100%"
-                />
-                <div>
-                  <TextInput
-                    label="Model"
-                    value={input.model}
-                    onChange={(value) => set("model", value)}
-                    isRequired
-                    isDisabled={saving}
-                    width="100%"
-                  />
-                  {discoveryGuidance ? (
-                    <Text
-                      as="p"
-                      type="supporting"
-                      color="secondary"
-                      display="block"
-                      className="mt-1"
-                      role="status"
-                    >
-                      {discoveryGuidance}
-                    </Text>
-                  ) : null}
-                </div>
-                <div className="sm:col-span-2">
-                  <TextInput
-                    label="Base URL"
-                    value={input.baseUrl}
-                    isRequired
-                    isDisabled
-                    disabledMessage="Base URL is provided by the selected credential."
-                    width="100%"
-                  />
-                </div>
-                <CredentialPicker projectId={projectId} value={input.credentialId} disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})} onUnavailable={()=>onChange({...input,credentialId:"",baseUrl:""})}/>
-                <div className="min-w-0">
-                  <NumberInput
-                    label="Timeout (seconds)"
-                    value={input.requestTimeoutSecs}
-                    onChange={(value) => set("requestTimeoutSecs", value)}
-                    min={1}
-                    isRequired
-                    isDisabled={saving}
-                    size="lg"
-                    width="100%"
-                  />
-                </div>
-                <div className="flex items-end gap-2 sm:col-span-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="lg"
-                    label={discovering ? "Checking" : "Discover models"}
-                    icon={
-                      <RefreshCw size={15} />
-                    }
-                    isLoading={discovering}
-                    onClick={onDiscoverModels}
-                    isDisabled={
-                      !canSubmit ||
-                      saving ||
-                      discovering ||
-                      !input.baseUrl ||
-                      !input.credentialId
-                    }
-                  />
-                  {models.length > 0 ? (
-                    <Selector
-                      label="Discovered models"
-                      options={models.map((model) => ({ value: model, label: model }))}
-                      value={models.includes(input.model) ? input.model : ""}
-                      onChange={(model) => set("model", model)}
-                      placeholder="Choose discovered model"
-                      isDisabled={saving || discovering}
-                      size="lg"
-                      className="max-w-sm"
-                    />
-                  ) : null}
-                </div>
-                <fieldset className="grid gap-2 sm:col-span-2">
-                  <legend><Text type="label">Capabilities</Text></legend>
-                  <div className="flex flex-wrap gap-x-5 gap-y-2">
-                    {endpointCapabilities.map((capability) => (
-                      <CheckboxInput
-                        key={capability}
-                        label={capability === "tool_calls"
-                          ? "Tool calls"
-                          : capability[0]!.toUpperCase() + capability.slice(1)}
-                        value={input.capabilities.includes(capability)}
-                        isDisabled={
-                          saving ||
-                          (input.capabilities.length === 1 &&
-                            input.capabilities.includes(capability))
-                        }
-                        onChange={() => toggle(capability)}
-                      />
-                    ))}
-                  </div>
-                </fieldset>
-              </div>
-      </form>
+      </div>
     </Dialog>
   );
 }

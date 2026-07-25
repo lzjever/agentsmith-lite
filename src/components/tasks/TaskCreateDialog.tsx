@@ -2,10 +2,9 @@
 
 import { Library, Plus } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Banner, Button, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
+import { Banner, Button, Dialog, DialogHeader, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
 import { type Endpoint, type FileLibrary } from "../../lib/api/client";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
-import { Dialog } from "../ui/Dialog";
 import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
 import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
 
@@ -96,15 +95,27 @@ export function TaskCreateDialog({
     if (!nextOpen && !busy) onClose();
   };
 
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title="Create task" subtitle="Describe the agent work for this Sandbox." size="lg" busy={busy} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />}>
+  return <Dialog
+    className="[&_button]:min-h-11 [&_button]:min-w-11"
+    isOpen={open}
+    onOpenChange={handleOpenChange}
+    purpose="form"
+    padding={0}
+    width="min(42rem, calc(100dvw - 1rem))"
+    maxHeight="calc(100dvh - 1rem)"
+    aria-label="Create task"
+  >
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <DialogHeader title="Create task" subtitle="Describe the agent work for this Sandbox." hasDivider {...(!busy ? { onOpenChange: handleOpenChange } : {})} />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
       <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
         <div className="grid gap-5">
           {recovery ? <SandboxCapacityRecoveryNotice recovery={recovery} activeSandboxesHref={activeSandboxesHref} canManagePolicy={canManagePolicy} policyHref={policyHref} /> : null}
           {error && !recovery ? <Banner status="error" title="Task could not be created" description={error} /> : null}
           <>
             <div className="grid gap-4">
-              <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
-              <EndpointPicker key={`${endpointPickerRevision}:${open?"open":"closed"}`} projectId={projectId} mode="task_ready" value={endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={busy} onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointId(endpoint.id)}} onUnavailable={()=>{setSelectedEndpoint(undefined);setEndpointId("")}}/>
+              <TextInput label="Task title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus data-autofocus="" isDisabled={busy} width="100%" />
+              <EndpointPicker key={`${endpointPickerRevision}:${open?"open":"closed"}`} projectId={projectId} label="Task endpoint" mode="task_ready" value={endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={busy} onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointId(endpoint.id)}} onUnavailable={()=>{setSelectedEndpoint(undefined);setEndpointId("")}}/>
             </div>
             <div className="grid gap-3">
               <RadioList label="File Library" htmlName="file-library-mode" value={libraryMode} onChange={(value) => setLibraryMode(value as typeof libraryMode)} isDisabled={busy}>
@@ -118,6 +129,12 @@ export function TaskCreateDialog({
           </>
         </div>
       </form>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button label="Cancel" type="button" variant="ghost" size="lg" isDisabled={busy} onClick={onClose} />
+        <Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isLoading={saving} isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />
+      </div>
+    </div>
   </Dialog>;
 
   function clearError() { setError(""); setRecovery(null); }

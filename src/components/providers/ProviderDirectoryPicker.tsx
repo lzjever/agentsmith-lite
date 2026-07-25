@@ -88,9 +88,9 @@ function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,
   const errorMessage=exactError?.message||pageError;
 
   return <div className="grid gap-2">
-    <TextInput label={`Search ${label.toLowerCase()}s`} isLabelHidden startIcon={<Search size={15}/>} value={query} onChange={(value)=>{pageRequest.current+=1;setQuery(value)}} placeholder={`Search ${label.toLowerCase()}s`} isDisabled={disabled} size="lg"/>
+    <TextInput label={`Search ${label.toLowerCase()}s`} startIcon={<Search size={15}/>} value={query} onChange={(value)=>{pageRequest.current+=1;setQuery(value)}} placeholder={`Search ${label.toLowerCase()}s`} isDisabled={disabled} size="lg"/>
     <Selector label={label} options={options} value={options.some((option)=>option.value===value)?value:""} onChange={select} placeholder={state==="loading"||exactLoading?"Loading...":`Select ${label.toLowerCase()}`} isDisabled={disabled||state==="loading"||options.length===0} size="lg" width="100%"/>
-    {errorMessage?<div className="flex items-center justify-between gap-2"><Text type="supporting" className="text-error">{errorMessage}</Text><Button label="Retry" variant="ghost" size="sm" isDisabled={refreshing||exactLoading} onClick={()=>void retry()}/></div>:null}
+    {errorMessage?<div role="alert" className="flex items-center justify-between gap-2"><Text type="supporting" className="text-error">{errorMessage}</Text><Button label="Retry" variant="ghost" size="sm" isDisabled={refreshing||exactLoading} onClick={()=>void retry()}/></div>:null}
     {state==="ready"&&options.length===0&&!refreshing&&!exactLoading&&!exactError?<Text type="supporting" color="secondary">No matching {label.toLowerCase()}s.</Text>:null}
     {loadedHistory.length>0||page.nextCursor?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={disabled||refreshing||Boolean(pageError)||loadedHistory.length===0} onClick={previous}/><Text type="supporting" color="secondary">Page {loadedHistory.length+1}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={disabled||refreshing||Boolean(pageError)||query.trim()!==committedQuery||!page.nextCursor} onClick={next}/></div>:null}
   </div>;

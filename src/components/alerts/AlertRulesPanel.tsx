@@ -1,11 +1,10 @@
 "use client";
 
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { Banner, Button, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Banner, Button, Dialog, DialogHeader, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
-import { ConfirmationDialog } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
@@ -16,6 +15,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   const showToast = useToast();
   const mounted = useRef(true);
   const loadRequest = useRef(0);
+  const panelHeadingRef = useRef<HTMLDivElement>(null);
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -79,7 +79,10 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       setDialogOpen(false);
       setEditing(null);
     }
-    if (removing?.id === ruleId) setRemoving(null);
+    if (removing?.id === ruleId) {
+      setRemoving(null);
+      requestAnimationFrame(() => panelHeadingRef.current?.focus({ preventScroll: true }));
+    }
     void onInstancesChanged?.();
     setPanelNotice("Alert rule no longer exists. The rule list has been updated.");
     return true;
@@ -185,6 +188,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       await onInstancesChanged?.();
       if (!mounted.current) return;
       setRemoving(null);
+      requestAnimationFrame(() => panelHeadingRef.current?.focus({ preventScroll: true }));
       if (alreadyMissing) setPanelNotice("Alert rule no longer exists. The rule list has been updated.");
       else showToast({ body: "Alert rule deleted.", type: "info" });
     } catch (error) {
@@ -201,7 +205,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   }
 
   return <section className="mt-8 border-t border-border pt-6" aria-label="Alert rules">
-    <div className="flex flex-wrap items-center justify-between gap-3">
+    <div ref={panelHeadingRef} tabIndex={-1} className="flex flex-wrap items-center justify-between gap-3 outline-none">
       <div><Heading level={2}>Alert rules</Heading><Text as="p" type="supporting" color="secondary" display="block" className="mt-1">Choose when project administrators should be notified.</Text></div>
       {canManage ? <Button label="Add rule" variant="secondary" icon={<Plus size={16} />} isDisabled={busyRuleId !== null} onClick={openCreate} /> : <Text type="supporting" color="secondary">Read-only</Text>}
     </div>
@@ -227,28 +231,40 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
 }
 function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: { open: boolean; busy: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (next: boolean) => !busy && onOpenChange(next);
+  const descriptionId = useId();
   return (
-    <ConfirmationDialog
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={open}
       onOpenChange={handleOpenChange}
-      title="Delete alert rule"
-      description={
-        <Text as="p" display="block" color="secondary">
+      role="alertdialog"
+      purpose={busy ? "required" : "form"}
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Delete alert rule"
+      aria-describedby={descriptionId}
+    >
+      <DialogHeader title="Delete alert rule" hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <Text id={descriptionId} as="p" display="block" color="secondary">
           This permanently removes the rule from this project.
         </Text>
-      }
-      actionLabel="Delete"
-      busy={busy}
-      onAction={() => void onConfirm()}
-    >
-      {error ? (
-        <Banner
-          status="error"
-          title="Alert rule could not be deleted"
-          description={error}
-        />
-      ) : null}
-    </ConfirmationDialog>
+        <div className="mt-4">
+          {error ? (
+            <Banner
+              status="error"
+              title="Alert rule could not be deleted"
+              description={error}
+            />
+          ) : null}
+        </div>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={busy} onClick={() => handleOpenChange(false)} />
+        <Button label="Delete" type="button" variant="destructive" size="lg" isDisabled={busy} isLoading={busy} onClick={() => { if (!busy) void onConfirm(); }} />
+      </div>
+    </Dialog>
   );
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}

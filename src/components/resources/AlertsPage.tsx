@@ -5,6 +5,8 @@ import {
   Badge,
   Banner,
   Button,
+  Dialog,
+  DialogHeader,
   EmptyState,
   IconButton,
   MoreMenu,
@@ -31,6 +33,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useReducer,
   useRef,
   useState
@@ -56,7 +59,6 @@ import {
 import { AlertRulesPanel } from "../alerts/AlertRulesPanel";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { ConfirmationDialog } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { formatLocalDateTime as formatDate } from "../../lib/format/date";
 import { projectAlertTypeLabel } from "../../../packages/contracts/src/api";
@@ -99,6 +101,7 @@ function ProjectAlertsPage({
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const mounted = useRef(true);
+  const dismissDescriptionId = useId();
   const supportGeneration = useRef(0);
   const requestGeneration = useRef({ list: 0, lookup: 0, mutation: 0 });
   const mutationKeys = useMutationKeys();
@@ -346,6 +349,11 @@ function ProjectAlertsPage({
                   : "Alert silence cleared.",
         type: "info"
       });
+      if (action === "dismiss") {
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLElement>('[aria-label="Alerts view"] [aria-selected="true"]')?.focus();
+        });
+      }
     } catch (reason) {
       if (!mounted.current) return;
       if (reason instanceof ApiError) {
@@ -504,36 +512,44 @@ function ProjectAlertsPage({
         />
       )}
 
-      <ConfirmationDialog
+      <Dialog
+        className="[&_button]:min-h-11 [&_button]:min-w-11"
         isOpen={dismiss !== null}
         onOpenChange={(open) => {
           if (!open && !dismissBusy) {
             dispatch({ type: "mutation_dismiss_changed", alert: null });
           }
         }}
-        title="Dismiss project alert"
-        description={
-          <Text as="p" display="block" color="secondary">
+        role="alertdialog"
+        purpose={dismissBusy ? "required" : "form"}
+        padding={0}
+        width="min(32rem, calc(100dvw - 1rem))"
+        maxHeight="calc(100dvh - 1rem)"
+        aria-label="Dismiss project alert"
+        aria-describedby={dismissDescriptionId}
+      >
+        <DialogHeader title="Dismiss project alert" hasDivider />
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          <Text id={dismissDescriptionId} as="p" display="block" color="secondary">
             {dismiss
               ? `Dismiss ${alertLabel(dismiss)}? The instance remains in history.`
               : ""}
           </Text>
-        }
-        actionLabel={dismissBusy ? "Dismissing" : "Dismiss"}
-        busy={dismissBusy}
-        isActionDisabled={!dismiss}
-        onAction={() => {
-          if (dismiss) void mutate(dismiss, "dismiss");
-        }}
-      >
-        {dismiss && alertState.mutation.error ? (
-          <Banner
-            status="error"
-            title="Alert could not be dismissed"
-            description={alertState.mutation.error}
-          />
-        ) : null}
-      </ConfirmationDialog>
+          <div className="mt-4">
+            {dismiss && alertState.mutation.error ? (
+              <Banner
+                status="error"
+                title="Alert could not be dismissed"
+                description={alertState.mutation.error}
+              />
+            ) : null}
+          </div>
+        </div>
+        <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+          <Button data-autofocus="" type="button" label="Cancel" variant="ghost" size="lg" isDisabled={dismissBusy} onClick={() => dispatch({ type: "mutation_dismiss_changed", alert: null })} />
+          <Button type="button" label={dismissBusy ? "Dismissing" : "Dismiss"} variant="primary" size="lg" isDisabled={!dismiss || dismissBusy} isLoading={dismissBusy} onClick={() => { if (dismiss && !dismissBusy) void mutate(dismiss, "dismiss"); }} />
+        </div>
+      </Dialog>
     </PageLayout>
   );
 }

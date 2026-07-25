@@ -1,12 +1,11 @@
 "use client";
 
 import { FilePlus2, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Banner, Button, Heading, IconButton, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { AlertDialog, Banner, Button, Dialog, DialogHeader, Heading, IconButton, Selector, Spinner, Tab, TabList, Text, TextArea, TextInput, useToast } from "@astryxdesign/core";
 import { ApiError, apiClient, isReadOnlyMutationError, type ContextContentType, type ContextEntry, type ContextEntryMetadata, type ContextPage, type ContextScope } from "../../lib/api/client";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { ConfirmationDialog } from "../ui/Dialog";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 
 const contentTypes: ContextContentType[] = ["text", "json", "markdown", "yaml"];
@@ -28,6 +27,8 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
   const listVersion = useRef(0);
   const appendVersion = useRef(0);
   const detailVersion = useRef(0);
+  const entriesHeadingRef = useRef<HTMLDivElement>(null);
+  const deleteDescriptionId = useId();
   const tabs: ScopeTab[] = projectId ? [
     { scope: "workspace_shared", label: "Workspace shared", description: "Available to members of this workspace." },
     { scope: "workspace_personal", label: "My workspace", description: "Only visible to you in this workspace." },
@@ -351,6 +352,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       resetDraft();
       showToast({ body: "Context deleted" });
       await loadFirstPage();
+      requestAnimationFrame(() => entriesHeadingRef.current?.focus({ preventScroll: true }));
     } catch (reason) {
       if (reason instanceof ApiError) mutationKeys.complete("context.delete", identity);
       if (!mounted.current) return;
@@ -370,6 +372,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         setDetail(undefined);
         resetDraft();
         await loadFirstPage();
+        requestAnimationFrame(() => entriesHeadingRef.current?.focus({ preventScroll: true }));
         return;
       }
       const detailMessage = message(reason, "Context could not be deleted.");
@@ -387,7 +390,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
     {listState === "error" && !page ? <Banner status="error" title="Context unavailable" description={listError} endContent={<Button label="Try again" size="lg" onClick={() => void loadFirstPage()} />} /> : null}
     {page ? <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]">
       <section className="border-y border-border py-3 lg:border-y-0 lg:border-r lg:pr-5">
-        <div className="mb-3 flex items-center justify-between"><Heading level={3} accessibilityLevel={2}>Entries</Heading>{page.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>
+        <div ref={entriesHeadingRef} tabIndex={-1} className="mb-3 flex items-center justify-between outline-none"><Heading level={3} accessibilityLevel={2}>Entries</Heading>{page.canWrite ? <IconButton label="New context entry" size="lg" variant="ghost" icon={<FilePlus2 size={17} />} isDisabled={saving || deleting} onClick={() => navigate({ kind: "new" })} /> : null}</div>
         {listError ? <Banner status="error" title="Entries could not be refreshed" description={listError} endContent={<Button label="Try again" size="md" variant="secondary" onClick={() => void (listRetry === "more" ? loadMore() : loadFirstPage(true))} />} /> : null}
         {presentationItems.length === 0 ? <Text as="p" type="supporting" color="secondary" display="block" className="py-4">No context entries yet.</Text> : <div className="space-y-1">{presentationItems.map((entry) => <button key={entry.id} type="button" disabled={saving || deleting} onClick={() => navigate({ kind: "entry", entryId: entry.id })} className={`w-full px-3 py-2 text-left disabled:cursor-not-allowed ${selectedMetadata?.id === entry.id ? "bg-muted text-primary" : "text-secondary hover:bg-overlay-hover hover:text-primary"}`}><Text as="span" display="block" maxLines={1} color="inherit">{entry.contextKey}</Text><Text as="span" type="code" color="inherit" display="block" className="mt-1 capitalize">{entry.contentType}</Text></button>)}</div>}
         {page.nextCursor ? <Button label={loadingMore ? "Loading..." : "Load more"} size="md" variant="secondary" isDisabled={loadingMore || listState === "loading"} isLoading={loadingMore} onClick={() => void loadMore()} /> : null}
@@ -405,23 +408,33 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
         </div> : null}
       </section>
     </div> : null}
-    <ConfirmationDialog isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description={<Text as="p" display="block" color="secondary">Your edits have not been saved. Discard them and continue?</Text>} actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} />
-    <ConfirmationDialog
+    <AlertDialog className="[&_button]:min-h-11 [&_button]:min-w-11" isOpen={pendingNavigation !== undefined} onOpenChange={(open) => !open && setPendingNavigation(undefined)} title="Discard unsaved context changes?" description="Your edits have not been saved. Discard them and continue?" actionLabel="Discard changes" onAction={() => { if (pendingNavigation) applyNavigation(pendingNavigation); setPendingNavigation(undefined); }} width="min(32rem, calc(100dvw - 1rem))" />
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={deleteOpen}
       onOpenChange={(open) => {
         if (deleting) return;
-        setDeleteOpen(open);
-        if (!open) setDeleteError("");
+          setDeleteOpen(open);
+          if (!open) setDeleteError("");
       }}
-      title="Delete context entry"
-      description={<Text as="p" display="block" color="secondary">{selected ? `Delete ${selected.contextKey}? This cannot be undone.` : "This entry is no longer available."}</Text>}
-      actionLabel={deleting ? "Deleting" : "Delete entry"}
-      isActionDisabled={!selected}
-      busy={deleting}
-      onAction={() => void remove()}
+      role="alertdialog"
+      purpose={deleting ? "required" : "form"}
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Delete context entry"
+      aria-describedby={deleteDescriptionId}
     >
-      {deleteError ? <Banner status="error" title="Context entry could not be deleted" description={deleteError} /> : null}
-    </ConfirmationDialog>
+      <DialogHeader title="Delete context entry" hasDivider />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <Text id={deleteDescriptionId} as="p" display="block" color="secondary">{selected ? `Permanently delete ${selected.contextKey}? This cannot be undone.` : "This entry is no longer available."}</Text>
+        <div className="mt-4">{deleteError ? <Banner status="error" title="Context entry could not be deleted" description={deleteError} /> : null}</div>
+      </div>
+      <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+        <Button data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleting} onClick={() => setDeleteOpen(false)} />
+        <Button label={deleting ? "Deleting" : "Delete entry"} type="button" variant="destructive" size="lg" isDisabled={!selected || deleting} isLoading={deleting} onClick={() => { if (!deleting) void remove(); }} />
+      </div>
+    </Dialog>
   </PageLayout>;
 }
 

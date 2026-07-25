@@ -5,6 +5,8 @@ import {
   Banner,
   Button,
   DateTimeInput,
+  Dialog,
+  DialogHeader,
   EmptyState,
   IconButton,
   Selector,
@@ -36,7 +38,6 @@ import {
 import { formatLocalDateTime } from "../../lib/format/date";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
-import { Dialog } from "../ui/Dialog";
 import { AuditIdentityPicker } from "./AuditIdentityPicker";
 import {
   auditIdentityPresentationLabel,
@@ -623,37 +624,43 @@ function AuditDetailDialog({
 }) {
   return (
     <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={event !== null}
       onOpenChange={(open) => !open && onClose()}
-      mode="info"
-      title="Audit event detail"
-      subtitle="Immutable event data for this project activity."
+      purpose="info"
+      padding={0}
+      width="min(34rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Audit event detail"
     >
-      {event ? (
-        <dl className="grid gap-3 sm:grid-cols-[8rem_1fr]">
-          <AuditDetail label="Timestamp" value={event.createdAt} />
-          <AuditDetail
-            label="Action"
-            value={auditActionLabel(event.action)}
-          />
-          <AuditDetail label="Action ID" value={event.action} />
-          <AuditDetail label="Actor" value={actorName(event)} />
-          <AuditDetail label="Sandbox user" value={subjectName(event)} />
-          <AuditDetail
-            label="Resource type"
-            value={auditResourceLabel(event.resourceKind)}
-          />
-          <AuditDetail label="Resource ID" value={event.resourceId ?? "-"} />
-          <AuditDetail label="Result" value={auditResultLabel(event.status)} />
-          {Object.entries(event.detail ?? {}).map(([key, value]) => (
+      <DialogHeader title="Audit event detail" subtitle="Immutable event data for this project activity." hasDivider onOpenChange={(open) => !open && onClose()} />
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        {event ? (
+          <dl className="grid gap-3 sm:grid-cols-[8rem_1fr]">
+            <AuditDetail label="Timestamp" value={event.createdAt} />
             <AuditDetail
-              key={key}
-              label={auditDetailLabel(key)}
-              value={auditDetailValue(key, value)}
+              label="Action"
+              value={auditActionLabel(event.action)}
             />
-          ))}
-        </dl>
-      ) : null}
+            <AuditDetail label="Action ID" value={event.action} />
+            <AuditDetail label="Actor" value={actorName(event)} />
+            <AuditDetail label="Sandbox user" value={subjectName(event)} />
+            <AuditDetail
+              label="Resource type"
+              value={auditResourceLabel(event.resourceKind)}
+            />
+            <AuditDetail label="Resource ID" value={event.resourceId ?? "-"} />
+            <AuditDetail label="Result" value={auditResultLabel(event.status)} />
+            {Object.entries(event.detail ?? {}).map(([key, value]) => (
+              <AuditDetail
+                key={key}
+                label={auditDetailLabel(key)}
+                value={auditDetailValue(key, value)}
+              />
+            ))}
+          </dl>
+        ) : null}
+      </div>
     </Dialog>
   );
 }
