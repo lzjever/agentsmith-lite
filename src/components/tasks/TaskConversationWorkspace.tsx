@@ -31,7 +31,7 @@ import {
   type TaskPresentationState
 } from "./task-conversation-state";
 import { useTaskMutationKeys } from "./task-mutation-key";
-import { TaskConnectionNotice, TaskPreviewNotice, TaskRunStatus } from "./TaskRunStatus";
+import { TaskConnectionNotice, TaskPreviewNotice } from "./TaskRunStatus";
 
 type WorkspaceHandlers = {
   onPresentationChange: (presentation: TaskDetail) => void;
@@ -50,6 +50,7 @@ export function TaskConversationWorkspace({
   policyHref,
   initialSnapshot,
   presentation,
+  commandBusy = false,
   onPresentationChange,
   onUnavailable,
   onArtifactPublished
@@ -62,6 +63,7 @@ export function TaskConversationWorkspace({
   policyHref: string;
   initialSnapshot: TaskInteractionSnapshot;
   presentation: TaskDetail;
+  commandBusy?: boolean;
   onPresentationChange: (presentation: TaskDetail) => void;
   onUnavailable?: (reason: ApiError) => void;
   onArtifactPublished: () => void;
@@ -107,7 +109,6 @@ export function TaskConversationWorkspace({
   const [previewUnavailable, setPreviewUnavailable] = useState("");
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [historyError, setHistoryError] = useState("");
-  const [aborting, setAborting] = useState(false);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [anchorGeneration, setAnchorGeneration] = useState(0);
 
@@ -472,23 +473,6 @@ export function TaskConversationWorkspace({
     }
   }, [recoverFreshSnapshot]);
 
-  async function abort() {
-    setAborting(true);
-    try {
-      await apiClient.abortTaskTurn(
-        taskId,
-        mutationKeysRef.current.key("task-turn-abort", taskId)
-      );
-      mutationKeysRef.current.complete("task-turn-abort", taskId);
-    } catch (reason) {
-      mutationKeysRef.current.completeApiFailure(reason, "task-turn-abort", taskId);
-      await recoverMutation(reason);
-      throw reason;
-    } finally {
-      setAborting(false);
-    }
-  }
-
   const stopWork = useCallback(async (interactionId: string) => {
     try {
       await apiClient.stopTaskWork(
@@ -573,13 +557,6 @@ export function TaskConversationWorkspace({
       className="flex min-h-0 flex-1 flex-col overflow-hidden border border-border bg-muted"
       aria-label="Task conversation workspace"
     >
-      <TaskRunStatus
-        currentTurn={currentTurn}
-        sandboxState={sandboxState}
-        capabilities={capabilities}
-        aborting={aborting}
-        onAbort={abort}
-      />
       <TaskConnectionNotice
         connection={state.connection}
         historyStatus={state.historyStatus}
@@ -645,7 +622,7 @@ export function TaskConversationWorkspace({
         policyHref={policyHref}
         capabilities={capabilities}
         queuedMessages={state.queuedMessages}
-        busy={aborting}
+        busy={commandBusy}
         unavailableMessage={unavailableMessage}
         onSend={send}
         onUpdateQueued={updateQueued}

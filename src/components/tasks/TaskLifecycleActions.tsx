@@ -1,34 +1,56 @@
 "use client";
 
-import { Archive, Pencil } from "lucide-react";
+import { Archive, Pencil, Power, Trash2 } from "lucide-react";
 import { Banner, Button as AstryxButton, Dialog, DialogHeader, MoreMenu, Text, TextInput, useToast } from "@astryxdesign/core";
-import { useEffect, useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskCapabilities } from "../../lib/api/client";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
-export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled = false, onBusyChange }: { task: Task; capabilities: TaskCapabilities; onRefresh: () => Promise<void>; disabled?: boolean; onBusyChange?: (busy: boolean) => void }) {
+export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefresh, onRelease, onDelete, disabled = false, onBusyChange }: { task: Task; capabilities: TaskCapabilities; releaseLabel: string; onRefresh: () => Promise<void>; onRelease: () => Promise<void>; onDelete: () => Promise<void>; disabled?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const mutationKeys = useTaskMutationKeys();
   const showToast = useToast();
+  const menuTrigger = useRef<HTMLButtonElement>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [releaseOpen, setReleaseOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [archiveError, setArchiveError] = useState("");
   const [title, setTitle] = useState(task.title ?? "");
   const [renameError, setRenameError] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [archiving, setArchiving] = useState(false);
-  const busy = renaming || archiving;
+  const [releaseError, setReleaseError] = useState("");
+  const [releasing, setReleasing] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const busy = renaming || archiving || releasing || deleting;
   const nextTitle = title.trim();
   const titleChanged = nextTitle !== (task.title ?? "").trim();
   const archiveDescriptionId = useId();
+  const releaseDescriptionId = useId();
+  const deleteDescriptionId = useId();
 
   useEffect(() => {
     if (!capabilities.editTask) setRenameOpen(false);
     if (!capabilities.archiveTask) setArchiveOpen(false);
-  }, [capabilities.archiveTask, capabilities.editTask]);
+    if (!capabilities.releaseSandbox) setReleaseOpen(false);
+    if (!capabilities.deleteTask) setDeleteOpen(false);
+  }, [capabilities.archiveTask, capabilities.deleteTask, capabilities.editTask, capabilities.releaseSandbox]);
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange]);
 
-  const available = capabilities.editTask || capabilities.archiveTask;
+  const available = capabilities.editTask || capabilities.archiveTask || capabilities.releaseSandbox || capabilities.deleteTask;
   if (!available) return null;
+
+  function restoreMenuFocus() {
+    requestAnimationFrame(() => menuTrigger.current?.focus({ preventScroll: true }));
+  }
+
+  function closeRename() {
+    if (renaming) return;
+    setRenameError("");
+    setRenameOpen(false);
+    restoreMenuFocus();
+  }
 
   function openRename() {
     setTitle(task.title ?? "");
@@ -42,17 +64,24 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
     setRenaming(true);
     setRenameError("");
     const identity = `${task.id}:${nextTitle}`;
+    let renamed = false;
     try {
       await apiClient.editTask(task.id, nextTitle, mutationKeys.key("task-edit", identity));
       mutationKeys.complete("task-edit", identity);
-      setRenameOpen(false);
       await onRefresh();
-      showToast({ body: "Task renamed" });
+      renamed = true;
     } catch (reason) {
       mutationKeys.completeApiFailure(reason, "task-edit", identity);
       if (shouldRefreshTask(reason)) await onRefresh();
       setRenameError(message(reason, "Task could not be renamed."));
-    } finally { setRenaming(false); }
+    } finally {
+      setRenaming(false);
+    }
+    if (renamed) {
+      setRenameOpen(false);
+      restoreMenuFocus();
+      showToast({ body: "Task renamed" });
+    }
   }
 
   async function archive() {
@@ -77,6 +106,7 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
     try {
       await archive();
       setArchiveOpen(false);
+      restoreMenuFocus();
     } catch (reason) {
       setArchiveError(message(reason, "The action could not be completed."));
     }
@@ -86,17 +116,73 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
     if (archiving) return;
     setArchiveError("");
     setArchiveOpen(false);
+    restoreMenuFocus();
+  }
+
+  async function confirmRelease() {
+    if (busy || disabled || !capabilities.releaseSandbox) return;
+    setReleasing(true);
+    setReleaseError("");
+    let released = false;
+    try {
+      await onRelease();
+      released = true;
+    } catch (reason) {
+      setReleaseError(message(reason, "The Sandbox could not be released."));
+    } finally {
+      setReleasing(false);
+    }
+    if (released) {
+      setReleaseOpen(false);
+      restoreMenuFocus();
+    }
+  }
+
+  function closeRelease() {
+    if (releasing) return;
+    setReleaseError("");
+    setReleaseOpen(false);
+    restoreMenuFocus();
+  }
+
+  async function confirmDelete() {
+    if (busy || disabled || !capabilities.deleteTask) return;
+    setDeleting(true);
+    setDeleteError("");
+    let deleted = false;
+    try {
+      await onDelete();
+      deleted = true;
+    } catch (reason) {
+      setDeleteError(message(reason, "The Task could not be deleted."));
+    } finally {
+      setDeleting(false);
+    }
+    if (deleted) {
+      setDeleteOpen(false);
+      restoreMenuFocus();
+    }
+  }
+
+  function closeDelete() {
+    if (deleting) return;
+    setDeleteError("");
+    setDeleteOpen(false);
+    restoreMenuFocus();
   }
 
   return <>
-    <MoreMenu label="Task actions" size="lg" isDisabled={busy || disabled} items={[
+    <MoreMenu ref={menuTrigger} label="Task actions" size="lg" isDisabled={busy || disabled} items={[
       ...(capabilities.editTask ? [{ label: "Rename", icon: <Pencil size={15} />, onClick: openRename }] : []),
       ...(capabilities.archiveTask ? [{ label: "Archive", icon: <Archive size={15} />, onClick: () => setArchiveOpen(true) }] : []),
+      ...((capabilities.releaseSandbox || capabilities.deleteTask) && (capabilities.editTask || capabilities.archiveTask) ? [{ type: "divider" as const }] : []),
+      ...(capabilities.releaseSandbox ? [{ label: releaseLabel, icon: <Power size={15} />, onClick: () => setReleaseOpen(true) }] : []),
+      ...(capabilities.deleteTask ? [{ label: "Delete task", icon: <Trash2 size={15} />, onClick: () => setDeleteOpen(true) }] : []),
     ]} />
     <Dialog
       className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={renameOpen}
-      onOpenChange={(open) => { if (!busy && !disabled) setRenameOpen(open); }}
+      onOpenChange={(open) => { if (open) setRenameOpen(true); else closeRename(); }}
       purpose="form"
       padding={0}
       width="min(34rem, calc(100dvw - 1rem))"
@@ -104,7 +190,7 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
       aria-label="Rename task"
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Rename task" subtitle="Use a concise title that makes this task easy to find." hasDivider {...(!busy && !disabled ? { onOpenChange: setRenameOpen } : {})} />
+        <DialogHeader title="Rename task" subtitle="Use a concise title that makes this task easy to find." hasDivider {...(!busy && !disabled ? { onOpenChange: (open: boolean) => { if (!open) closeRename(); } } : {})} />
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
           <form id="task-rename-form" onSubmit={(event) => void rename(event)}>
             <div className="grid gap-4">
@@ -114,7 +200,7 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
           </form>
         </div>
         <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
-          <AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={busy || disabled} onClick={() => setRenameOpen(false)} />
+          <AstryxButton label="Cancel" type="button" variant="ghost" size="lg" isDisabled={busy || disabled} onClick={closeRename} />
           <AstryxButton label={renaming ? "Saving..." : "Save title"} type="submit" form="task-rename-form" variant="primary" size="lg" isLoading={renaming} isDisabled={busy || disabled || !nextTitle || !titleChanged} />
         </div>
       </div>
@@ -140,6 +226,54 @@ export function TaskLifecycleActions({ task, capabilities, onRefresh, disabled =
         <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
           <AstryxButton data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={archiving} onClick={closeArchive} />
           <AstryxButton label={archiving ? "Working" : archiveError ? "Try archive again" : "Archive task"} type="button" variant="primary" size="lg" isLoading={archiving} isDisabled={archiving || disabled} onClick={() => void confirmArchive()} />
+        </div>
+      </div>
+    </Dialog>
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
+      isOpen={releaseOpen}
+      onOpenChange={(open) => { if (!open) closeRelease(); }}
+      purpose={releasing ? "required" : "form"}
+      role="alertdialog"
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label={`${releaseLabel}?`}
+      aria-describedby={releaseDescriptionId}
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <DialogHeader title={`${releaseLabel}?`} hasDivider />
+        <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+          <Text id={releaseDescriptionId} as="p" display="block" color="secondary">Releasing stops the agent, Terminal, tools, and processes unconditionally, which may lose unsaved information. The Task conversation, Library files, and published Artifacts remain available.</Text>
+          {releaseError ? <Banner status="error" title="Sandbox could not be released" description={releaseError} /> : null}
+        </div>
+        <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+          <AstryxButton data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={releasing} onClick={closeRelease} />
+          <AstryxButton label={releasing ? "Working" : releaseError ? `Try ${releaseLabel.toLowerCase()} again` : releaseLabel} type="button" variant="destructive" size="lg" isLoading={releasing} isDisabled={releasing || disabled} onClick={() => void confirmRelease()} />
+        </div>
+      </div>
+    </Dialog>
+    <Dialog
+      className="[&_button]:min-h-11 [&_button]:min-w-11"
+      isOpen={deleteOpen}
+      onOpenChange={(open) => { if (!open) closeDelete(); }}
+      purpose={deleting ? "required" : "form"}
+      role="alertdialog"
+      padding={0}
+      width="min(32rem, calc(100dvw - 1rem))"
+      maxHeight="calc(100dvh - 1rem)"
+      aria-label="Delete task?"
+      aria-describedby={deleteDescriptionId}
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <DialogHeader title="Delete task?" hasDivider />
+        <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
+          <Text id={deleteDescriptionId} as="p" display="block" color="secondary">This permanently removes the Task conversation, Botified session data, and Task Artifacts. Ordinary Library files are retained, and the Library becomes available after the purge completes.</Text>
+          {deleteError ? <Banner status="error" title="Task could not be deleted" description={deleteError} /> : null}
+        </div>
+        <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:p-5 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
+          <AstryxButton data-autofocus="" label="Cancel" type="button" variant="ghost" size="lg" isDisabled={deleting} onClick={closeDelete} />
+          <AstryxButton label={deleting ? "Deleting..." : deleteError ? "Try delete again" : "Delete task"} type="button" variant="destructive" size="lg" isLoading={deleting} isDisabled={deleting || disabled} onClick={() => void confirmDelete()} />
         </div>
       </div>
     </Dialog>

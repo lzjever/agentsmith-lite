@@ -795,7 +795,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Browse and manage the File Libraries available in this project." actions={<div className="flex items-center gap-2"><IconButton label="Refresh File Libraries" tooltip="Refresh File Libraries" variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void loadLibraries()} isDisabled={librariesState === "loading" || mutationBusy} />{canCreateLibrary ? <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={openCreateLibrary} /> : null}</div>} />}>
     {returnTo ? <Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={returnTo}><ArrowLeft size={16} /><Text type="supporting" color="secondary">Back to Task</Text></Link> : null}
     <MobileLibraryControls libraries={libraries} selectedLibrary={selectedLibrary} state={librariesState} message={librariesMessage} canCreate={canCreateLibrary} mutationBusy={mutationBusy} selectorRef={mobileLibrarySelector} headingRef={mobileLibraryHeading} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} onRetryDelete={(library) => void deleteLibrary(library, true)} />
-    <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
+    <div className="grid min-h-0 gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
       <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} selectionButtons={librarySelectionButtons} headingRef={desktopLibraryHeading} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} onRetryDelete={(library) => void deleteLibrary(library, true)} />
       <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${selectedLibraryPresentation?.kind === "deleting" ? "lg:col-span-2" : ""} ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={selectedLibraryPresentation?.canBrowse === true && browser.loadState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
         <h2 ref={listHeading} className="sr-only" tabIndex={-1}>Library files</h2>
@@ -886,12 +886,12 @@ function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBa
 }
 
 function NoLibrarySelected({ canCreate, onCreate }: { canCreate: boolean; onCreate: () => void }) {
-  return <EmptyState className="min-h-[28rem]" icon={<FolderOpen />} title="No File Libraries" description="Create a File Library to store and browse files for this project." {...(canCreate ? { actions: <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={onCreate} /> } : {})} />;
+  return <EmptyState className="py-8 sm:py-12" icon={<FolderOpen />} title="No File Libraries" description="Create a File Library to store and browse files for this project." {...(canCreate ? { actions: <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={onCreate} /> } : {})} />;
 }
 
 function DeletingLibraryState({ library, pending, error, onRetry }: { library: FileLibrary; pending: boolean; error: string; onRetry: () => void }) {
   const canRetry = fileLibraryPresentation(library).action === "retry";
-  return <div className="grid min-h-[28rem] place-items-center p-6">
+  return <div className="grid place-items-center p-6 sm:py-12">
     <div className="w-full max-w-lg space-y-4">
       <EmptyState
         icon={<RefreshCw />}

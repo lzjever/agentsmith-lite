@@ -1,7 +1,7 @@
 "use client";
 
 import { CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
-import { Banner, Button as AstryxButton, Spinner, Text } from "@astryxdesign/core";
+import { Button as AstryxButton, IconButton, Text } from "@astryxdesign/core";
 import { useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
 
@@ -15,7 +15,15 @@ export function TaskRunStatus({ currentTurn, sandboxState, capabilities, abortin
   }
   const presentation = taskStatePresentation(currentTurn, sandboxState);
   const Icon = presentation.icon;
-  return <div className="shrink-0 border-b border-border bg-muted px-4 py-3 sm:px-5" role="status" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2">{presentation.spinning ? <Spinner size="sm" label={presentation.iconLabel} /> : <Icon role="img" aria-label={presentation.iconLabel} className={`size-4 shrink-0 ${presentation.iconClass}`} />}<Text type="supporting" color="secondary">{presentation.label}</Text></div>{capabilities.abortTurn ? <AstryxButton label={aborting ? "Stopping..." : "Stop current turn"} variant="ghost" size="sm" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} /> : null}</div>{capabilities.abortTurn && abortError ? <Banner className="mt-2" status="error" title="Current turn could not be stopped" description={abortError} /> : null}</div>;
+  return <div className="flex min-w-max shrink-0 items-center gap-2">
+    {presentation.spinning ? <Icon aria-hidden="true" className={`size-4 shrink-0 animate-spin ${presentation.iconClass}`} /> : <Icon aria-hidden="true" className={`size-4 shrink-0 ${presentation.iconClass}`} />}
+    <span role="status" aria-live="polite" aria-atomic="true"><Text type="supporting" color="secondary" className="whitespace-nowrap">{presentation.label}</Text></span>
+    {capabilities.abortTurn ? <>
+      <IconButton className="min-h-11 min-w-11 sm:hidden" label={aborting ? "Stopping current turn" : "Stop current turn"} tooltip={aborting ? "Stopping current turn" : "Stop current turn"} variant="ghost" size="lg" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} />
+      <AstryxButton className="hidden min-h-11 sm:inline-flex" label={aborting ? "Stopping..." : "Stop current turn"} variant="ghost" size="sm" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} />
+    </> : null}
+    {capabilities.abortTurn && abortError ? <span role="alert" className="whitespace-nowrap text-error"><Text type="supporting" color="inherit">Current turn could not be stopped: {abortError}</Text></span> : null}
+  </div>;
 }
 
 export function TaskConnectionNotice({ connection, historyStatus, runtimeReachability, runtimeAvailable = true, error, onRetry }: { connection: "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered"; historyStatus: TaskInteractionSnapshot["historyStatus"]; runtimeReachability: TaskInteractionSnapshot["runtimeReachability"]; runtimeAvailable?: boolean; error: string; onRetry: () => void }) {
@@ -34,11 +42,11 @@ export function TaskPreviewNotice({ message, onRetry }: { message: string; onRet
 }
 
 function taskStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
-  if (sandboxState.state === "released") return { icon:CircleDot, iconLabel:"Sandbox stopped", iconClass:"text-icon-secondary", label:"Sandbox stopped. Send a message or explicitly start Terminal to continue this same Task, session, and File Library.", spinning:false };
-  if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:sandboxState.cause?.message??"Sandbox is unavailable", spinning:false };
+  if (sandboxState.state === "released") return { icon:CircleDot, iconLabel:"Sandbox stopped", iconClass:"text-icon-secondary", label:"Stopped", spinning:false };
+  if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:"Sandbox unavailable", spinning:false };
   if (sandboxState.state === "release_requested") return { icon:Loader2, iconLabel:"Sandbox release requested", iconClass:"text-icon-secondary", label:"Releasing sandbox", spinning:true };
   if (sandboxState.state === "starting") return { icon:Loader2, iconLabel:"Sandbox starting", iconClass:"text-icon-secondary", label:"Starting sandbox", spinning:true };
-  if (currentTurn.state === "ready") return { icon:CircleDot, iconLabel:"Task ready", iconClass:"text-icon-secondary", label:"Ready for a message", spinning:false };
+  if (currentTurn.state === "ready") return { icon:CircleDot, iconLabel:"Task ready", iconClass:"text-icon-secondary", label:"Ready", spinning:false };
   if (currentTurn.state === "queued") return { icon:CircleDot, iconLabel:"Message queued", iconClass:"text-icon-secondary", label:"Message queued", spinning:false };
   if (currentTurn.state === "starting") return { icon:Loader2, iconLabel:"Task in progress", iconClass:"text-icon-secondary", label:"Starting current turn", spinning:true };
   if (currentTurn.state === "running") return { icon:Loader2, iconLabel:"Task in progress", iconClass:"text-icon-secondary", label:"Working", spinning:true };
