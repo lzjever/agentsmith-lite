@@ -1,4 +1,4 @@
-import { classifyPreviewMediaType } from "../../../packages/contracts/src/api.js";
+import { classifyPreviewMediaType } from "../../../packages/contracts/src/api.ts";
 
 export type InlinePreviewByteLimits = Readonly<Record<"text" | "image", number>>;
 export type InlinePreviewPolicy =
