@@ -101,6 +101,37 @@ describe("file libraries API client", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("preserves only a validated owning Task link for a bound Library error", async () => {
+    const originalFetch = globalThis.fetch;
+    let task: unknown = { id: "task_1", title: "Owning Task" };
+    globalThis.fetch = async () => Response.json(
+      { error: "File Library is bound to a Task", code: "file_library_bound", task },
+      { status: 409 }
+    );
+
+    try {
+      await assert.rejects(
+        apiClient.deleteFileLibrary("project_1", "library_1", "bound-key"),
+        (error) => {
+          assert.ok(error instanceof ApiError);
+          assert.equal(error.code, "file_library_bound");
+          assert.deepEqual(error.details, { id: "task_1", title: "Owning Task" });
+          return true;
+        }
+      );
+
+      task = { id: "", title: 42 };
+      await assert.rejects(
+        apiClient.deleteFileLibrary("project_1", "library_1", "invalid-bound-key"),
+        (error) => error instanceof ApiError
+          && error.code === "file_library_bound"
+          && error.details === undefined
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 function library(id: string, name: string) {

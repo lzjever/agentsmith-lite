@@ -4,7 +4,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Download, FileText, Folder, Folde
 import Link from "next/link";
 import { Banner, Button, Dialog as AstryxDialog, DialogHeader, EmptyState, FileInput, Heading, IconButton, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
+import { ApiError, apiClient, fileLibraryBoundTask, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { PageHeader } from "../layout/PageHeader";
@@ -29,8 +29,21 @@ import {
   type FileBrowserDeletionFocusCandidates,
   type FileBrowserSort
 } from "./fileBrowserState";
+import {
+  applyCanonicalFileLibraryDeletionFact,
+  fileLibraryDeleteCopy,
+  fileLibraryFocusTarget,
+  fileLibraryPresentation,
+  fileLibrarySelectionAfterRefresh,
+  fileLibrarySelectorLabel,
+  isCanonicalFileLibraryDeletionError,
+  nearestLibraryAfterRemoval,
+  nearestSurvivingLibrary,
+  shouldResetFileLibraryContext
+} from "./fileLibraryPresentation";
 
 type LoadState = "loading" | "ready" | "error";
+type LibraryLoadOptions = { repairFocus?: boolean };
 const filePreviewByteLimits = { text: 512_000, image: 512_000 } satisfies InlinePreviewByteLimits;
 const fileSortOptions = [
   { value: "name:asc", label: "Name A-Z" },
@@ -70,6 +83,11 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const input = useRef<HTMLInputElement>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
   const entrySelectionButtons = useRef(new Map<string, HTMLButtonElement>());
+  const librarySelectionButtons = useRef(new Map<string, HTMLButtonElement>());
+  const desktopLibraryHeading = useRef<HTMLDivElement>(null);
+  const mobileLibraryHeading = useRef<HTMLElement>(null);
+  const mobileLibrarySelector = useRef<HTMLDivElement>(null);
+  const libraryFocusVersion = useRef(0);
   const detailsScrollPosition = useRef(0);
   const focusRestoreVersion = useRef(0);
 
@@ -102,12 +120,41 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [libraryName, setLibraryName] = useState("");
   const [libraryDialogError, setLibraryDialogError] = useState("");
   const [libraryDeleteError, setLibraryDeleteError] = useState("");
+  const [libraryRetryError, setLibraryRetryError] = useState("");
   const [replaceError, setReplaceError] = useState("");
   const [libraryMutationPending, setLibraryMutationPending] = useState(false);
   const [validatedReturnTo, setValidatedReturnTo] = useState<string | null>(null);
+  const narrowRef = useRef(narrow);
+  narrowRef.current = narrow;
+  const deleteLibraryTargetRef = useRef(deleteLibraryTarget);
+  deleteLibraryTargetRef.current = deleteLibraryTarget;
 
   const invalidateFileReads = useCallback(() => {
     fileLoadVersion.current += 1;
+  }, []);
+
+  const scheduleLibraryFocus = useCallback((libraryId: string | null) => {
+    const version = ++libraryFocusVersion.current;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!mounted.current || version !== libraryFocusVersion.current) return;
+        const target = fileLibraryFocusTarget(narrowRef.current, libraryId);
+        if (target.kind === "desktop-library") {
+          const libraryButton = librarySelectionButtons.current.get(target.libraryId);
+          (libraryButton?.isConnected && !libraryButton.disabled ? libraryButton : desktopLibraryHeading.current)
+            ?.focus({ preventScroll: true });
+          return;
+        }
+        if (target.kind === "mobile-selector") {
+          const selector = mobileLibrarySelector.current?.querySelector<HTMLButtonElement>('[role="combobox"]');
+          (selector?.isConnected ? selector : mobileLibraryHeading.current)
+            ?.focus({ preventScroll: true });
+          return;
+        }
+        (target.kind === "desktop-heading" ? desktopLibraryHeading.current : mobileLibraryHeading.current)
+          ?.focus({ preventScroll: true });
+      });
+    });
   }, []);
 
   const clearPreview = useCallback(() => {
@@ -133,12 +180,20 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setDeleteFileTarget(undefined);
   }, [clearPreview]);
 
-  const applyLocation = useCallback((libraryId: string | null, nextPath: string) => {
+  const applyLocation = useCallback((libraryId: string | null, nextPath: string, forceReset = false) => {
     setDeleteFileTarget(undefined);
-    const changed = selectedLibraryRef.current !== libraryId || pathRef.current !== nextPath;
+    const libraryChanged = selectedLibraryRef.current !== libraryId;
+    const changed = forceReset || libraryChanged || pathRef.current !== nextPath;
+    if (libraryChanged) {
+      deleteLibraryTargetRef.current = undefined;
+      setDeleteLibraryTarget(undefined);
+      setLibraryDeleteError("");
+    }
     if (changed) {
+      libraryFocusVersion.current += 1;
       invalidateFileReads();
       resetFileContext();
+      setLibraryRetryError("");
     }
     selectedLibraryRef.current = libraryId;
     pathRef.current = nextPath;
@@ -148,7 +203,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setReplaceTarget(undefined);
   }, [invalidateFileReads, resetFileContext]);
 
-  const loadLibraries = useCallback(async () => {
+  const loadLibraries = useCallback(async (options: LibraryLoadOptions = {}) => {
     const version = ++libraryLoadVersion.current;
     setLibrariesState("loading");
     setLibrariesMessage("");
@@ -163,18 +218,42 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (libraryResult.status === "rejected") {
       setLibrariesMessage(errorMessage(libraryResult.reason, "File Libraries could not be loaded."));
       setLibrariesState("error");
+      if (options.repairFocus) scheduleLibraryFocus(selectedLibraryRef.current);
       return;
     }
+    const previousLibraries = librariesRef.current;
     const nextLibraries = libraryResult.value;
+    const currentId = selectedLibraryRef.current;
+    const previousSelected = previousLibraries.find((library) => library.id === currentId);
+    const nextSelected = nextLibraries.find((library) => library.id === currentId);
+    const selectedLibraryRemoved = currentId !== null
+      && previousSelected !== undefined
+      && nextSelected === undefined;
+    const resetCurrentContext = shouldResetFileLibraryContext(previousSelected, nextSelected);
+    const openDeleteTarget = deleteLibraryTargetRef.current;
+    const canonicalDeleteTarget = openDeleteTarget
+      ? nextLibraries.find((library) => library.id === openDeleteTarget.id)
+      : undefined;
+    const deleteTargetClosed = openDeleteTarget !== undefined
+      && (!canonicalDeleteTarget || fileLibraryPresentation(canonicalDeleteTarget).action !== "delete");
     librariesRef.current = nextLibraries;
     setLibraries(nextLibraries);
+    const nextDeleteTarget = canonicalDeleteTarget && fileLibraryPresentation(canonicalDeleteTarget).action === "delete"
+      ? canonicalDeleteTarget
+      : undefined;
+    deleteLibraryTargetRef.current = nextDeleteTarget;
+    setDeleteLibraryTarget(nextDeleteTarget);
     setLibrariesState("ready");
-    const currentId = selectedLibraryRef.current;
-    const nextId = nextLibraries.some((library) => library.id === currentId) ? currentId : nextLibraries[0]?.id ?? null;
-    const nextPath = nextId === currentId ? pathRef.current : "";
-    applyLocation(nextId, nextPath);
+    const nextId = fileLibrarySelectionAfterRefresh(
+      previousLibraries,
+      nextLibraries,
+      currentId
+    );
+    const nextPath = nextId === currentId && !resetCurrentContext ? pathRef.current : "";
+    applyLocation(nextId, nextPath, resetCurrentContext);
     writeFileBrowserLocation(nextId, nextPath, true);
-  }, [applyLocation, projectId]);
+    if (options.repairFocus || deleteTargetClosed || selectedLibraryRemoved) scheduleLibraryFocus(nextId);
+  }, [applyLocation, projectId, scheduleLibraryFocus]);
 
   useEffect(() => {
     mounted.current = true;
@@ -240,6 +319,11 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       return [];
     }
     const requestedLibraryId = selectedLibraryId;
+    const requestedLibrary = librariesRef.current.find((library) => library.id === requestedLibraryId);
+    if (!requestedLibrary || !fileLibraryPresentation(requestedLibrary).canBrowse) {
+      dispatchBrowser({ type: "location_changed" });
+      return [];
+    }
     const requestedPath = path;
     const version = ++fileLoadVersion.current;
     dispatchBrowser({ type: "refresh_started" });
@@ -277,11 +361,13 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     }
   }, [applyLocation, clearPreview, path, projectId, selectedLibraryId]);
 
-  useEffect(() => {
-    if (librariesState === "ready") void loadFiles();
-  }, [librariesState, loadFiles]);
-
   const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId);
+  const selectedLibraryPresentation = selectedLibrary ? fileLibraryPresentation(selectedLibrary) : undefined;
+
+  useEffect(() => {
+    if (librariesState === "ready" && selectedLibraryPresentation?.canBrowse !== false) void loadFiles();
+  }, [librariesState, loadFiles, selectedLibraryPresentation?.canBrowse]);
+
   const selected = browser.entries.find((entry) => entry.path === browser.selectedPath);
   const page = useMemo(() => selectFileBrowserPage(browser), [browser]);
   const activePreviewPath =
@@ -337,6 +423,24 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       setOperationMessage("File write access changed. This library is now read-only.");
     }
     return true;
+  }
+
+  function removeStaleLibraryMutationAccess() {
+    const next = librariesRef.current.map((library) => ({
+      ...library,
+      capabilities: { canRename: false, canDelete: false, canWriteFiles: false }
+    }));
+    librariesRef.current = next;
+    setLibraries(next);
+    setCanCreateLibrary(false);
+    setRenameTarget(undefined);
+    deleteLibraryTargetRef.current = undefined;
+    setDeleteLibraryTarget(undefined);
+    setUploadFailure(undefined);
+    setReplaceTarget(undefined);
+    const action = { type: "delete_access_revoked" } as const;
+    browserRef.current = reduceFileBrowserState(browserRef.current, action);
+    dispatchBrowser(action);
   }
 
   async function upload(file: File, overwrite = false, uploadPath = path, libraryId = selectedLibraryRef.current) {
@@ -589,28 +693,94 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     }
   }
 
-  async function deleteLibrary() {
-    if (!deleteLibraryTarget || libraryMutationPending) return;
-    const target = deleteLibraryTarget;
-    const requestIdentity = target.id;
+  async function deleteLibrary(target = deleteLibraryTarget, retry = false) {
+    if (!target || libraryMutationPending) return;
+    const currentTarget = librariesRef.current.find((library) => library.id === target.id);
+    if (!currentTarget || selectedLibraryRef.current !== target.id) {
+      deleteLibraryTargetRef.current = undefined;
+      setDeleteLibraryTarget(undefined);
+      setLibraryDeleteError("");
+      return;
+    }
+    const presentation = fileLibraryPresentation(currentTarget);
+    if ((retry && presentation.action !== "retry") || (!retry && presentation.action !== "delete")) return;
+    const requestIdentity = currentTarget.id;
     setLibraryMutationPending(true);
     setLibraryDeleteError("");
+    setLibraryRetryError("");
     try {
-      await apiClient.deleteFileLibrary(projectId, target.id, mutationKeys.key("file-library.delete", requestIdentity));
+      await apiClient.deleteFileLibrary(projectId, currentTarget.id, mutationKeys.key("file-library.delete", requestIdentity));
       mutationKeys.complete("file-library.delete", requestIdentity);
+      if (!mounted.current) return;
+      libraryLoadVersion.current += 1;
+      setLibrariesState("ready");
+      setLibrariesMessage("");
       const current = librariesRef.current;
-      const deletedIndex = current.findIndex((library) => library.id === target.id);
-      const next = current.filter((library) => library.id !== target.id);
+      const next = current.filter((library) => library.id !== currentTarget.id);
+      const currentSelection = selectedLibraryRef.current;
+      const targetStillSelected = currentSelection === currentTarget.id;
+      const fallback = targetStillSelected
+        ? nearestLibraryAfterRemoval(current, currentTarget.id)
+        : next.find((library) => library.id === currentSelection)?.id ?? nearestLibraryAfterRemoval(current, currentTarget.id);
       librariesRef.current = next;
       setLibraries(next);
+      deleteLibraryTargetRef.current = undefined;
       setDeleteLibraryTarget(undefined);
-      const fallback = next[Math.min(Math.max(deletedIndex, 0), next.length - 1)]?.id ?? null;
-      applyLocation(fallback, "");
-      writeFileBrowserLocation(fallback, "", true);
+      if (targetStillSelected || !next.some((library) => library.id === currentSelection)) {
+        applyLocation(fallback, "");
+        writeFileBrowserLocation(fallback, "", true);
+      }
+      scheduleLibraryFocus(fallback);
       showToast({ body: "File Library deleted", type: "info" });
     } catch (error) {
-      if (error instanceof ApiError) mutationKeys.complete("file-library.delete", requestIdentity);
-      setLibraryDeleteError(errorMessage(error, "File Library could not be deleted."));
+      if (error instanceof ApiError) {
+        mutationKeys.complete("file-library.delete", requestIdentity);
+        if (isCanonicalFileLibraryDeletionError(error.code)) {
+          const previous = librariesRef.current;
+          const targetStillSelected = selectedLibraryRef.current === currentTarget.id;
+          const boundTask = fileLibraryBoundTask(error);
+          const fact = error.code === "file_library_not_found"
+            ? { kind: "not_found" } as const
+            : error.code === "file_library_deleting"
+              ? { kind: "deleting" } as const
+              : boundTask
+                ? { kind: "bound", task: boundTask } as const
+                : null;
+          const repaired = fact
+            ? applyCanonicalFileLibraryDeletionFact(previous, currentTarget.id, fact)
+            : previous.map((library) => library.id === currentTarget.id
+              ? { ...library, capabilities: { ...library.capabilities, canDelete: false } }
+              : library);
+          librariesRef.current = repaired;
+          setLibraries(repaired);
+          setRenameTarget((target) => target?.id === currentTarget.id && fact?.kind !== "bound" ? undefined : target);
+          deleteLibraryTargetRef.current = undefined;
+          setDeleteLibraryTarget(undefined);
+          let focusLibraryId: string | null = selectedLibraryRef.current;
+          if (targetStillSelected && error.code === "file_library_not_found") {
+            focusLibraryId = nearestSurvivingLibrary(previous, repaired, currentTarget.id);
+            applyLocation(focusLibraryId, "");
+            writeFileBrowserLocation(focusLibraryId, "", true);
+          } else if (targetStillSelected && error.code === "file_library_deleting") {
+            focusLibraryId = currentTarget.id;
+            applyLocation(currentTarget.id, "", true);
+            writeFileBrowserLocation(currentTarget.id, "", true);
+          }
+          scheduleLibraryFocus(focusLibraryId);
+          await loadLibraries({ repairFocus: true });
+          return;
+        }
+        if (isReadOnlyMutationError(error)) {
+          removeStaleLibraryMutationAccess();
+          deleteLibraryTargetRef.current = undefined;
+          setDeleteLibraryTarget(undefined);
+          await loadLibraries({ repairFocus: true });
+          return;
+        }
+      }
+      const message = "Try again. Refresh File Libraries if the operation may already have started.";
+      if (retry) setLibraryRetryError(message);
+      else setLibraryDeleteError(message);
     } finally {
       if (mounted.current) setLibraryMutationPending(false);
     }
@@ -625,13 +795,15 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Browse and manage the File Libraries available in this project." actions={<div className="flex items-center gap-2"><IconButton label="Refresh File Libraries" tooltip="Refresh File Libraries" variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void loadLibraries()} isDisabled={librariesState === "loading" || mutationBusy} />{canCreateLibrary ? <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={openCreateLibrary} /> : null}</div>} />}>
     {returnTo ? <Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={returnTo}><ArrowLeft size={16} /><Text type="supporting" color="secondary">Back to Task</Text></Link> : null}
-    <MobileLibraryControls libraries={libraries} selectedLibrary={selectedLibrary} state={librariesState} message={librariesMessage} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
+    <MobileLibraryControls libraries={libraries} selectedLibrary={selectedLibrary} state={librariesState} message={librariesMessage} canCreate={canCreateLibrary} mutationBusy={mutationBusy} selectorRef={mobileLibrarySelector} headingRef={mobileLibraryHeading} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} onRetryDelete={(library) => void deleteLibrary(library, true)} />
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
-      <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
-      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={browser.loadState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
+      <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} selectionButtons={librarySelectionButtons} headingRef={desktopLibraryHeading} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} onRetryDelete={(library) => void deleteLibrary(library, true)} />
+      <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${selectedLibraryPresentation?.kind === "deleting" ? "lg:col-span-2" : ""} ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={selectedLibraryPresentation?.canBrowse === true && browser.loadState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
         <h2 ref={listHeading} className="sr-only" tabIndex={-1}>Library files</h2>
         {!selectedLibrary ? <NoLibrarySelected canCreate={canCreateLibrary} onCreate={openCreateLibrary} /> : <>
+          {selectedLibraryPresentation?.kind === "deleting" ? <DeletingLibraryState library={selectedLibrary} pending={libraryMutationPending} error={libraryRetryError} onRetry={() => void deleteLibrary(selectedLibrary, true)} /> : <>
           <p className="sr-only" aria-live="polite">{dropReady ? "Drop a file to upload" : ""}</p>
+          {selectedLibraryPresentation?.kind === "bound" && selectedLibrary.boundTask ? <LibraryBindingNotice library={selectedLibrary} projectBasePath={projectBasePath} /> : null}
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border px-3">
             <nav className="min-w-0 overflow-x-auto" aria-label="Library path"><ol className="flex min-w-max items-center gap-1 text-secondary">{crumbs.map((crumb, index) => <li className="flex items-center gap-1" key={crumb.path}>{index > 0 ? <ChevronRight className="size-4 text-icon-secondary" aria-hidden="true" /> : null}<button type="button" className="max-w-56 truncate rounded-sm px-1.5 py-1 hover:bg-overlay-hover hover:text-primary" title={crumb.label} onClick={() => navigate(crumb.path)}><Text type="supporting" color="secondary">{crumb.label}</Text></button></li>)}</ol></nav>
             <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh files" tooltip="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={browser.loadState === "loading" || mutationBusy} />{canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}</div>
@@ -650,9 +822,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
           {noMatches ? <FileBrowserNoMatches query={browser.query.trim()} onClear={() => changeFileBrowserPresentation({ type: "filter_changed", query: "" })} /> : null}
           {browser.entries.length > 0 && !noMatches ? <FileBrowserList entries={page.entries} parent={parent} selectedPath={browser.selectedPath} selectionButtons={entrySelectionButtons} onNavigate={navigate} onSelect={selectFile} /> : null}
           {page.totalCount > 0 ? <FileBrowserPagination page={page.page} pageCount={page.pageCount} range={page.range} totalCount={page.totalCount} onPageChange={(nextPage) => changeFileBrowserPresentation({ type: "page_changed", page: nextPage })} /> : null}
+          </>}
         </>}
       </section>
-      <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></aside>
+      {selectedLibraryPresentation?.kind !== "deleting" ? <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></aside> : null}
     </div>
     <AstryxDialog
       isOpen={narrow && mobileDetailsOpen && Boolean(selected)}
@@ -678,31 +851,34 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   </PageLayout>;
 }
 
-function MobileLibraryControls({ libraries, selectedLibrary, state, message, canCreate, mutationBusy, onRetry, onSelect, onCreate, onRename, onDelete }: { libraries: FileLibrary[]; selectedLibrary: FileLibrary | undefined; state: LoadState; message: string; canCreate: boolean; mutationBusy: boolean; onRetry: () => Promise<void>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void }) {
-  return <section className="mb-4 space-y-2 lg:hidden" aria-label="File Library selection">
+function MobileLibraryControls({ libraries, selectedLibrary, state, message, canCreate, mutationBusy, selectorRef, headingRef, onRetry, onSelect, onCreate, onRename, onDelete, onRetryDelete }: { libraries: FileLibrary[]; selectedLibrary: FileLibrary | undefined; state: LoadState; message: string; canCreate: boolean; mutationBusy: boolean; selectorRef: React.RefObject<HTMLDivElement | null>; headingRef: React.RefObject<HTMLElement | null>; onRetry: () => Promise<unknown>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void; onRetryDelete: (library: FileLibrary) => void }) {
+  const presentation = selectedLibrary ? fileLibraryPresentation(selectedLibrary) : undefined;
+  return <section ref={headingRef} tabIndex={-1} className="mb-4 space-y-2 outline-none lg:hidden" aria-label="File Library selection">
     <div className="flex items-end gap-1">
-      <Selector label="File Library" options={libraries.map((library) => ({ value: library.id, label: library.name }))} value={selectedLibrary?.id ?? ""} onChange={onSelect} placeholder={state === "loading" ? "Loading libraries" : "Select a library"} isDisabled={libraries.length === 0 || mutationBusy} size="lg" className="min-w-0 flex-1" />
+      <div ref={selectorRef} className="min-w-0 flex-1"><Selector label="File Library" options={libraries.map((library) => ({ value: library.id, label: fileLibrarySelectorLabel(library) }))} value={selectedLibrary?.id ?? ""} onChange={onSelect} placeholder={state === "loading" ? "Loading libraries" : "Select a library"} isDisabled={libraries.length === 0 || mutationBusy} size="lg" width="100%" /></div>
       {canCreate ? <IconButton label="Create library" tooltip="Create File Library" variant="ghost" size="lg" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}
-      {selectedLibrary ? <IconButton label={`Rename ${selectedLibrary.name}`} tooltip={selectedLibrary.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" size="lg" icon={<Pencil size={15} />} isDisabled={!selectedLibrary.capabilities.canRename || mutationBusy} onClick={() => onRename(selectedLibrary)} /> : null}
-      {selectedLibrary ? <IconButton label={`Delete ${selectedLibrary.name}`} tooltip={selectedLibrary.boundTask ? "This library is bound to a Task and cannot be deleted" : selectedLibrary.capabilities.canDelete ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" size="lg" icon={<Trash2 size={15} />} isDisabled={!selectedLibrary.capabilities.canDelete || mutationBusy} onClick={() => onDelete(selectedLibrary)} /> : null}
+      {selectedLibrary && presentation?.kind !== "deleting" ? <IconButton label={`Rename ${selectedLibrary.name}`} tooltip={selectedLibrary.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" size="lg" icon={<Pencil size={15} />} isDisabled={!selectedLibrary.capabilities.canRename || mutationBusy} onClick={() => onRename(selectedLibrary)} /> : null}
+      {selectedLibrary && presentation?.kind !== "deleting" ? <IconButton label={`Delete ${selectedLibrary.name}`} tooltip={presentation?.kind === "bound" ? "This File Library is bound to a Task" : presentation?.action === "delete" ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" size="lg" icon={<Trash2 size={15} />} isDisabled={presentation?.action !== "delete" || mutationBusy} onClick={() => onDelete(selectedLibrary)} /> : null}
+      {selectedLibrary && presentation?.action === "retry" ? <IconButton label={`Retry deletion of ${selectedLibrary.name}`} tooltip="Retry deletion" variant="destructive" size="lg" icon={<RefreshCw size={15} />} isDisabled={mutationBusy} onClick={() => onRetryDelete(selectedLibrary)} /> : null}
     </div>
     {state === "error" ? <Banner status="error" title="Libraries could not be refreshed" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
   </section>;
 }
 
-function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBasePath, canCreate, mutationBusy, onRetry, onSelect, onCreate, onRename, onDelete }: { state: LoadState; message: string; libraries: FileLibrary[]; selectedLibraryId: string | null; projectBasePath: string; canCreate: boolean; mutationBusy: boolean; onRetry: () => Promise<void>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void }) {
+function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBasePath, canCreate, mutationBusy, selectionButtons, headingRef, onRetry, onSelect, onCreate, onRename, onDelete, onRetryDelete }: { state: LoadState; message: string; libraries: FileLibrary[]; selectedLibraryId: string | null; projectBasePath: string; canCreate: boolean; mutationBusy: boolean; selectionButtons: React.RefObject<Map<string, HTMLButtonElement>>; headingRef: React.RefObject<HTMLDivElement | null>; onRetry: () => Promise<unknown>; onSelect: (id: string) => void; onCreate: () => void; onRename: (library: FileLibrary) => void; onDelete: (library: FileLibrary) => void; onRetryDelete: (library: FileLibrary) => void }) {
   return <section className="hidden min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface lg:flex" aria-label="File Libraries">
-    <div className="flex min-h-12 items-center justify-between border-b border-border px-3"><div className="min-w-0"><Heading level={3} accessibilityLevel={2}>File Libraries</Heading><Text type="supporting" color="secondary" display="block" className="mt-0.5">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</Text></div>{canCreate ? <IconButton label="Create library" tooltip="Create library" variant="ghost" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}</div>
+    <div ref={headingRef} tabIndex={-1} className="flex min-h-12 items-center justify-between border-b border-border px-3 outline-none"><div className="min-w-0"><Heading level={3} accessibilityLevel={2}>File Libraries</Heading><Text type="supporting" color="secondary" display="block" className="mt-0.5">{libraries.length} {libraries.length === 1 ? "library" : "libraries"}</Text></div>{canCreate ? <IconButton label="Create library" tooltip="Create library" variant="ghost" icon={<Plus size={16} />} onClick={onCreate} isDisabled={mutationBusy} /> : null}</div>
     <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
       {state === "loading" && libraries.length === 0 ? <div className="space-y-2 p-1.5" aria-label="Loading File Libraries"><Skeleton height={48} /><Skeleton height={48} /></div> : null}
       {state === "error" ? <Banner status="error" title="Libraries could not be refreshed" description={message} endContent={<Button label="Try again" variant="ghost" size="sm" onClick={() => void onRetry()} />} /> : null}
       {state === "ready" && libraries.length === 0 ? <EmptyState isCompact title="No File Libraries available" /> : null}
       {libraries.map((library) => {
         const active = library.id === selectedLibraryId;
+        const presentation = fileLibraryPresentation(library);
         const boundLabel = library.boundTask ? `Bound to ${library.boundTask.title || "Task"}` : null;
         return <div key={library.id} className={`group flex items-center gap-1 rounded-sm ${active ? "bg-accent-muted ring-1 ring-inset ring-accent" : "hover:bg-overlay-hover"}`}>
-          <div className="min-w-0 flex-1 py-2"><button type="button" className="flex w-full min-w-0 items-center gap-2 px-2 text-left" aria-current={active ? "true" : undefined} aria-label={`Select library ${library.name}`} onClick={() => onSelect(library.id)} title={library.name}><FolderOpen className={`size-4 shrink-0 ${active ? "text-accent-text" : "text-icon-secondary"}`} /><Text maxLines={1}>{library.name}</Text></button>{library.boundTask && boundLabel ? <Link className="mt-1 block truncate pl-8 pr-2 text-warning hover:underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`} title={boundLabel}><Text type="supporting" color="inherit">{boundLabel}</Text></Link> : <Text type="supporting" color="secondary" display="block" className="mt-1 pl-8">Available</Text>}</div>
-          {active ? <div className="flex shrink-0 items-center pr-1"><IconButton label={`Rename ${library.name}`} tooltip={library.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" className="h-7 w-7" icon={<Pencil size={14} />} isDisabled={!library.capabilities.canRename || mutationBusy} onClick={() => onRename(library)} /><IconButton label={`Delete ${library.name}`} tooltip={library.boundTask ? "This library is bound to a Task and cannot be deleted" : library.capabilities.canDelete ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" className="h-7 w-7 text-error" icon={<Trash2 size={14} />} isDisabled={!library.capabilities.canDelete || mutationBusy} onClick={() => onDelete(library)} /></div> : null}
+          <div className="min-w-0 flex-1 py-2"><button ref={(node) => { if (node) selectionButtons.current.set(library.id, node); else selectionButtons.current.delete(library.id); }} type="button" className="flex w-full min-w-0 items-center gap-2 px-2 text-left disabled:cursor-not-allowed disabled:opacity-60" aria-current={active ? "true" : undefined} aria-label={`Select library ${library.name}`} disabled={mutationBusy} onClick={() => onSelect(library.id)} title={library.name}><FolderOpen className={`size-4 shrink-0 ${active ? "text-accent-text" : "text-icon-secondary"}`} /><Text maxLines={1}>{library.name}</Text></button>{presentation.kind === "deleting" ? <Text type="supporting" color="secondary" display="block" className="mt-1 pl-8">Deletion did not finish</Text> : library.boundTask && boundLabel ? <Link className="mt-1 block truncate pl-8 pr-2 text-warning hover:underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`} title={boundLabel}><Text type="supporting" color="inherit">{boundLabel}</Text></Link> : <Text type="supporting" color="secondary" display="block" className="mt-1 pl-8">Available</Text>}</div>
+          {active ? <div className="flex shrink-0 items-center pr-1">{presentation.kind !== "deleting" ? <IconButton label={`Rename ${library.name}`} tooltip={library.capabilities.canRename ? "Rename File Library" : "You do not have permission to rename this library"} variant="ghost" className="h-7 w-7" icon={<Pencil size={14} />} isDisabled={!library.capabilities.canRename || mutationBusy} onClick={() => onRename(library)} /> : null}{presentation.kind !== "deleting" ? <IconButton label={`Delete ${library.name}`} tooltip={presentation.kind === "bound" ? "This File Library is bound to a Task" : presentation.action === "delete" ? "Delete File Library" : "You do not have permission to delete this library"} variant="destructive" className="h-7 w-7 text-error" icon={<Trash2 size={14} />} isDisabled={presentation.action !== "delete" || mutationBusy} onClick={() => onDelete(library)} /> : null}{presentation.action === "retry" ? <IconButton label={`Retry deletion of ${library.name}`} tooltip="Retry deletion" variant="destructive" className="h-7 w-7 text-error" icon={<RefreshCw size={14} />} isDisabled={mutationBusy} onClick={() => onRetryDelete(library)} /> : null}</div> : null}
         </div>;
       })}
     </div>
@@ -711,6 +887,32 @@ function LibrariesPane({ state, message, libraries, selectedLibraryId, projectBa
 
 function NoLibrarySelected({ canCreate, onCreate }: { canCreate: boolean; onCreate: () => void }) {
   return <EmptyState className="min-h-[28rem]" icon={<FolderOpen />} title="No File Libraries" description="Create a File Library to store and browse files for this project." {...(canCreate ? { actions: <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={onCreate} /> } : {})} />;
+}
+
+function DeletingLibraryState({ library, pending, error, onRetry }: { library: FileLibrary; pending: boolean; error: string; onRetry: () => void }) {
+  const canRetry = fileLibraryPresentation(library).action === "retry";
+  return <div className="grid min-h-[28rem] place-items-center p-6">
+    <div className="w-full max-w-lg space-y-4">
+      <EmptyState
+        icon={<RefreshCw />}
+        title="Deletion did not finish"
+        description="This File Library is read-only while deletion is incomplete."
+        {...(canRetry ? { actions: <Button label="Retry deletion" variant="destructive" size="lg" icon={<RefreshCw size={16} />} isLoading={pending} isDisabled={pending} onClick={onRetry} /> } : {})}
+      />
+      {error ? <Banner status="error" title="File Library could not be deleted" description={error} /> : null}
+    </div>
+  </div>;
+}
+
+function LibraryBindingNotice({ library, projectBasePath }: { library: FileLibrary; projectBasePath: string }) {
+  if (!library.boundTask) return null;
+  const taskLabel = library.boundTask.title || "Task";
+  return <Banner
+    className="m-3"
+    status="info"
+    title="File Library is bound to a Task"
+    description={<span className="break-words [overflow-wrap:anywhere]"><Link className="font-medium underline" href={`${projectBasePath}/tasks/${encodeURIComponent(library.boundTask.id)}`}>Bound to {taskLabel}</Link>. Delete the Task before deleting this File Library. Archiving the Task does not release it.</span>}
+  />;
 }
 
 function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onNameChange, onSubmit }: { mode: "create" | "rename"; open: boolean; name: string; error: string; pending: boolean; onOpenChange: (open: boolean) => void; onNameChange: (name: string) => void; onSubmit: (event: FormEvent) => void }) {
@@ -854,7 +1056,7 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
 
 function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm }: { library: FileLibrary | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
   const handleOpenChange = (open: boolean) => !pending && onOpenChange(open);
-  return <ConfirmationDialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} title="Delete File Library?" description={<Text as="p" color="secondary">The server will only delete an unbound, empty library.</Text>} actionLabel="Delete library" busy={pending} onAction={() => void onConfirm()}>{library ? <Text as="p" display="block">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner status="error" title="File Library could not be deleted" description={error} /> : null}</ConfirmationDialog>;
+  return <ConfirmationDialog isOpen={Boolean(library)} onOpenChange={handleOpenChange} title={fileLibraryDeleteCopy.title} description={<Text as="p" color="secondary">{fileLibraryDeleteCopy.body}</Text>} actionLabel={fileLibraryDeleteCopy.action} busy={pending} onAction={() => void onConfirm()}>{library ? <Text as="p" display="block" wordBreak="break-all">Library: <Text weight="semibold">{library.name}</Text></Text> : null}{error ? <Banner status="error" title="File Library could not be deleted" description={error} /> : null}</ConfirmationDialog>;
 }
 
 function ReplaceFileDialog({ target, pending, error, onOpenChange, onConfirm }: { target: { file: File } | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> | undefined }) {

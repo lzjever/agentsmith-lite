@@ -857,6 +857,7 @@ const auditActionLabels: Record<ProjectAuditAction, string> = {
   "sandbox.released": "Released sandbox",
   "file.upload": "Uploaded file",
   "file.delete": "Deleted file",
+  "file_library.delete": "Deleted File Library",
   "file.quota": "Reached file quota",
   "alert.resolve": "Resolved alert",
   "alert.dismiss": "Dismissed alert",

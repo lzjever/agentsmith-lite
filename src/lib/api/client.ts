@@ -11,6 +11,7 @@ export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js"
 export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
+export type FileLibraryTaskLink = NonNullable<FileLibrary["boundTask"]>;
 export type ProjectAuditEvent = ProjectAuditEventView;
 export type ProjectAuditIdentity = ApiProjectAuditIdentity;
 export type ProjectAuditIdentityPage = ApiProjectAuditIdentityPage;
@@ -54,6 +55,14 @@ const readOnlyMutationMessages = new Set([
 
 export function isReadOnlyMutationError(error: unknown): error is ApiError {
   return error instanceof ApiError && (error.status === 403 || (error.status === 409 && readOnlyMutationMessages.has(error.message)));
+}
+
+export function fileLibraryBoundTask(error: unknown): FileLibraryTaskLink | null {
+  return error instanceof ApiError
+    && error.code === "file_library_bound"
+    && isFileLibraryTaskLink(error.details)
+    ? error.details
+    : null;
 }
 
 export class IdempotencyPendingError extends Error {
@@ -232,6 +241,10 @@ async function apiResponseError(
         const genericCode = typeof code === "string" && !structuredSandboxErrorCodes.has(code)
           ? code
           : undefined;
+        const task = (body as { task?: unknown }).task;
+        if (genericCode === "file_library_bound" && isFileLibraryTaskLink(task)) {
+          return new ApiError(response.status, error, { code: genericCode, details: task });
+        }
         return new ApiError(response.status, error, genericCode);
       }
       if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
@@ -646,6 +659,12 @@ function parseTaskInteractionStreamEvent(event: string, cursor: string | undefin
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
+function isFileLibraryTaskLink(value: unknown): value is FileLibraryTaskLink {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && value.id.length > 0
+    && (value.title === null || typeof value.title === "string");
+}
 
 function isTaskInteractionSnapshot(value: unknown): value is TaskInteractionSnapshot {
   return isRecord(value)
