@@ -75,6 +75,68 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findProjectDirectoryItem("missing","project_beta"),null);
   });
 
+  it("keeps bounded membership reads aligned with exact, candidate, batch, and complete fanout paths",async()=>{
+    const alphaId="user_member_alpha";
+    const highBmpId="user_member_\uE000";
+    const astralId="user_member_\u{10000}";
+    const candidateId="user_member_candidate";
+    const tiedAt="2026-07-23T00:01:00.000Z";
+    const members=[
+      {id:alphaId,email:"alpha.member@example.test",displayName:"Alpha Person",workspaceRole:"admin" as const,projectRole:"admin" as const,createdAt:"2026-07-23T00:00:30.000Z"},
+      {id:highBmpId,email:"high-bmp@example.test",displayName:"High BMP",workspaceRole:"viewer" as const,projectRole:"viewer" as const,createdAt:tiedAt},
+      {id:astralId,email:"astral@example.test",displayName:"Astral",workspaceRole:"viewer" as const,projectRole:"viewer" as const,createdAt:tiedAt},
+      {id:candidateId,email:"candidate@example.test",displayName:"Candidate Only",workspaceRole:"member" as const,projectRole:null,createdAt:"2026-07-23T00:02:00.000Z"}
+    ];
+    for(const member of members){
+      await store.createUser({id:member.id,email:member.email,emailVerified:true,passwordHash:"hash",createdAt:member.createdAt,updatedAt:member.createdAt});
+      await store.upsertUserProfilePreferences({userId:member.id,displayName:member.displayName,timezone:null,bio:null,jobTitle:null,company:null,greetingPreference:null,interests:[],updatedAt:member.createdAt},null);
+      await store.upsertWorkspaceMembership({workspaceId:"workspace_atomic",userId:member.id,role:member.workspaceRole,createdAt:member.createdAt,updatedAt:member.createdAt});
+      if(member.projectRole)await store.upsertProjectMembership({projectId:"project_atomic",userId:member.id,role:member.projectRole,createdAt:member.createdAt,updatedAt:member.createdAt});
+    }
+
+    const workspaceFirst=await store.listWorkspaceMembershipDirectoryPage("workspace_atomic",{q:"",role:null,limit:3});
+    assert.deepEqual(workspaceFirst.map((member)=>member.userId),["user_atomic",alphaId,highBmpId]);
+    const workspaceSecond=await store.listWorkspaceMembershipDirectoryPage("workspace_atomic",{q:"",role:null,after:{createdAt:workspaceFirst.at(-1)!.createdAt,userId:workspaceFirst.at(-1)!.userId},limit:3});
+    assert.deepEqual(workspaceSecond.map((member)=>member.userId),[astralId,candidateId]);
+    assert.deepEqual(
+      (await store.listWorkspaceMembershipDirectoryPage("workspace_atomic",{q:"alpha person",role:"admin",limit:20})).map((member)=>member.userId),
+      [alphaId]
+    );
+
+    const projectFirst=await store.listProjectMembershipDirectoryPage("project_atomic",{q:"",role:null,limit:3});
+    assert.deepEqual(projectFirst.map((member)=>member.userId),["user_atomic",alphaId,highBmpId]);
+    const projectSecond=await store.listProjectMembershipDirectoryPage("project_atomic",{q:"",role:null,after:{createdAt:projectFirst.at(-1)!.createdAt,userId:projectFirst.at(-1)!.userId},limit:3});
+    assert.deepEqual(projectSecond.map((member)=>member.userId),[astralId]);
+    assert.deepEqual(
+      (await store.listProjectMembershipDirectoryPage("project_atomic",{q:"alpha.member",role:"admin",limit:20})).map((member)=>member.userId),
+      [alphaId]
+    );
+
+    assert.deepEqual(
+      await store.findWorkspaceMembershipView("workspace_atomic",alphaId),
+      {workspaceId:"workspace_atomic",userId:alphaId,role:"admin",displayName:"Alpha Person",email:"alpha.member@example.test",createdAt:members[0]!.createdAt,updatedAt:members[0]!.createdAt}
+    );
+    assert.deepEqual(
+      await store.findProjectMembershipView("project_atomic",alphaId),
+      {projectId:"project_atomic",userId:alphaId,role:"admin",displayName:"Alpha Person",email:"alpha.member@example.test",createdAt:members[0]!.createdAt,updatedAt:members[0]!.createdAt}
+    );
+
+    const candidates=await store.listProjectMembershipCandidatesPage("project_atomic",{q:"candidate only",limit:20});
+    assert.deepEqual(candidates,[{userId:candidateId,displayName:"Candidate Only",email:"candidate@example.test",createdAt:members[3]!.createdAt}]);
+    assert.equal((await store.listProjectMembershipCandidatesPage("project_atomic",{q:"alpha",limit:20})).length,0);
+
+    const identities=await store.findProjectMembershipIdentities("project_atomic",[astralId,alphaId,"user_missing"]);
+    assert.deepEqual(new Map(identities.map((identity)=>[identity.userId,identity])),new Map([
+      [alphaId,{userId:alphaId,displayName:"Alpha Person",email:"alpha.member@example.test"}],
+      [astralId,{userId:astralId,displayName:"Astral",email:"astral@example.test"}]
+    ]));
+    await assert.rejects(()=>store.findProjectMembershipIdentities("project_atomic",Array.from({length:201},(_,index)=>`user_${index}`)),/exceeds 200 users/);
+
+    const fanout=await store.listProjectMembershipsForFanout("project_atomic");
+    assert.equal(projectFirst.length,3);
+    assert.deepEqual(fanout.map((member)=>member.userId),["user_atomic",alphaId,highBmpId,astralId]);
+  });
+
   it("uses stable keysets, ordinal title order, and literal Task search patterns",async()=>{
     const records=[
       {id:"task_page_percent",title:"100%",createdAt:"2026-07-23T00:00:01.000Z"},
