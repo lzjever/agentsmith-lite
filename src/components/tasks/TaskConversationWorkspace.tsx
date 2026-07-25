@@ -43,6 +43,11 @@ type HistoryAnchor = { interactionId: string; offset: number };
 
 export function TaskConversationWorkspace({
   taskId,
+  userId,
+  projectId,
+  activeSandboxesHref,
+  canManagePolicy,
+  policyHref,
   initialSnapshot,
   presentation,
   onPresentationChange,
@@ -50,6 +55,11 @@ export function TaskConversationWorkspace({
   onArtifactPublished
 }: {
   taskId: string;
+  userId: string;
+  projectId: string;
+  activeSandboxesHref: string;
+  canManagePolicy: boolean;
+  policyHref: string;
   initialSnapshot: TaskInteractionSnapshot;
   presentation: TaskDetail;
   onPresentationChange: (presentation: TaskDetail) => void;
@@ -341,8 +351,7 @@ export function TaskConversationWorkspace({
 
   async function send(content: string) {
     const identity = `${taskId}:${content}`;
-    dispatch({ type: "message_sent" });
-    scrollToLatest();
+    dispatch({ type: "message_send_requested" });
     let receipt: TaskMessageReceipt;
     try {
       receipt = await apiClient.sendTaskMessage(
@@ -353,12 +362,26 @@ export function TaskConversationWorkspace({
       mutationKeysRef.current.complete("task-message", identity);
     } catch (reason) {
       mutationKeysRef.current.completeApiFailure(reason, "task-message", identity);
+      const canonical = reason instanceof ApiError ? reason.presentation ?? undefined : undefined;
+      dispatch({ type: "message_rejected", ...(canonical ? { presentation: canonical } : {}) });
+      if (canonical) handlers.current.onPresentationChange(canonical);
+      if (
+        reason instanceof ApiError
+        && (
+          reason.code === "project_sandbox_capacity_reached"
+          || reason.code === "substrate_sandbox_capacity_reached"
+          || reason.code === "sandbox_start_failed"
+        )
+      ) throw reason;
       await recoverMutation(reason);
       throw reason;
     }
-    await refreshAfterMessageMutation();
     const safeError = taskMessageReceiptError(receipt);
     if (safeError) throw new Error(safeError);
+    dispatch({ type: "message_accepted", receipt });
+    handlers.current.onPresentationChange(receipt.presentation);
+    scrollToLatest();
+    void refreshAfterMessageMutation();
   }
 
   async function updateQueued(messageId: string, content: string) {
@@ -614,6 +637,12 @@ export function TaskConversationWorkspace({
         </div>
       ) : null}
       <TaskComposer
+        userId={userId}
+        projectId={projectId}
+        taskId={taskId}
+        activeSandboxesHref={activeSandboxesHref}
+        canManagePolicy={canManagePolicy}
+        policyHref={policyHref}
         capabilities={capabilities}
         queuedMessages={state.queuedMessages}
         busy={aborting}

@@ -9,6 +9,8 @@ import { ThemeToggle } from "../theme/ThemeToggle";
 import { Logo } from "./Logo";
 import { ShellNavigation } from "./Sidebar";
 import { ProjectSwitcher, Topbar } from "./Topbar";
+import { CurrentUserProvider } from "./current-user";
+import { clearTaskDraftsForProject, clearTaskDraftsForUser, taskDraftStorage } from "../tasks/task-draft-snapshot";
 
 type ShellProps={children:ReactNode;workspaceId?:string;projectId?:string};
 type ShellState="loading"|"ready"|"login"|"error";
@@ -17,6 +19,7 @@ type ExactReadIssue="unavailable"|"outage";
 
 export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const mounted=useRef(true);
+  const userRef=useRef<CurrentUser|undefined>(undefined);
   const identityRequest=useRef(0);
   const navigationRequest=useRef(0);
   const hasNavigation=useRef(false);
@@ -39,6 +42,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const [quickProjects,setQuickProjects]=useState<ProjectDirectoryItem[]>([]);
   const [workspaceIssue,setWorkspaceIssue]=useState<ExactReadIssue>();
   const [projectIssue,setProjectIssue]=useState<ExactReadIssue>();
+  userRef.current=user;
 
   async function loadIdentity(preservePage=false) {
     const request=++identityRequest.current;
@@ -46,6 +50,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     try {
       const identity=await apiClient.currentIdentity();
       if(!mounted.current||request!==identityRequest.current)return;
+      if(userRef.current&&userRef.current.id!==identity.user.id)clearTaskDraftsForUser(taskDraftStorage(),userRef.current.id);
       setUser(identity.user);
       setStatus("ready");
     } catch(error) {
@@ -70,6 +75,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     else if(!preservePage)setQuickWorkspaces([]);
     const nextWorkspaceIssue=workspaceResult.status==="rejected"?exactReadIssue(workspaceResult.reason):undefined;
     const nextProjectIssue=projectResult.status==="rejected"?exactReadIssue(projectResult.reason):undefined;
+    if(nextProjectIssue==="unavailable"&&scope.projectId&&userRef.current)clearTaskDraftsForProject(taskDraftStorage(),userRef.current.id,scope.projectId);
     if(workspaceResult.status==="fulfilled"){setWorkspace(workspaceResult.value);setWorkspaceIssue(undefined);}
     else {setWorkspace(undefined);setWorkspaceIssue(nextWorkspaceIssue);}
     if(projectResult.status==="fulfilled"){setProject(projectResult.value);setProjectIssue(undefined);}
@@ -82,7 +88,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
 
   useEffect(()=>{
     mounted.current=true;
-    const expireSession=()=>{identityRequest.current+=1;navigationRequest.current+=1;setUser(undefined);setStatus("login");};
+    const expireSession=()=>{identityRequest.current+=1;navigationRequest.current+=1;if(userRef.current)clearTaskDraftsForUser(taskDraftStorage(),userRef.current.id);setUser(undefined);setStatus("login");};
     const refreshDirectory=()=>{void loadNavigation(true);};
     const refreshIdentity=()=>{void loadIdentity(true);};
     window.addEventListener(SESSION_EXPIRED_EVENT,expireSession);
@@ -92,6 +98,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   },[]);
   useEffect(()=>{void loadIdentity();setCollapsed(window.localStorage.getItem("agentsmith-sidebar-collapsed")==="1");},[]);
   useEffect(()=>{void loadNavigation(hasNavigation.current);},[workspaceId,requestedProjectId]);
+  useEffect(()=>{if(projectIssue==="unavailable"&&requestedProjectId&&user)clearTaskDraftsForProject(taskDraftStorage(),user.id,requestedProjectId);},[projectIssue,requestedProjectId,user]);
   useEffect(()=>{const target=contentStart.current;if(!target)return;if(lastPathname.current&&lastPathname.current!==pathname)target.focus();lastPathname.current=pathname;},[pathname,status,directoryState]);
 
   function setNavigationCollapsed(next:boolean) {
@@ -125,7 +132,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     topNav={<Topbar user={user!} workspaces={quickWorkspaces} projects={quickProjects} workspace={workspaceRecord} project={navigationProject} profileReturnTo={profileReturnTo} onOpenNavigation={()=>setMobileNavigationOpen(true)}/>}
     sideNav={<ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed}/>}
     mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord&&navigationProject?<div className="shrink-0 min-w-0 border-b border-border p-3"><ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/></div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>}
-  ><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState==="error"?<DirectoryNotice onRetry={()=>loadNavigation(true)}/>:null}{contextError??children}</div></AstryxAppShell>;
+  ><CurrentUserProvider user={user!}><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState==="error"?<DirectoryNotice onRetry={()=>loadNavigation(true)}/>:null}{contextError??children}</div></CurrentUserProvider></AstryxAppShell>;
 }
 
 function ShellLoadingFrame(){return <><DocumentTitle title="Loading"/><div className="min-h-screen bg-body"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><Logo linked={false}/></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-60 border-r border-border bg-muted md:block" aria-hidden="true"/><main className="grid min-w-0 flex-1 place-items-center"><Heading level={1} className="sr-only">Loading AgentSmith</Heading><Spinner label="Loading workspace..."/></main></div></div></>}

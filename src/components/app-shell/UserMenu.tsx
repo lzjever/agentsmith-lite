@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { apiClient, type CurrentUser } from "../../lib/api/client";
 import { isCurrentAppPage } from "../../lib/navigation/return-path";
 import { userMenuIdentity } from "./user-menu-identity";
+import { clearTaskDraftsForUser, taskDraftStorage } from "../tasks/task-draft-snapshot";
 
 export function UserMenu({ user, workspaceId, returnTo }: { user: CurrentUser; workspaceId?: string; returnTo?: string }) {
   const [imageFailed, setImageFailed] = useState(false);
@@ -22,6 +23,7 @@ export function UserMenu({ user, workspaceId, returnTo }: { user: CurrentUser; w
     setSignOutError("");
     try {
       const result = await apiClient.logout();
+      clearTaskDraftsForUser(taskDraftStorage(), user.id);
       window.location.assign(result.redirectUrl);
     } catch {
       signingOutRef.current = false;

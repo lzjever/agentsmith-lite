@@ -236,7 +236,7 @@ describe("task presentation reducer", () => {
     assert.equal(state.newActivityCount, 1);
   });
 
-  it("returns to following and clears activity after jumping or sending", () => {
+  it("changes no conversation state before acceptance, then follows the accepted receipt", () => {
     const initial = createTaskPresentationState({
       items: [interaction("interaction_1", 1, 10, "First")]
     });
@@ -256,9 +256,42 @@ describe("task presentation reducer", () => {
       type: "interaction_received",
       item: interaction("interaction_3", 1, 30, "Third")
     });
-    const sent = reduceTaskPresentationState(activeAgain, { type: "message_sent" });
+    const requested = reduceTaskPresentationState(activeAgain, { type: "message_send_requested" });
+    assert.strictEqual(requested, activeAgain);
+    const acceptedInteraction = interaction("interaction_accepted", 1, 40, "Accepted");
+    const sent = reduceTaskPresentationState(requested, {
+      type: "message_accepted",
+      receipt: {
+        messageId: "message_accepted",
+        disposition: "accepted_by_active_run",
+        duplicate: false,
+        queuedMessage: null,
+        interaction: acceptedInteraction,
+        presentation: presentation()
+      }
+    });
     assert.equal(sent.followMode, "following");
     assert.equal(sent.newActivityCount, 0);
+    assert.strictEqual(sent.items.at(-1), acceptedInteraction);
+  });
+
+  it("applies a canonical capacity rejection presentation without changing reading state", () => {
+    const initial = reduceTaskPresentationState(
+      createTaskPresentationState({ items: [interaction("interaction_1", 1, 10, "First")] }),
+      { type: "reading_started" }
+    );
+    const rejectedPresentation = {
+      ...presentation(),
+      sandboxState: { state: "released", runId: "run_1", cause: null }
+    } satisfies TaskDetail;
+    const rejected = reduceTaskPresentationState(initial, {
+      type: "message_rejected",
+      presentation: rejectedPresentation
+    });
+    assert.equal(rejected.followMode, "reading");
+    assert.equal(rejected.newActivityCount, 0);
+    assert.strictEqual(rejected.items, initial.items);
+    assert.strictEqual(rejected.presentation, rejectedPresentation);
   });
 
   it("applies parent mutation presentations independently", () => {

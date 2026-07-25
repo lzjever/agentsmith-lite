@@ -207,7 +207,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
 
   const canCreate = capabilitiesState === "ready" && capabilities?.canCreateTasks === true;
   const createReady = canCreate && endpointsState === "ready" && librariesState === "ready" && taskReadyEndpointCount > 0;
-  const subtitle = canCreate ? "Create and follow Botified work for this project." : "Follow Botified work for this project.";
+  const subtitle = canCreate ? "Create and follow agent work for this project." : "Follow agent work for this project.";
 
   function refresh() {
     void load();
@@ -222,7 +222,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {state === "loading" ? <div className="grid min-h-48 place-items-center px-4 py-6"><Spinner label="Loading tasks..." /></div> : null}
     {state === "error" ? <Banner status="error" container="section" title="Tasks unavailable" description={error || "Tasks could not be loaded."} endContent={<AstryxButton label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
     {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <Text display="block" type="supporting" color="secondary" className="mt-4">Your project access is read-only.</Text> : null}{canCreate && endpointsState === "ready" && taskReadyEndpointCount===0 ? <Text display="block" type="supporting" color="secondary" className="mt-4">No task-ready endpoint is available. <Link className="text-primary hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}><Text weight="medium">Open endpoints</Text></Link></Text> : null}</> : null}
-    <TaskCreateDialog projectId={projectId} endpointPickerRevision={endpointPickerRevision} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    <TaskCreateDialog projectId={projectId} endpointPickerRevision={endpointPickerRevision} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={capabilities?.canManagePolicy === true} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 

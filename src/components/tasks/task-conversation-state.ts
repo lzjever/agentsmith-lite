@@ -56,7 +56,9 @@ export type TaskPresentationAction =
   | { type: "assistant_preview_cleared"; interactionId: string }
   | { type: "reading_started" }
   | { type: "jump_to_latest" }
-  | { type: "message_sent" };
+  | { type: "message_send_requested" }
+  | { type: "message_accepted"; receipt: TaskMessageReceipt }
+  | { type: "message_rejected"; presentation?: TaskDetail };
 
 export function createTaskPresentationState(
   initial: Partial<Pick<TaskPresentationState, "items" | "queuedMessages" | "presentation" | "connection" | "followMode">>
@@ -167,9 +169,34 @@ export function reduceTaskPresentationState(
     case "reading_started":
       return state.followMode === "reading" ? state : { ...state, followMode: "reading" };
     case "jump_to_latest":
-    case "message_sent":
       if (state.followMode === "following" && state.newActivityCount === 0) return state;
       return { ...state, followMode: "following", newActivityCount: 0 };
+    case "message_send_requested":
+      return state;
+    case "message_accepted": {
+      const items = action.receipt.interaction
+        ? reconcileTaskInteractions(state.items, [action.receipt.interaction])
+        : state.items;
+      const queuedMessages = action.receipt.queuedMessage
+        ? [
+            ...state.queuedMessages.filter((message) => message.id !== action.receipt.queuedMessage?.id),
+            action.receipt.queuedMessage
+          ]
+        : state.queuedMessages;
+      return {
+        ...state,
+        items,
+        itemIndex: items === state.items ? state.itemIndex : createItemIndex(items),
+        queuedMessages,
+        presentation: action.receipt.presentation,
+        followMode: "following",
+        newActivityCount: 0
+      };
+    }
+    case "message_rejected":
+      return action.presentation && action.presentation !== state.presentation
+        ? { ...state, presentation: action.presentation }
+        : state;
     default:
       return assertNever(action);
   }

@@ -4,11 +4,11 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
-export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt } from "../../../packages/contracts/src/api.js";
+export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
 export type ProjectAuditEvent = ProjectAuditEventView;
@@ -22,8 +22,26 @@ export type ProjectSandboxRunHistoryPage = ApiProjectSandboxRunHistoryPage;
 export type ProjectUsageOverview = ApiProjectUsageOverview;
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string, public readonly code?: string) {
+  readonly code: string | undefined;
+  readonly retryable: boolean | undefined;
+  readonly details: unknown;
+  readonly presentation: TaskPresentation | null | undefined;
+
+  constructor(
+    public readonly status: number,
+    message: string,
+    options?: string | {
+      code?: string;
+      retryable?: boolean;
+      details?: unknown;
+      presentation?: TaskPresentation | null;
+    }
+  ) {
     super(message);
+    this.code = typeof options === "string" ? options : options?.code;
+    this.retryable = typeof options === "object" ? options.retryable : undefined;
+    this.details = typeof options === "object" ? options.details : undefined;
+    this.presentation = typeof options === "object" ? options.presentation : undefined;
   }
 }
 
@@ -157,7 +175,18 @@ export function taskArtifactDownloadUrlForApiBase(basePath: string, taskId: stri
 }
 
 let csrfToken: string | undefined;
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+const structuredSandboxErrorCodes = new Set([
+  "project_sandbox_capacity_reached",
+  "substrate_sandbox_capacity_reached",
+  "sandbox_start_failed"
+]);
+type SandboxErrorAction = "create" | "send" | "terminal";
+
+async function apiResponse(
+  path: string,
+  init: RequestInit = {},
+  sandboxErrorAction?: SandboxErrorAction
+): Promise<Response> {
   const method = init.method?.toUpperCase() || "GET";
   const headers = new Headers(init.headers);
   if (method !== "GET" && method !== "HEAD") {
@@ -166,7 +195,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set("content-type", "application/json");
   }
   const response = observeSession(await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" }));
-  if (!response.ok) throw await apiResponseError(response);
+  if (!response.ok) throw await apiResponseError(response, sandboxErrorAction);
+  return response;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  sandboxErrorAction?: SandboxErrorAction
+): Promise<T> {
+  const response = await apiResponse(path, init, sandboxErrorAction);
   return response.json() as Promise<T>;
 }
 
@@ -178,11 +216,10 @@ function observeSession(response: Response): Response {
   return response;
 }
 
-async function errorMessage(response: Response): Promise<string> {
-  return (await apiResponseError(response)).message;
-}
-
-async function apiResponseError(response: Response): Promise<Error> {
+async function apiResponseError(
+  response: Response,
+  sandboxErrorAction?: SandboxErrorAction
+): Promise<Error> {
   const text = await response.text();
   if (!text) return new ApiError(response.status, response.statusText);
   try {
@@ -191,9 +228,28 @@ async function apiResponseError(response: Response): Promise<Error> {
       const code = (body as { code?: unknown }).code;
       const error = (body as { error?: unknown }).error;
       if (code === "idempotency_in_progress" && typeof error === "string") return new IdempotencyPendingError(error);
-      if (typeof error === "string") return new ApiError(response.status, error, typeof code === "string" ? code : undefined);
+      if (typeof error === "string") {
+        const genericCode = typeof code === "string" && !structuredSandboxErrorCodes.has(code)
+          ? code
+          : undefined;
+        return new ApiError(response.status, error, genericCode);
+      }
       if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
-        return new ApiError(response.status, (error as { message: string }).message);
+        const envelope = error as Record<string, unknown> & { message: string };
+        if (typeof envelope.code === "string" && structuredSandboxErrorCodes.has(envelope.code)) {
+          const options = strictSandboxErrorOptions(envelope, sandboxErrorAction);
+          return options
+            ? new ApiError(response.status, envelope.message, options)
+            : new ApiError(response.status, envelope.message);
+        }
+        return new ApiError(response.status, envelope.message, {
+          ...(typeof envelope.code === "string" ? { code: envelope.code } : {}),
+          ...(typeof envelope.retryable === "boolean" ? { retryable: envelope.retryable } : {}),
+          ...(Object.hasOwn(envelope, "details") ? { details: envelope.details } : {}),
+          ...(envelope.presentation === null || isTaskPresentation(envelope.presentation)
+            ? { presentation: envelope.presentation }
+            : {})
+        });
       }
     }
   } catch {
@@ -206,8 +262,18 @@ function json<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body
   return request<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
-function jsonIdempotent<T>(path: string, method: "POST" | "PUT" | "PATCH" | "DELETE", idempotencyKey: string, body?: unknown): Promise<T> {
-  return request<T>(path, { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+function jsonIdempotent<T>(
+  path: string,
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
+  idempotencyKey: string,
+  body?: unknown,
+  sandboxErrorAction?: SandboxErrorAction
+): Promise<T> {
+  return request<T>(
+    path,
+    { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) },
+    sandboxErrorAction
+  );
 }
 
 function directoryQuery(query:{q?:string;role?:string;mode?:string;cursor?:string;limit?:number;userId?:string}):string {
@@ -372,7 +438,7 @@ export const apiClient = {
   libraryFileDownloadUrl: (projectId: string, libraryId: string, path: string) => `${apiBasePath}/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files/download?path=${encodeURIComponent(path)}`,
   async previewLibraryFile(projectId: string, libraryId: string, path: string, signal?: AbortSignal): Promise<Blob> {
     const response = observeSession(await fetch(`${apiBasePath}/projects/${encodeURIComponent(projectId)}/file-libraries/${encodeURIComponent(libraryId)}/files/preview?path=${encodeURIComponent(path)}`, { credentials: "same-origin", ...(signal ? { signal } : {}) }));
-    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+    if (!response.ok) throw await apiResponseError(response);
     return response.blob();
   },
   tasks: (projectId: string, query: TaskListQuery = {}) => {
@@ -385,10 +451,30 @@ export const apiClient = {
     if (query.limit) params.set("limit", String(query.limit));
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
-  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input),
+  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input, "create"),
   task: (taskId: string) => request<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`),
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
   taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
+  async startTaskTerminal(taskId: string, idempotencyKey: string, signal?: AbortSignal): Promise<TaskTerminalStartReceipt> {
+    const response = await apiResponse(`/tasks/${encodeURIComponent(taskId)}/terminal/start`, {
+      method: "POST",
+      headers: { "idempotency-key": idempotencyKey },
+      body: JSON.stringify({}),
+      ...(signal ? { signal } : {})
+    }, "terminal");
+    const receipt: unknown = await response.json();
+    if (
+      !isRecord(receipt)
+      || typeof receipt.runId !== "string"
+      || !isTaskPresentation(receipt.presentation)
+      || response.status === 202 && receipt.status !== "in_progress"
+      || response.status === 200 && receipt.status !== "active"
+      || response.status === 202 && receipt.presentation.sandboxState.state !== "starting"
+      || response.status === 200 && receipt.presentation.sandboxState.state !== "active"
+      || response.status !== 200 && response.status !== 202
+    ) throw new ApiError(502, "Task terminal start returned an invalid receipt.");
+    return receipt as TaskTerminalStartReceipt;
+  },
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
   async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
     const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
@@ -396,7 +482,8 @@ export const apiClient = {
       headers: { accept: "text/event-stream", ...(cursor ? { "last-event-id": cursor } : {}) },
       signal
     }));
-    if (!response.ok || !response.body) throw new ApiError(response.status, await errorMessage(response));
+    if (!response.ok) throw await apiResponseError(response);
+    if (!response.body) throw new ApiError(502, "Task interaction stream has no response body.");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -426,7 +513,7 @@ export const apiClient = {
     receive(frames.slice(0, -1));
     if (frames.at(-1)?.trim()) receive([frames.at(-1)!]);
   },
-  sendTaskMessage: (taskId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages`, "POST", idempotencyKey, { content }),
+  sendTaskMessage: (taskId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages`, "POST", idempotencyKey, { content }, "send"),
   updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
@@ -445,7 +532,7 @@ export const apiClient = {
   artifactDownloadUrl: (taskId: string, artifactId: string) => taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId),
   async downloadTaskArtifact(taskId: string, artifactId: string, signal?: AbortSignal): Promise<Blob> {
     const response = observeSession(await fetch(taskArtifactDownloadUrlForApiBase(apiBasePath, taskId, artifactId), { credentials: "same-origin", ...(signal ? { signal } : {}) }));
-    if (!response.ok) throw new ApiError(response.status, await errorMessage(response));
+    if (!response.ok) throw await apiResponseError(response);
     return response.blob();
   }
 };
@@ -579,6 +666,97 @@ function isTaskPresentation(value:unknown):value is TaskPresentation{
     &&isRecord(value.currentTurn)&&isStringUnion(value.currentTurn.state,["ready","starting","queued","running","aborting"])
     &&isRecord(value.sandboxState)&&isStringUnion(value.sandboxState.state,["starting","active","release_requested","released","failed"])
     &&isTaskCapabilities(value.capabilities);
+}
+
+function strictSandboxErrorOptions(
+  envelope: Record<string, unknown>,
+  action: SandboxErrorAction | undefined
+): {
+  code: string;
+  retryable: true;
+  details: unknown;
+  presentation: TaskPresentation | null;
+} | null {
+  const keys = Object.keys(envelope).sort();
+  if (
+    keys.length !== 5
+    || keys[0] !== "code"
+    || keys[1] !== "details"
+    || keys[2] !== "message"
+    || keys[3] !== "presentation"
+    || keys[4] !== "retryable"
+    ||
+    typeof envelope.code !== "string"
+    || envelope.retryable !== true
+    || !Object.hasOwn(envelope, "details")
+    || !Object.hasOwn(envelope, "presentation")
+  ) return null;
+  if (!action) return null;
+  const presentation = envelope.presentation;
+  if (envelope.code === "project_sandbox_capacity_reached") {
+    if (!isStrictSandboxCapacityDetails(envelope.details)) return null;
+    if (!validCapacityPresentation(action, presentation)) return null;
+    return {
+      code: envelope.code,
+      retryable: true,
+      details: envelope.details,
+      presentation
+    };
+  }
+  if (envelope.code === "substrate_sandbox_capacity_reached") {
+    if (envelope.details !== null) return null;
+    if (!validCapacityPresentation(action, presentation)) return null;
+    return {
+      code: envelope.code,
+      retryable: true,
+      details: null,
+      presentation
+    };
+  }
+  if (envelope.code === "sandbox_start_failed") {
+    if (
+      action !== "terminal"
+      || envelope.details !== null
+      || !isTaskPresentation(presentation)
+      || (
+        presentation.sandboxState.state !== "failed"
+        && presentation.sandboxState.state !== "release_requested"
+      )
+    ) return null;
+    return {
+      code: envelope.code,
+      retryable: true,
+      details: null,
+      presentation
+    };
+  }
+  return null;
+}
+
+function validCapacityPresentation(
+  action: SandboxErrorAction,
+  presentation: unknown
+): presentation is TaskPresentation | null {
+  if (action === "create") return presentation === null;
+  return isTaskPresentation(presentation)
+    && presentation.sandboxState.state === "released";
+}
+
+function isStrictSandboxCapacityDetails(value: unknown): value is {
+  activeSandboxes: number;
+  sandboxLimit: number;
+} {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value).sort();
+  return keys.length === 2
+    && keys[0] === "activeSandboxes"
+    && keys[1] === "sandboxLimit"
+    && typeof value.activeSandboxes === "number"
+    && Number.isInteger(value.activeSandboxes)
+    && value.activeSandboxes >= 0
+    && typeof value.sandboxLimit === "number"
+    && Number.isInteger(value.sandboxLimit)
+    && value.sandboxLimit >= 0;
 }
 
 function isTaskCapabilities(value: unknown): value is TaskCapabilities {

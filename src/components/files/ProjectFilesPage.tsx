@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { Banner, Button, Collapsible, EmptyState, FileInput, Heading, IconButton, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
@@ -17,6 +17,7 @@ import {
   type InlinePreviewRequest
 } from "../media/inline-preview";
 import { ConfirmationDialog, Dialog } from "../ui/Dialog";
+import { filesReturnToAfterNavigation } from "../tasks/task-peer-navigation";
 import {
   createFileBrowserState,
   reduceFileBrowserState,
@@ -90,6 +91,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [libraryDeleteError, setLibraryDeleteError] = useState("");
   const [replaceError, setReplaceError] = useState("");
   const [libraryMutationPending, setLibraryMutationPending] = useState(false);
+  const [validatedReturnTo, setValidatedReturnTo] = useState<string | null>(null);
 
   const invalidateFileReads = useCallback(() => {
     fileLoadVersion.current += 1;
@@ -153,6 +155,15 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   useEffect(() => {
     mounted.current = true;
     const location = readFileBrowserLocation();
+    if (workspaceId) {
+      const scope = filesTaskReturnScope(window.location.pathname, workspaceId, projectId);
+      setValidatedReturnTo((current) => filesReturnToAfterNavigation(
+        current,
+        new URLSearchParams(window.location.search).get("returnTo"),
+        scope,
+        "location"
+      ));
+    }
     selectedLibraryRef.current = location.libraryId;
     pathRef.current = location.path;
     setSelectedLibraryId(location.libraryId);
@@ -171,13 +182,22 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   useEffect(() => {
     function restoreLocation() {
       const location = readFileBrowserLocation();
+      if (workspaceId) {
+        const scope = filesTaskReturnScope(window.location.pathname, workspaceId, projectId);
+        setValidatedReturnTo((current) => filesReturnToAfterNavigation(
+          current,
+          new URLSearchParams(window.location.search).get("returnTo"),
+          scope,
+          "location"
+        ));
+      }
       const available = librariesRef.current;
       const nextId = available.length === 0 || available.some((library) => library.id === location.libraryId) ? location.libraryId : available[0]?.id ?? null;
       applyLocation(nextId, nextId === location.libraryId ? location.path : "");
     }
     window.addEventListener("popstate", restoreLocation);
     return () => window.removeEventListener("popstate", restoreLocation);
-  }, [applyLocation]);
+  }, [applyLocation, projectId, workspaceId]);
 
   const loadFiles = useCallback(async () => {
     if (!selectedLibraryId) {
@@ -487,8 +507,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const noMatches = browser.entries.length > 0 && browser.query.trim().length > 0 && page.totalCount === 0;
   const initialFilesLoading = browser.entries.length === 0 && (browser.loadState === "idle" || browser.loadState === "loading");
   const initialFilesError = browser.entries.length === 0 && browser.loadState === "error";
+  const returnTo = validatedReturnTo;
 
   return <PageLayout contentWidth="full" header={<PageHeader title="Files" subtitle="Browse and manage the File Libraries available in this project." actions={<div className="flex items-center gap-2"><IconButton label="Refresh File Libraries" tooltip="Refresh File Libraries" variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void loadLibraries()} isDisabled={librariesState === "loading" || mutationBusy} />{canCreateLibrary ? <Button label="Create library" variant="primary" size="lg" icon={<Plus size={16} />} onClick={openCreateLibrary} /> : null}</div>} />}>
+    {returnTo ? <Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={returnTo}><ArrowLeft size={16} /><Text type="supporting" color="secondary">Back to Task</Text></Link> : null}
     <MobileLibraryControls libraries={libraries} selectedLibrary={selectedLibrary} state={librariesState} message={librariesMessage} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
       <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
@@ -695,6 +717,15 @@ function libraryBreadcrumbs(libraryName: string, path: string): Array<{ label: s
 function readFileBrowserLocation(): { libraryId: string | null; path: string } {
   const params = new URLSearchParams(window.location.search);
   return { libraryId: params.get("libraryId"), path: normalizeLibraryPath(params.get("path")) };
+}
+
+function filesTaskReturnScope(currentPath: string, workspaceId: string, projectId: string) {
+  const route = `/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/files`;
+  return {
+    appBasePath: currentPath.endsWith(route) ? currentPath.slice(0, -route.length) : "",
+    workspaceId,
+    projectId
+  };
 }
 
 function writeFileBrowserLocation(libraryId: string | null, path: string, replace: boolean) {

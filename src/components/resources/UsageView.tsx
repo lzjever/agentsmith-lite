@@ -18,7 +18,7 @@ import {
   Text,
   TextInput,
 } from "@astryxdesign/core";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
 import { apiClient, type
   ProjectMemberCandidate,
   ProjectEndpointUsagePage,
@@ -34,6 +34,10 @@ import {
 } from "../../lib/format/date";
 import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
+import {
+  decideSandboxUsageAnchorActivation,
+  type SandboxUsageAnchorActivationState
+} from "./sandbox-usage-anchor";
 
 const labels = {
   activeSandboxes: "Active sandboxes",
@@ -106,6 +110,31 @@ export function UsageView({
   onMeasureFileStorage: () => Promise<void>;
 }) {
   const overviewCopy = usageErrorCopy(overviewError);
+  const overviewLoaded = overview !== undefined;
+  const sandboxUsageRegion = useRef<HTMLElement>(null);
+  const sandboxAnchorActivation = useRef<SandboxUsageAnchorActivationState>({
+    activated: false
+  });
+
+  useEffect(() => {
+    const decision = decideSandboxUsageAnchorActivation(
+      sandboxAnchorActivation.current,
+      {
+        hash: window.location.hash,
+        overviewLoaded
+      }
+    );
+    sandboxAnchorActivation.current = decision.state;
+    if (!decision.activate) return;
+    const frame = window.requestAnimationFrame(() => {
+      const region = sandboxUsageRegion.current;
+      if (!region) return;
+      region.scrollIntoView({ block: "start" });
+      region.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [overviewLoaded]);
+
   return (
     <div className="space-y-6">
       {scopeNotice ? <Banner status="warning" title="Usage scope changed" description={scopeNotice} /> : null}
@@ -149,27 +178,28 @@ export function UsageView({
             selectedEndpointId={selectedEndpointId}
             onEndpointChange={onEndpointChange}
           />
-          <SandboxUsage
-            projectId={projectId}
-            overview={overview}
-            currentUserId={currentUserId}
-            selectedMember={selectedMember}
-            selectedSandboxUserId={selectedSandboxUserId}
-            historyOpen={historyOpen}
-            history={history}
-            historyPageIndex={historyPageIndex}
-            historyState={historyState}
-            historyError={historyError}
-            historyOperation={historyOperation}
-            onSandboxUserChange={onSandboxUserChange}
-            onHistoryOpenChange={onHistoryOpenChange}
-            onHistoryPrevious={onHistoryPrevious}
-            onHistoryNext={onHistoryNext}
-            onHistoryRefresh={onHistoryRefresh}
-            onHistoryRetry={onHistoryRetry}
-          />
         </>
       ) : null}
+      <SandboxUsage
+        regionRef={sandboxUsageRegion}
+        projectId={projectId}
+        overview={overview}
+        currentUserId={currentUserId}
+        selectedMember={selectedMember}
+        selectedSandboxUserId={selectedSandboxUserId}
+        historyOpen={historyOpen}
+        history={history}
+        historyPageIndex={historyPageIndex}
+        historyState={historyState}
+        historyError={historyError}
+        historyOperation={historyOperation}
+        onSandboxUserChange={onSandboxUserChange}
+        onHistoryOpenChange={onHistoryOpenChange}
+        onHistoryPrevious={onHistoryPrevious}
+        onHistoryNext={onHistoryNext}
+        onHistoryRefresh={onHistoryRefresh}
+        onHistoryRetry={onHistoryRetry}
+      />
     </div>
   );
 }
@@ -410,6 +440,7 @@ function ProviderDailyTrend({
 }
 
 function SandboxUsage({
+  regionRef,
   projectId,
   overview,
   currentUserId,
@@ -428,8 +459,9 @@ function SandboxUsage({
   onHistoryRefresh,
   onHistoryRetry,
 }: {
+  regionRef: RefObject<HTMLElement | null>;
   projectId: string;
-  overview: ProjectUsageOverview;
+  overview: ProjectUsageOverview | undefined;
   currentUserId: string | undefined;
   selectedMember: ProjectMemberCandidate | undefined;
   selectedSandboxUserId: string | undefined;
@@ -446,6 +478,16 @@ function SandboxUsage({
   onHistoryRefresh: () => void;
   onHistoryRetry: () => void;
 }) {
+  if (!overview) {
+    return (
+      <section
+        ref={regionRef}
+        id="sandbox-usage"
+        tabIndex={-1}
+        aria-label="Sandbox allocations"
+      />
+    );
+  }
   const sandbox = overview.sandbox;
   const memberScope = selectedMember
     ? memberLabel(selectedMember)
@@ -453,10 +495,16 @@ function SandboxUsage({
       ? "You"
       : sandbox.selectedUserId;
   return (
-    <section className="space-y-5" aria-labelledby="sandbox-usage">
+    <section
+      ref={regionRef}
+      id="sandbox-usage"
+      tabIndex={-1}
+      className="space-y-5 outline-none"
+      aria-labelledby="sandbox-usage-heading"
+    >
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <Heading level={2} id="sandbox-usage">Sandbox allocations</Heading>
+          <Heading level={2} id="sandbox-usage-heading">Sandbox allocations</Heading>
           <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
             {memberScope} · summary from {formatLocalDateTime(sandbox.summaryStartedAt)} through {formatLocalDateTime(sandbox.measuredAt)}
           </Text>

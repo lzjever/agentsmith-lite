@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleAlert, CircleCheck, CircleDot, Loader2, Square } from "lucide-react";
+import { CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
 import { Banner, Button as AstryxButton, Spinner, Text } from "@astryxdesign/core";
 import { useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
@@ -34,7 +34,7 @@ export function TaskPreviewNotice({ message, onRetry }: { message: string; onRet
 }
 
 function taskStatePresentation(currentTurn: TaskDetail["currentTurn"], sandboxState: TaskDetail["sandboxState"]) {
-  if (sandboxState.state === "released") return { icon:CircleCheck, iconLabel:"Sandbox released", iconClass:"text-icon-secondary", label:"Sandbox released", spinning:false };
+  if (sandboxState.state === "released") return { icon:CircleDot, iconLabel:"Sandbox stopped", iconClass:"text-icon-secondary", label:"Sandbox stopped. Send a message or explicitly start Terminal to continue this same Task, session, and File Library.", spinning:false };
   if (sandboxState.state === "failed") return { icon:CircleAlert, iconLabel:"Sandbox unavailable", iconClass:"text-error", label:sandboxState.cause?.message??"Sandbox is unavailable", spinning:false };
   if (sandboxState.state === "release_requested") return { icon:Loader2, iconLabel:"Sandbox release requested", iconClass:"text-icon-secondary", label:"Releasing sandbox", spinning:true };
   if (sandboxState.state === "starting") return { icon:Loader2, iconLabel:"Sandbox starting", iconClass:"text-icon-secondary", label:"Starting sandbox", spinning:true };

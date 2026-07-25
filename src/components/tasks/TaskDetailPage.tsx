@@ -1,12 +1,13 @@
 "use client";
 
-import { Archive, ArrowLeft, CircleCheck, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
+import { Archive, ArrowLeft, Power, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
 import { Banner, Button as AstryxButton, Collapsible, Heading, IconButton, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import type { TaskDetail as TaskDetailProjection, TaskInteractionSnapshot } from "../../lib/api/client";
 import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtifact, type TaskArtifactKind } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
+import { useCurrentUser } from "../app-shell/current-user";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { RouteLoadingPage } from "../layout/RouteStatePage";
@@ -15,10 +16,19 @@ import { TaskArtifactsPanel } from "./TaskArtifactsPanel";
 import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskLifecycleActions } from "./TaskLifecycleActions";
 import { TaskTerminalPanel } from "./TaskTerminalPanel";
+import { clearTaskDraft, shouldClearTaskDraftForAccessStatus, taskDraftStorage, type TaskDraftIdentity } from "./task-draft-snapshot";
 import { useTaskMutationKeys } from "./task-mutation-key";
-import { taskProjectionLabel } from "./task-ui";
+import {
+  createTerminalIntentState,
+  reduceTerminalIntent
+} from "./task-terminal-state";
+import {
+  canonicalTaskHref,
+  taskViewFromSearch,
+  type TaskPathScope,
+  type TaskWorkspaceView
+} from "./task-peer-navigation";
 
-type WorkspaceMode = "conversation" | "terminal" | "artifacts";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type TaskLoadState = LoadState | "missing" | "forbidden";
 type ArtifactFilter = "all" | TaskArtifactKind;
@@ -30,11 +40,12 @@ type ArtifactPageState = {
   nextCursor: string | null;
 };
 
-export function TaskDetailPage({ workspaceId, projectId, taskId, artifactsOnly = false }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly?: boolean }) {
-  return <TaskDetail key={`${workspaceId}:${projectId}:${taskId}:${artifactsOnly ? "artifacts" : "task"}`} workspaceId={workspaceId} projectId={projectId} taskId={taskId} artifactsOnly={artifactsOnly} />;
+export function TaskDetailPage({ workspaceId, projectId, taskId }: { workspaceId: string; projectId: string; taskId: string }) {
+  return <TaskDetail key={`${workspaceId}:${projectId}:${taskId}`} workspaceId={workspaceId} projectId={projectId} taskId={taskId} />;
 }
 
-function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspaceId: string; projectId: string; taskId: string; artifactsOnly: boolean }) {
+function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; projectId: string; taskId: string }) {
+  const currentUser = useCurrentUser();
   const mounted = useRef(true);
   const mutationKeys = useTaskMutationKeys();
   const [detail, setDetail] = useState<TaskDetailProjection>();
@@ -50,8 +61,22 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const [artifactsState, setArtifactsState] = useState<LoadState>("idle");
   const [taskError, setTaskError] = useState("");
   const [artifactsError, setArtifactsError] = useState("");
-  const [mode, setMode] = useState<WorkspaceMode>(artifactsOnly ? "artifacts" : "conversation");
-  const [terminalStarted, setTerminalStarted] = useState(false);
+  const [mode, setMode] = useState<TaskWorkspaceView>("conversation");
+  const [taskPathScope, setTaskPathScope] = useState<TaskPathScope>({
+    appBasePath: "",
+    workspaceId,
+    projectId,
+    taskId
+  });
+  const [canonicalHref, setCanonicalHref] = useState(
+    `/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`
+  );
+  const [terminalIntent, dispatchTerminalIntent] = useReducer(
+    reduceTerminalIntent,
+    undefined,
+    createTerminalIntentState
+  );
+  const [canManagePolicy, setCanManagePolicy] = useState(false);
   const [refreshingArtifacts, setRefreshingArtifacts] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -61,6 +86,11 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const taskLoadVersion = useRef(0);
   const artifactsLoadVersion = useRef(0);
   const basePath = `/workspaces/${workspaceId}/projects/${projectId}/tasks`;
+  const draftIdentity: TaskDraftIdentity = {
+    userId: currentUser.id,
+    projectId,
+    taskId
+  };
 
   const loadSnapshot = useCallback(async (quiet = false) => {
     const version = ++taskLoadVersion.current;
@@ -80,6 +110,9 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       if (!mounted.current || version !== taskLoadVersion.current) return;
       setTaskError(message(reason));
       if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
+        if (shouldClearTaskDraftForAccessStatus(reason.status)) {
+          clearTaskDraft(taskDraftStorage(), draftIdentity);
+        }
         setDetail(undefined);
         setInteractionSnapshot(undefined);
         setTaskState(reason.status === 404 ? "missing" : "forbidden");
@@ -87,7 +120,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
         setTaskState("error");
       }
     }
-  }, [projectId, taskId, workspaceId]);
+  }, [currentUser.id, projectId, taskId, workspaceId]);
 
   const loadArtifacts = useCallback(async (quiet = false, options: {
     cursor?: string | null;
@@ -138,20 +171,45 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     void loadSnapshot();
   }, [loadSnapshot]);
   useEffect(() => {
-    if(taskState==="ready"&&artifactsState==="idle"&&(artifactsOnly||mode==="artifacts"))void loadArtifacts();
-  },[artifactsOnly,artifactsState,loadArtifacts,mode,taskState]);
+    let disposed = false;
+    void apiClient.projectCapabilities(projectId).then((capabilities) => {
+      if (!disposed) setCanManagePolicy(capabilities.canManagePolicy);
+    }).catch(() => {
+      if (!disposed) setCanManagePolicy(false);
+    });
+    return () => { disposed = true; };
+  }, [projectId]);
   useEffect(() => {
-    if (!releasing && (detail?.sandboxState.state === "active" || detail?.sandboxState.state === "starting")) return;
-    setMode((current) => current === "terminal" ? "conversation" : current);
-    setTerminalStarted(false);
-  }, [detail?.sandboxState.state, releasing]);
+    function restoreView() {
+      const route = `/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}`;
+      const appBasePath = window.location.pathname.endsWith(route)
+        ? window.location.pathname.slice(0, -route.length)
+        : "";
+      const scope = { appBasePath, workspaceId, projectId, taskId };
+      const view = taskViewFromSearch(window.location.search);
+      const href = canonicalTaskHref(scope, view, window.location.hash);
+      const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (current !== href) window.history.replaceState(window.history.state, "", href);
+      setTaskPathScope(scope);
+      setMode(view);
+      setCanonicalHref(href);
+      dispatchTerminalIntent({ type: "history_restored" });
+    }
+    restoreView();
+    window.addEventListener("popstate", restoreView);
+    return () => window.removeEventListener("popstate", restoreView);
+  }, [projectId, taskId, workspaceId]);
+  useEffect(() => {
+    if(taskState==="ready"&&artifactsState==="idle"&&mode==="artifacts")void loadArtifacts();
+  },[artifactsState,loadArtifacts,mode,taskState]);
   useEffect(() => {
     if (!detail?.capabilities.releaseSandbox) setReleaseOpen(false);
   }, [detail?.capabilities.releaseSandbox]);
 
   async function refresh() {
+    dispatchTerminalIntent({ type: "task_refreshed" });
     await loadSnapshot(true);
-    if (artifactsOnly || artifactsState !== "idle") {
+    if (artifactsState !== "idle") {
       await loadArtifacts(false, { cursor: null, cursorStack: [] });
     }
   }
@@ -184,11 +242,14 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     });
   }, [artifactPage.cursorStack, loadArtifacts]);
   const handleConversationUnavailable = useCallback((reason: ApiError) => {
+    if (shouldClearTaskDraftForAccessStatus(reason.status)) {
+      clearTaskDraft(taskDraftStorage(), draftIdentity);
+    }
     setTaskError(reason.message);
     setDetail(undefined);
     setInteractionSnapshot(undefined);
     setTaskState(reason.status === 404 ? "missing" : "forbidden");
-  }, []);
+  }, [currentUser.id, projectId, taskId]);
   const handlePresentationChange=useCallback((presentation:TaskDetailProjection)=>{setDetail(presentation);},[]);
 
   async function deleteTask() {
@@ -198,6 +259,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
       await apiClient.deleteTask(taskId, mutationKeys.key("task-delete", taskId));
       mutationKeys.complete("task-delete", taskId);
       if (!mounted.current) return;
+      clearTaskDraft(taskDraftStorage(), draftIdentity);
       window.location.assign(appPath(basePath));
     } catch (reason) {
       if (!mounted.current) return;
@@ -234,7 +296,7 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
     }
   }
 
-  if (taskState === "loading") return <RouteLoadingPage title={artifactsOnly ? "Artifacts" : "Task"} />;
+  if (taskState === "loading") return <RouteLoadingPage title="Task" />;
   if (taskState === "missing") return <TaskLoadFailure title="Task not found" detail="This task does not exist or is no longer available." basePath={basePath} />;
   if (taskState === "forbidden") return <TaskLoadFailure title="Task unavailable" detail="You no longer have permission to access this task." basePath={basePath} />;
   if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void loadSnapshot()} />;
@@ -243,47 +305,36 @@ function TaskDetail({ workspaceId, projectId, taskId, artifactsOnly }: { workspa
   const { task, capabilities, lifecycle, sandboxState } = detail;
   const mutationBusy = deleting || releasing || lifecycleBusy;
   const releaseLabel=sandboxState.state==="failed"||sandboxState.state==="release_requested"?"Retry release":"Release sandbox";
-  const header = <PageHeader variant="compact" title={artifactsOnly ? "Artifacts" : task.title?.trim() || "Task detail"} subtitle={`${taskProjectionLabel(detail)} · ${task.id}`} actions={<><IconButton label="Refresh task" tooltip="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={() => void refresh()} />{!artifactsOnly ? <TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadSnapshot(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} /> : null}{capabilities.releaseSandbox ? <AstryxButton label={releaseLabel} variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask && !artifactsOnly ? <IconButton label="Delete task" tooltip="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
+  const header = <PageHeader variant="compact" title={task.title?.trim() || "Task detail"} subtitle={task.id} actions={<><IconButton label="Refresh task" tooltip="Refresh task" variant="ghost" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={() => void refresh()} /><TaskLifecycleActions task={task} capabilities={capabilities} onRefresh={() => loadSnapshot(true)} disabled={deleting || releasing} onBusyChange={setLifecycleBusy} />{capabilities.releaseSandbox ? <AstryxButton label={releaseLabel} variant="destructive" size="sm" icon={<Power size={15} />} isDisabled={mutationBusy} onClick={() => setReleaseOpen(true)} /> : null}{capabilities.deleteTask ? <IconButton label="Delete task" tooltip="Delete task" variant="destructive" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => setDeleteOpen(true)} /> : null}</>} />;
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifactPage.items} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} filter={artifactPage.filter} hasNext={artifactPage.nextCursor !== null} hasPrevious={artifactPage.cursorStack.length > 0} onFilterChange={changeArtifactFilter} onNext={nextArtifactPage} onPrevious={previousArtifactPage} onRefresh={refreshArtifacts} onRetry={retryArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadSnapshot(true)} /> : null;
   const archivedNotice = lifecycle.state === "archived" ? <Banner status="info" icon={<Archive size={16} />} title="Task archived" description="Its conversation, files, and artifacts remain available." /> : null;
-  const sandboxNotice = sandboxState.state === "released"
-    ? <Banner status="success" icon={<CircleCheck size={16} />} title="Sandbox released" description="Your next message or opening Terminal starts a new sandbox for this Task. Conversation history and File Library files remain available." />
-    : sandboxState.state === "failed"
-      ? <Banner status="error" title="Sandbox failed" description={sandboxState.cause?.message??"The sandbox could not continue."} />
-    : sandboxState.state === "release_requested" && sandboxState.cause
-      ? <Banner status="warning" title="Sandbox cleanup pending" description={sandboxState.cause.message} />
-    : null;
-
   const releaseDialog = <TaskActionDialog idPrefix="task-sandbox-release" open={releaseOpen} onOpenChange={setReleaseOpen} title={`${releaseLabel}?`} description="Releasing stops the sandbox unconditionally and may lose running processes or unsaved information." actionLabel={releaseLabel} loading={releasing} onAction={releaseSandbox} errorTitle="Sandbox could not be released" />;
-
-  if (artifactsOnly) return <PageLayout header={header}><Link className="inline-flex w-fit items-center gap-2 hover:text-primary" href={`${basePath}/${taskId}`}><ArrowLeft size={16} /><Text type="supporting" color="secondary">Task conversation</Text></Link>{taskRefreshError}{archivedNotice}{sandboxNotice}<section className="border border-border bg-surface p-4"><Heading level={4} accessibilityLevel={2}>Published artifacts</Heading><div className="mt-4">{artifactsPanel}</div></section>{releaseDialog}</PageLayout>;
-
-  const terminalAvailable = capabilities.openTerminal;
-  const terminalDisabled = sandboxState.state === "release_requested" || (!terminalAvailable && !terminalStarted);
   const selectWorkspaceMode = (next: string) => {
-    if (next === "terminal") {
-      if (terminalDisabled) return;
-      setTerminalStarted(true);
-    }
-    setMode(next as WorkspaceMode);
+    if (next !== "conversation" && next !== "terminal" && next !== "artifacts") return;
+    const href = canonicalTaskHref(taskPathScope, next, window.location.hash);
+    window.history.pushState(window.history.state, "", href);
+    setMode(next);
+    setCanonicalHref(href);
+    dispatchTerminalIntent({
+      type: next === "terminal" ? "terminal_selected" : "view_left"
+    });
   };
   return <PageLayout header={header} contentWidth="full" density="immersive" height="fill">
     <Link className="inline-flex w-fit shrink-0 items-center gap-2 hover:text-primary" href={basePath}><ArrowLeft size={16} /><Text type="supporting" color="secondary">All tasks</Text></Link>
     {taskRefreshError}
     {archivedNotice}
-    {sandboxNotice}
     <TabList value={mode} onChange={selectWorkspaceMode} aria-label="Task workspace views" hasDivider className="shrink-0 flex-wrap gap-2">
       <Tab value="conversation" label="Conversation" />
-      <Tab value="terminal" label="Terminal" icon={<TerminalSquare size={14} />} aria-disabled={terminalDisabled} />
+      <Tab value="terminal" label="Terminal" icon={<TerminalSquare size={14} />} />
       <Tab value="artifacts" label="Artifacts" />
     </TabList>
     <div className="grid min-h-0 min-w-0 flex-1 overflow-hidden" data-testid="task-workspace">
-      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} initialSnapshot={interactionSnapshot} presentation={detail} onPresentationChange={handlePresentationChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
-      {terminalStarted && sandboxState.state !== "release_requested" ? <div className={`${mode === "terminal" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden`}><TaskTerminalPanel taskId={taskId} active={mode === "terminal"} /></div> : null}
+      <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} userId={currentUser.id} projectId={projectId} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} initialSnapshot={interactionSnapshot} presentation={detail} onPresentationChange={handlePresentationChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
+      {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} presentation={detail} transportRequested={terminalIntent.transportRequested} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} onPresentationChange={handlePresentationChange} /></div> : null}
       <section className={`${mode === "artifacts" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-border bg-surface`} aria-label="Task Artifacts"><div className="shrink-0 border-b border-border px-3 py-3"><Heading level={4} accessibilityLevel={2}>Artifacts</Heading></div><div className="min-h-0 flex-1 overflow-y-auto p-3">{artifactsPanel}</div></section>
     </div>
-    <div className="shrink-0 border-y border-border py-3"><Collapsible trigger="Task details" defaultIsOpen={false}><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.8fr)_minmax(0,1fr)]"><TaskWorkspaceSummary task={task} filesHref={`/workspaces/${workspaceId}/projects/${projectId}/files?libraryId=${encodeURIComponent(task.fileLibraryId)}`} /><div><Heading level={6} accessibilityLevel={3}>Original prompt</Heading><Text display="block" type="supporting" color="secondary" className="mt-2 whitespace-pre-wrap break-words">{task.prompt}</Text></div></div></Collapsible></div>
+    <div className="shrink-0 border-y border-border py-3"><Collapsible trigger="Task details" defaultIsOpen={false}><div className="mt-4 grid gap-6 lg:grid-cols-[minmax(14rem,.8fr)_minmax(0,1fr)]"><TaskWorkspaceSummary task={task} filesHref={`/workspaces/${workspaceId}/projects/${projectId}/files?${new URLSearchParams({ libraryId: task.fileLibraryId, returnTo: canonicalHref })}`} /><div><Heading level={6} accessibilityLevel={3}>Original prompt</Heading><Text display="block" type="supporting" color="secondary" className="mt-2 whitespace-pre-wrap break-words">{task.prompt}</Text></div></div></Collapsible></div>
     {releaseDialog}
     <TaskActionDialog idPrefix="task-delete" open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete task?" description="This permanently removes this task from the product." actionLabel="Delete task" loading={deleting} onAction={deleteTask} errorTitle="Task could not be deleted" />
   </PageLayout>;

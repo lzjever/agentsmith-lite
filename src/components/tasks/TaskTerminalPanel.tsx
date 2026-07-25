@@ -1,11 +1,15 @@
 "use client";
 
-import { Maximize2, RefreshCw, TerminalSquare } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Banner, IconButton, Text } from "@astryxdesign/core";
+import { Maximize2, Play, TerminalSquare } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from "react";
+import { Banner, Button, IconButton, Spinner, Text } from "@astryxdesign/core";
 import { useTheme } from "@astryxdesign/core/theme";
-import { apiClient } from "../../lib/api/client";
+import { ApiError, apiClient, newIdempotencyKey, type TaskDetail } from "../../lib/api/client";
 import { xtermThemeFromTokens } from "./terminal-theme";
+import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
+import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
+import { convergeTerminalStart, waitForTerminalStart } from "./task-terminal-start";
+import { terminalSurfaceState, terminalTransportEnabled, type TerminalIntentAction } from "./task-terminal-state";
 
 type TerminalState = "connecting" | "ready" | "closed" | "error";
 const AUTO_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
@@ -15,7 +19,122 @@ function formatTerminalState(value: string): string {
   return sentence.charAt(0).toUpperCase() + sentence.slice(1);
 }
 
-export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; active?: boolean }) {
+export function TaskTerminalPanel({
+  taskId,
+  presentation,
+  transportRequested,
+  activeSandboxesHref,
+  canManagePolicy,
+  policyHref,
+  onIntent,
+  onPresentationChange
+}: {
+  taskId: string;
+  presentation: TaskDetail;
+  transportRequested: boolean;
+  activeSandboxesHref: string;
+  canManagePolicy: boolean;
+  policyHref: string;
+  onIntent: Dispatch<TerminalIntentAction>;
+  onPresentationChange: (presentation: TaskDetail) => void;
+}) {
+  const operation = useRef<AbortController | null>(null);
+  const [explicitStartPending, setExplicitStartPending] = useState(false);
+  const [startError, setStartError] = useState("");
+  const [capacityRecovery, setCapacityRecovery] = useState<SandboxCapacityRecovery | null>(null);
+  const surface = terminalSurfaceState(presentation, explicitStartPending);
+
+  useEffect(() => () => {
+    operation.current?.abort();
+    operation.current = null;
+  }, [taskId]);
+
+  async function start() {
+    if (surface.kind !== "start") return;
+    operation.current?.abort();
+    const controller = new AbortController();
+    operation.current = controller;
+    const key = newIdempotencyKey("task-terminal-start");
+    setExplicitStartPending(true);
+    setStartError("");
+    setCapacityRecovery(null);
+    onIntent({ type: "start_progressed" });
+    try {
+      const receipt = await convergeTerminalStart({
+        taskId,
+        idempotencyKey: key,
+        signal: controller.signal,
+        start: (id, idempotencyKey, signal) => apiClient.startTaskTerminal(id, idempotencyKey, signal),
+        wait: waitForTerminalStart,
+        onReceipt: (next) => {
+          onPresentationChange(next.presentation);
+          if (next.status === "in_progress") onIntent({ type: "start_progressed" });
+        }
+      });
+      onIntent({
+        type: "start_completed",
+        receiptStatus: receipt.status,
+        sandboxState: receipt.presentation.sandboxState.state
+      });
+    } catch (reason) {
+      if (controller.signal.aborted) return;
+      if (reason instanceof ApiError && reason.presentation) {
+        onPresentationChange(reason.presentation);
+      }
+      const recovery = sandboxCapacityRecovery(reason);
+      setCapacityRecovery(recovery);
+      if (!recovery) {
+        setStartError(reason instanceof Error ? reason.message : "Sandbox could not be started");
+      }
+      onIntent({ type: "start_failed" });
+    } finally {
+      if (operation.current === controller) {
+        operation.current = null;
+        setExplicitStartPending(false);
+      }
+    }
+  }
+
+  if (terminalTransportEnabled(surface, transportRequested)) {
+    return <TerminalTransport taskId={taskId} />;
+  }
+
+  const cleanupMessage = presentation.sandboxState.cause?.message
+    ?? (presentation.sandboxState.state === "release_requested"
+      ? "Sandbox cleanup is pending."
+      : "The failed Sandbox must be cleaned up before Terminal can start.");
+  return <section className="grid h-full min-h-0 flex-1 place-items-center border border-border bg-muted px-5" aria-label="Task terminal">
+    <div className="max-w-lg text-center">
+      <TerminalSquare className="mx-auto size-6 text-icon-secondary" />
+      {surface.kind === "unavailable" ? <>
+        <Text as="p" display="block" className="mt-3" weight="semibold">Terminal unavailable</Text>
+        <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">You do not have access to open Terminal for this Task.</Text>
+      </> : null}
+      {surface.kind === "start" ? <>
+        <Text as="p" display="block" className="mt-3" weight="semibold">Terminal is stopped</Text>
+        <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">Start the Sandbox to continue this same Task, session, and File Library.</Text>
+        <Button className="mt-4" label="Start Terminal" variant="primary" icon={<Play size={15} />} onClick={() => void start()} />
+      </> : null}
+      {surface.kind === "starting" ? <>
+        <div className="mt-3 flex justify-center"><Spinner label="Starting Terminal..." /></div>
+        <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">Starting the Sandbox for this Task.</Text>
+      </> : null}
+      {surface.kind === "cleanup_pending" ? <>
+        <Text as="p" display="block" className="mt-3" weight="semibold">Terminal cleanup pending</Text>
+        <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">{cleanupMessage}</Text>
+      </> : null}
+      {surface.kind === "active" ? <>
+        <Text as="p" display="block" className="mt-3" weight="semibold">Terminal is active</Text>
+        <Button className="mt-4" label="Connect Terminal" variant="primary" icon={<Play size={15} />} onClick={() => onIntent({ type: "connect_requested" })} />
+      </> : null}
+      {capacityRecovery ? <SandboxCapacityRecoveryNotice className="mt-4 text-left" recovery={capacityRecovery} activeSandboxesHref={activeSandboxesHref} canManagePolicy={canManagePolicy} policyHref={policyHref} title="Sandbox could not be started" /> : null}
+      {startError && !capacityRecovery ? <Banner className="mt-4 text-left" status="error" title="Sandbox could not be started" description={startError} /> : null}
+    </div>
+  </section>;
+}
+
+function TerminalTransport({ taskId }: { taskId: string }) {
+  const active = true;
   const { tokens } = useTheme();
   const terminalTheme = useMemo(() => xtermThemeFromTokens(tokens), [tokens]);
   const viewport = useRef<HTMLDivElement>(null);
@@ -161,7 +280,7 @@ export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; a
       reconnectAttempt.current += 1;
       setState("connecting");
       terminalInstance.current?.writeln(
-        `\r\n\x1b[90mWorkspace is starting. Reconnecting in ${delay / 1_000}s...\x1b[0m`,
+        `\r\n\x1b[90mTerminal disconnected. Reconnecting in ${delay / 1_000}s...\x1b[0m`,
       );
       retryTimer = setTimeout(() => {
         if (!disposed) setGeneration((value) => value + 1);
@@ -286,7 +405,7 @@ export function TaskTerminalPanel({ taskId, active = true }: { taskId: string; a
   }, [active, fitTerminal]);
 
   return <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-muted" aria-label="Task terminal">
-    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-card px-3 text-primary"><div className="flex items-center gap-2"><TerminalSquare size={16}/><Text type="supporting">Task terminal</Text><Text type="code" color="secondary">{formatTerminalState(state)}</Text></div><div className="flex items-center gap-1"><IconButton label="Fit terminal" tooltip="Fit terminal" variant="ghost" icon={<Maximize2 size={15}/>} onClick={() => { focusFrameReady.current = true; fitTerminal(true); }}/>{state==="closed"||state==="error"?<IconButton label="Reconnect terminal" tooltip="Reconnect terminal" variant="ghost" icon={<RefreshCw size={15}/>} onClick={()=>{reconnectAttempt.current=0;setError("");setState("connecting");setGeneration((value)=>value+1);}}/>:null}</div></div>
+    <div className="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-card px-3 text-primary"><div className="flex items-center gap-2"><TerminalSquare size={16}/><Text type="supporting">Task terminal</Text><Text type="code" color="secondary">{formatTerminalState(state)}</Text></div><IconButton label="Fit terminal" tooltip="Fit terminal" variant="ghost" icon={<Maximize2 size={15}/>} onClick={() => { focusFrameReady.current = true; fitTerminal(true); }}/></div>
     {error?<Banner status="error" container="section" title="Terminal connection failed" description={error}/>:null}
     <div ref={viewport} className="min-h-0 w-full flex-1 p-2" style={{ fontFamily: "var(--font-family-code)", fontSize: "var(--font-size-sm)" }} />
   </section>;

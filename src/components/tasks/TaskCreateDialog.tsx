@@ -1,12 +1,13 @@
 "use client";
 
 import { Library, Plus } from "lucide-react";
-import Link from "next/link";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Banner, Button, RadioList, RadioListItem, Selector, Text, TextArea, TextInput } from "@astryxdesign/core";
-import { ApiError, type Endpoint, type FileLibrary } from "../../lib/api/client";
+import { type Endpoint, type FileLibrary } from "../../lib/api/client";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
+import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
+import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
 
 export type TaskCreateValue = {
   title: string;
@@ -16,12 +17,14 @@ export type TaskCreateValue = {
 };
 
 export function TaskCreateDialog({
-  projectId, endpointPickerRevision, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
+  projectId, endpointPickerRevision, libraries, librariesLoading, activeSandboxesHref, canManagePolicy, policyHref = "policy", open, saving, onClose, onCreate
 }: {
   projectId:string;
   endpointPickerRevision:number;
   libraries: FileLibrary[];
   librariesLoading: boolean;
+  activeSandboxesHref: string;
+  canManagePolicy: boolean;
   policyHref?: string;
   open: boolean;
   saving: boolean;
@@ -37,7 +40,7 @@ export function TaskCreateDialog({
   const [libraryNameEdited, setLibraryNameEdited] = useState(false);
   const [libraryId, setLibraryId] = useState("");
   const [error, setError] = useState("");
-  const [errorCode, setErrorCode] = useState("");
+  const [recovery, setRecovery] = useState<SandboxCapacityRecovery | null>(null);
   const wasOpen = useRef(false);
   const availableLibraries = libraries.filter((library) => library.boundTask === null && library.capabilities.canWriteFiles);
 
@@ -83,7 +86,7 @@ export function TaskCreateDialog({
       await onCreate({ title: title.trim(), prompt: prompt.trim(), endpointId, fileLibrary });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The task could not be created.");
-      setErrorCode(reason instanceof ApiError ? reason.code ?? "" : "");
+      setRecovery(sandboxCapacityRecovery(reason));
     }
   }
 
@@ -93,10 +96,11 @@ export function TaskCreateDialog({
     if (!nextOpen && !busy) onClose();
   };
 
-  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title="Create task" subtitle="Describe the work for the Botified sandbox." size="lg" busy={busy} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />}>
+  return <Dialog isOpen={open} onOpenChange={handleOpenChange} title="Create task" subtitle="Describe the agent work for this Sandbox." size="lg" busy={busy} primaryAction={<Button type="submit" form="task-create-form" label={saving ? "Creating..." : "Create task"} variant="primary" size="lg" isDisabled={!prompt.trim() || !endpointId || !validLibrary || busy} />}>
       <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
         <div className="grid gap-5">
-          {error ? <Banner status="error" title={errorCode === "active_tasks_limit_reached" ? "Active task limit reached" : "Task could not be created"} description={errorCode === "active_tasks_limit_reached" ? <>Wait for or cancel an active task. Project administrators can change the limit. <Link className="text-primary hover:underline" href={policyHref}><Text weight="medium">Open resource policy</Text></Link>.</> : error} /> : null}
+          {recovery ? <SandboxCapacityRecoveryNotice recovery={recovery} activeSandboxesHref={activeSandboxesHref} canManagePolicy={canManagePolicy} policyHref={policyHref} /> : null}
+          {error && !recovery ? <Banner status="error" title="Task could not be created" description={error} /> : null}
           <>
             <div className="grid gap-4">
               <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
@@ -116,7 +120,7 @@ export function TaskCreateDialog({
       </form>
   </Dialog>;
 
-  function clearError() { setError(""); setErrorCode(""); }
+  function clearError() { setError(""); setRecovery(null); }
 }
 
 function generatedLibraryName(title: string): string {
