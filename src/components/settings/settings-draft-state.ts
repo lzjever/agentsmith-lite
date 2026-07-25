@@ -1,10 +1,12 @@
 export type SettingsResourceKind = "workspace" | "project";
+export type SettingsDraftSnapshot = { baselineName: string; draftName: string };
+export type SettingsDraftResolution = SettingsDraftSnapshot & { conflicted: boolean };
 
 export function rebaseSettingsDraft(
   baselineName: string,
   draftName: string,
   remoteName: string
-): { baselineName: string; draftName: string; conflicted: boolean } {
+): SettingsDraftResolution {
   const localChanged = normalizeName(draftName) !== baselineName;
   const remoteChanged = remoteName !== baselineName;
   return {
@@ -12,6 +14,15 @@ export function rebaseSettingsDraft(
     draftName: localChanged ? draftName : remoteName,
     conflicted: localChanged && remoteChanged && normalizeName(draftName) !== remoteName
   };
+}
+
+export function resolveSettingsDraftSnapshot(
+  remoteName: string,
+  known?: SettingsDraftSnapshot
+): SettingsDraftResolution {
+  return known
+    ? rebaseSettingsDraft(known.baselineName, known.draftName, remoteName)
+    : { baselineName: remoteName, draftName: remoteName, conflicted: false };
 }
 
 export function settingsDraftUpdateInput(

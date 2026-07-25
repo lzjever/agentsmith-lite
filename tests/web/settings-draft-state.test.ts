@@ -4,9 +4,10 @@ import {
   decodeSettingsDraft,
   encodeSettingsDraft,
   rebaseSettingsDraft,
+  resolveSettingsDraftSnapshot,
   settingsDraftStorageKey,
   settingsDraftUpdateInput
-} from "../../src/components/settings/settings-draft-state.js";
+} from "../../src/components/settings/settings-draft-state.ts";
 
 test("settings refresh advances the baseline without replacing a local name", () => {
   const rebased = rebaseSettingsDraft("Workspace", "Local workspace", "Remote workspace");
@@ -22,6 +23,28 @@ test("settings refresh advances the baseline without replacing a local name", ()
   assert.deepEqual(rebaseSettingsDraft("Workspace", "Workspace", "Remote workspace"), {
     baselineName: "Remote workspace",
     draftName: "Remote workspace",
+    conflicted: false
+  });
+});
+
+test("settings snapshots consume the full rebase result for restore, refresh, and conflict reload", () => {
+  const stored = { baselineName: "Workspace", draftName: "Saved workspace" };
+  assert.deepEqual(resolveSettingsDraftSnapshot("Remote workspace", stored), {
+    baselineName: "Remote workspace",
+    draftName: "Saved workspace",
+    conflicted: true
+  });
+
+  const current = { baselineName: "Remote workspace", draftName: "Local workspace" };
+  assert.deepEqual(resolveSettingsDraftSnapshot("New remote workspace", current), {
+    baselineName: "New remote workspace",
+    draftName: "Local workspace",
+    conflicted: true
+  });
+
+  assert.deepEqual(resolveSettingsDraftSnapshot("Latest workspace"), {
+    baselineName: "Latest workspace",
+    draftName: "Latest workspace",
     conflicted: false
   });
 });

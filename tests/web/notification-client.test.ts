@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { apiClient } from "../../src/lib/api/client.js";
+import { apiClient } from "../../src/lib/api/client.ts";
 
 test("linked notification reads use keepalive and preserve CSRF/session request behavior", async () => {
   const originalFetch = globalThis.fetch;

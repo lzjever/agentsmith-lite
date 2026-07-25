@@ -11,7 +11,7 @@ import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/Dialog";
 import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 import { SettingsLoadError } from "./SettingsRouteState";
-import { decodeSettingsDraft, encodeSettingsDraft, rebaseSettingsDraft, settingsDraftStorageKey, settingsDraftUpdateInput } from "./settings-draft-state";
+import { decodeSettingsDraft, encodeSettingsDraft, resolveSettingsDraftSnapshot, settingsDraftStorageKey, settingsDraftUpdateInput } from "./settings-draft-state";
 
 export function WorkspaceSettingsPage({ workspaceId }: { workspaceId: string }) {
   return <WorkspaceSettings key={workspaceId} workspaceId={workspaceId} />;
@@ -49,22 +49,29 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
     try {
       const [settings, identity] = await Promise.all([apiClient.workspaceSettings(workspaceId), apiClient.currentIdentity()]);
       if (!mounted.current || request !== loadRequest.current) return;
-      const stored = loadedRef.current ? null : decodeSettingsDraft(
+      const wasLoaded = loadedRef.current;
+      const stored = wasLoaded ? null : decodeSettingsDraft(
         sessionStorage.getItem(settingsDraftStorageKey(identity.user.id, "workspace", workspaceId)),
         { actorId: identity.user.id, resourceKind: "workspace", resourceId: workspaceId }
       );
-      const restored = stored ? rebaseSettingsDraft(stored.baselineName, stored.name, settings.workspace.name) : null;
-      const nextName = loadedRef.current
-        ? rebaseSettingsDraft(baselineNameRef.current, draftNameRef.current, settings.workspace.name).draftName
-        : restored?.draftName ?? settings.workspace.name;
+      const knownDraft = wasLoaded
+        ? { baselineName: baselineNameRef.current, draftName: draftNameRef.current }
+        : stored
+          ? { baselineName: stored.baselineName, draftName: stored.name }
+          : undefined;
+      const resolved = resolveSettingsDraftSnapshot(settings.workspace.name, knownDraft);
       loadedRef.current = true;
-      baselineNameRef.current = settings.workspace.name;
-      draftNameRef.current = nextName;
+      baselineNameRef.current = resolved.baselineName;
+      draftNameRef.current = resolved.draftName;
       setData(settings);
-      setBaselineName(settings.workspace.name);
-      setWorkspaceName(nextName);
+      setBaselineName(resolved.baselineName);
+      setWorkspaceName(resolved.draftName);
       setUser(identity.user);
-      if (restored?.conflicted) setActionError("Your saved workspace name overlaps a newer server name. Review it before saving.");
+      setActionError(resolved.conflicted
+        ? wasLoaded
+          ? "The workspace name changed while you were editing. Your name was kept; review it against the latest name before saving."
+          : "Your saved workspace name overlaps a newer server name. Review it before saving."
+        : "");
       setState("ready");
     } catch (reason) {
       if (!mounted.current || request !== loadRequest.current) return;
@@ -131,7 +138,10 @@ function WorkspaceSettings({ workspaceId }: { workspaceId: string }) {
         try {
           const [latest, identity] = await Promise.all([apiClient.workspaceSettings(workspaceId), apiClient.currentIdentity()]);
           if (!mounted.current) return;
-          const rebased = rebaseSettingsDraft(baselineBeforeRefresh, draftBeforeRefresh, latest.workspace.name);
+          const rebased = resolveSettingsDraftSnapshot(latest.workspace.name, {
+            baselineName: baselineBeforeRefresh,
+            draftName: draftBeforeRefresh
+          });
           baselineNameRef.current = rebased.baselineName;
           draftNameRef.current = rebased.draftName;
           setData(latest);

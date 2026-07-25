@@ -12,7 +12,7 @@ import { PageLayout } from "../layout/PageLayout";
 import { ConfirmationDialog } from "../ui/Dialog";
 import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 import { SettingsLoadError } from "./SettingsRouteState";
-import { decodeSettingsDraft, encodeSettingsDraft, rebaseSettingsDraft, settingsDraftStorageKey, settingsDraftUpdateInput } from "./settings-draft-state";
+import { decodeSettingsDraft, encodeSettingsDraft, resolveSettingsDraftSnapshot, settingsDraftStorageKey, settingsDraftUpdateInput } from "./settings-draft-state";
 
 export function ProjectSettingsPage({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
   return <ProjectSettings key={`${workspaceId}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
@@ -51,22 +51,29 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
       const [settings, identity] = await Promise.all([apiClient.projectSettings(projectId), apiClient.currentIdentity()]);
       if (!mounted.current || request !== loadRequest.current) return;
       if (settings.project.workspaceId !== workspaceId) throw new ApiError(404, "This project does not belong to this workspace.");
-      const stored = loadedRef.current ? null : decodeSettingsDraft(
+      const wasLoaded = loadedRef.current;
+      const stored = wasLoaded ? null : decodeSettingsDraft(
         sessionStorage.getItem(settingsDraftStorageKey(identity.user.id, "project", projectId)),
         { actorId: identity.user.id, resourceKind: "project", resourceId: projectId }
       );
-      const restored = stored ? rebaseSettingsDraft(stored.baselineName, stored.name, settings.project.name) : null;
-      const nextName = loadedRef.current
-        ? rebaseSettingsDraft(baselineNameRef.current, draftNameRef.current, settings.project.name).draftName
-        : restored?.draftName ?? settings.project.name;
+      const knownDraft = wasLoaded
+        ? { baselineName: baselineNameRef.current, draftName: draftNameRef.current }
+        : stored
+          ? { baselineName: stored.baselineName, draftName: stored.name }
+          : undefined;
+      const resolved = resolveSettingsDraftSnapshot(settings.project.name, knownDraft);
       loadedRef.current = true;
-      baselineNameRef.current = settings.project.name;
-      draftNameRef.current = nextName;
+      baselineNameRef.current = resolved.baselineName;
+      draftNameRef.current = resolved.draftName;
       setData(settings);
-      setBaselineName(settings.project.name);
-      setProjectName(nextName);
+      setBaselineName(resolved.baselineName);
+      setProjectName(resolved.draftName);
       setUser(identity.user);
-      if (restored?.conflicted) setActionError("Your saved project name overlaps a newer server name. Review it before saving.");
+      setActionError(resolved.conflicted
+        ? wasLoaded
+          ? "The project name changed while you were editing. Your name was kept; review it against the latest name before saving."
+          : "Your saved project name overlaps a newer server name. Review it before saving."
+        : "");
       setState("ready");
     } catch (reason) {
       if (!mounted.current || request !== loadRequest.current) return;
@@ -134,7 +141,10 @@ function ProjectSettings({ workspaceId, projectId }: { workspaceId: string; proj
           const [latest, identity] = await Promise.all([apiClient.projectSettings(projectId), apiClient.currentIdentity()]);
           if (!mounted.current) return;
           if (latest.project.workspaceId !== workspaceId) throw new ApiError(404, "This project does not belong to this workspace.");
-          const rebased = rebaseSettingsDraft(baselineBeforeRefresh, draftBeforeRefresh, latest.project.name);
+          const rebased = resolveSettingsDraftSnapshot(latest.project.name, {
+            baselineName: baselineBeforeRefresh,
+            draftName: draftBeforeRefresh
+          });
           baselineNameRef.current = rebased.baselineName;
           draftNameRef.current = rebased.draftName;
           setData(latest);
