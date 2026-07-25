@@ -31,7 +31,10 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
   const [submitting, setSubmitting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [rejectedFocusSequence, setRejectedFocusSequence] = useState(0);
+  const rejectedFocusRequest = useRef(false);
   const messageBusy = busy || submitting || saving || deleting;
+  const composerEditable = capabilities.sendMessage && !busy && !saving && !deleting;
   const nextEdit = editDraft.trim();
   const editChanged = Boolean(editing) && nextEdit !== editing?.content.trim();
   const draftIdentity: TaskDraftIdentity = { userId, projectId, taskId };
@@ -61,6 +64,18 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
     }
   }, [editing, messageBusy, queuedMessages, removing]);
 
+  useEffect(() => {
+    if (!rejectedFocusRequest.current) return;
+    rejectedFocusRequest.current = false;
+    if (!composerEditable) return;
+    const frame = requestAnimationFrame(() => {
+      const element = input.current;
+      if (!element || element.disabled || element.readOnly) return;
+      element.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [composerEditable, rejectedFocusSequence]);
+
   async function submit() {
     const submittedDraft = draft;
     const content = draft.trim();
@@ -77,7 +92,7 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
         setDraftNotice("");
         return "";
       });
-      if (composer.current?.contains(document.activeElement)) {
+      if (composerEditable && composer.current?.contains(document.activeElement)) {
         requestAnimationFrame(() => input.current?.focus());
       }
     } catch (reason) {
@@ -93,6 +108,8 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
           || reason.code === "sandbox_start_failed"
         )
       ) setSendErrorTitle("Sandbox could not be started");
+      rejectedFocusRequest.current = true;
+      setRejectedFocusSequence((sequence) => sequence + 1);
     } finally {
       setSubmitting(false);
     }
