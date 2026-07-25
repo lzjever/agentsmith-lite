@@ -231,6 +231,7 @@ export const apiClient = {
   logout: () => json<{ loggedOut: true; redirectUrl: string }>("/auth/logout", "POST"),
   notifications: (unreadOnly = false) => request<UserNotification[]>(`/notifications${unreadOnly ? "?unread=true" : ""}`),
   markNotificationRead: (notificationId: string) => json<UserNotification>(`/notifications/${encodeURIComponent(notificationId)}/read`, "PATCH"),
+  markLinkedNotificationRead: (notificationId: string) => request<UserNotification>(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: "PATCH", keepalive: true }),
   markAllNotificationsRead: () => json<UserNotification[]>("/notifications/read", "PATCH"),
   dismissNotification: (notificationId: string) => json<{ dismissed: true }>(`/notifications/${encodeURIComponent(notificationId)}`, "DELETE"),
   profile: () => request<Profile>("/me/profile"),
