@@ -1,7 +1,7 @@
 "use client";
 
-import { FolderKanban, Globe, List, Menu } from "lucide-react";
-import { IconButton, Selector, TopNav as AstryxTopNav } from "@astryxdesign/core";
+import { FolderKanban, Globe, List } from "lucide-react";
+import { IconButton, Selector, Text, TopNav as AstryxTopNav } from "@astryxdesign/core";
 import { useRouter } from "next/navigation";
 import type { CurrentUser, Project, ProjectDirectoryItem, Workspace, WorkspaceDirectoryItem } from "../../lib/api/client";
 import { ThemeToggle } from "../theme/ThemeToggle";
@@ -16,7 +16,6 @@ export function Topbar({
   workspace,
   project,
   profileReturnTo,
-  onOpenNavigation,
 }: {
   user: CurrentUser;
   workspaces: WorkspaceDirectoryItem[];
@@ -24,27 +23,18 @@ export function Topbar({
   workspace?: Workspace | undefined;
   project?: Project | undefined;
   profileReturnTo?: string | undefined;
-  onOpenNavigation: () => void;
 }) {
   const router = useRouter();
   return (
     <AstryxTopNav
       label="Application controls"
-      className="min-h-[3.25rem] border-b border-border bg-surface px-2 shadow-sm sm:px-4 md:px-5"
+      className="min-h-14 bg-surface px-3 sm:px-5 lg:px-6"
       heading={
-      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-        <IconButton
-          label="Open navigation"
-          tooltip="Open navigation"
-          icon={<Menu size={18} />}
-          variant="ghost"
-          className="md:hidden"
-          onClick={onOpenNavigation}
-        />
+      <div className="flex shrink-0 items-center">
         <Logo compactOnMobile />
       </div>
       }
-      startContent={<div className="flex min-w-0 items-center gap-1 overflow-hidden before:mx-1 before:h-5 before:w-px before:bg-border md:gap-2">
+      startContent={<div className="flex min-w-0 items-center gap-3">
         {workspace ? (
           <WorkspaceSwitcher
             workspaces={workspaces}
@@ -64,7 +54,7 @@ export function Topbar({
       }
       endContent={<div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <NotificationBell {...(profileReturnTo ? { returnTo: profileReturnTo } : {})} />
-        <ThemeToggle />
+        <div className="hidden lg:block"><ThemeToggle /></div>
         <UserMenu
           user={user}
           {...(workspace ? { workspaceId: workspace.id } : {})}
@@ -76,31 +66,46 @@ export function Topbar({
   );
 }
 
-function WorkspaceSwitcher({
+export function WorkspaceSwitcher({
   workspaces,
   workspace,
   onSelect,
   onViewAll,
+  mobile = false,
+  onNavigate,
 }: {
   workspaces: WorkspaceDirectoryItem[];
   workspace: Workspace;
   onSelect: (id: string) => void;
   onViewAll: () => void;
+  mobile?: boolean;
+  onNavigate?: (() => void) | undefined;
 }) {
   const options=dedupeOptions([{value:workspace.id,label:workspace.name},...workspaces.map((item)=>({value:item.id,label:item.name}))]);
+  function select(id: string) {
+    onSelect(id);
+    onNavigate?.();
+  }
+  function viewAll() {
+    onViewAll();
+    onNavigate?.();
+  }
   return (
-    <div className="flex min-w-0 items-center gap-1">
-      <div className="min-w-0 w-40 sm:w-56 md:w-64"><Selector
+    <div className={mobile ? "flex w-full min-w-0 items-end gap-2" : "flex min-w-0 items-center gap-2"}>
+      <div className={mobile ? "min-w-0 flex-1" : "flex min-w-0 items-center gap-2"}>
+        {!mobile ? <Text type="supporting" color="secondary" className="shrink-0">Workspace</Text> : null}
+        <div className={mobile ? "min-w-0" : "w-40 min-w-0 xl:w-48"}><Selector
           label="Current workspace"
-          isLabelHidden
+          isLabelHidden={!mobile}
           startIcon={<Globe size={15} />}
           options={options}
           value={workspace.id}
-          onChange={onSelect}
+          onChange={select}
           size="lg"
           width="100%"
         /></div>
-      <IconButton label="View all workspaces" tooltip="View all workspaces" icon={<List size={15}/>} variant="ghost" size="lg" onClick={onViewAll}/>
+      </div>
+      <IconButton label="View all workspaces" tooltip="View all workspaces" icon={<List size={15}/>} variant="ghost" size="lg" onClick={viewAll}/>
     </div>
   );
 }
@@ -122,18 +127,21 @@ export function ProjectSwitcher({
   const options=dedupeOptions([{value:project.id,label:project.name},...projects.map((item)=>({value:item.id,label:item.name}))]);
   function navigate(href:string){router.push(href);onNavigate?.();}
   return (
-    <div className={mobile ? "flex w-full min-w-0 items-center gap-1" : "hidden min-w-0 items-center gap-1 md:flex"}>
-      <div className={mobile ? "min-w-0 flex-1" : "min-w-0 w-64"}>
-        <Selector
-          label="Current project"
-          isLabelHidden
-          startIcon={<FolderKanban size={15} />}
-          options={options}
-          value={project.id}
-          onChange={(projectId)=>navigate(`/workspaces/${workspaceId}/projects/${projectId}/overview`)}
-          size="lg"
-          width="100%"
-        />
+    <div className={mobile ? "flex w-full min-w-0 items-end gap-2" : "flex min-w-0 items-center gap-2"}>
+      <div className={mobile ? "min-w-0 flex-1" : "flex min-w-0 items-center gap-2"}>
+        {!mobile ? <Text type="supporting" color="secondary" className="shrink-0">Project</Text> : null}
+        <div className={mobile ? "min-w-0" : "w-40 min-w-0 xl:w-48"}>
+          <Selector
+            label="Current project"
+            isLabelHidden={!mobile}
+            startIcon={<FolderKanban size={15} />}
+            options={options}
+            value={project.id}
+            onChange={(projectId)=>navigate(`/workspaces/${workspaceId}/projects/${projectId}/overview`)}
+            size="lg"
+            width="100%"
+          />
+        </div>
       </div>
       <IconButton label="View all projects" tooltip="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={()=>navigate(`/workspaces/${workspaceId}/projects`)} />
     </div>

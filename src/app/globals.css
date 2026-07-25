@@ -10,7 +10,7 @@
 @tailwind utilities;
 
 @layer base {
-  html, body { min-height: 100vh; max-width: 100%; overflow-x: clip; }
+  html, body { min-height: 100vh; max-width: 100%; }
   body { background: var(--color-background-body); color: var(--color-text-primary); font-family: var(--font-family-body); font-size: var(--text-body-size); line-height: var(--text-body-leading); font-feature-settings: "rlig" 1, "calt" 1, "ss09" 1; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
   h1, h2, h3, h4, h5, h6 { color: var(--color-text-primary); font-family: var(--font-family-heading); letter-spacing: 0; }
   code, kbd, pre, samp { font-family: var(--font-family-code); }
@@ -29,4 +29,7 @@
 
 @media (forced-colors: active) {
   :where(a, button, input, textarea, select, summary, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible { outline-color: Highlight; }
+  :where([aria-current="page"], [aria-selected="true"], [data-selected="selected"]) { border-color: Highlight !important; outline: 2px solid Highlight; outline-offset: -2px; }
+  :where(:disabled, [aria-disabled="true"]) { border-color: GrayText !important; color: GrayText !important; opacity: 1; }
+  .astryx-button[data-variant="destructive"] { border: 1px solid LinkText; color: LinkText; }
 }

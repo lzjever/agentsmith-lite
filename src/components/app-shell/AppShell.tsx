@@ -1,14 +1,14 @@
 "use client";
 
 import { AppShell as AstryxAppShell, Button, Heading, MobileNav, Spinner, Text } from "@astryxdesign/core";
-import { useParams, usePathname } from "next/navigation";
+import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type ProjectDetail, type ProjectDirectoryItem, type WorkspaceDetail, type WorkspaceDirectoryItem } from "../../lib/api/client";
 import { DocumentTitle } from "../layout/DocumentTitle";
 import { ThemeToggle } from "../theme/ThemeToggle";
 import { Logo } from "./Logo";
 import { ShellNavigation } from "./Sidebar";
-import { ProjectSwitcher, Topbar } from "./Topbar";
+import { ProjectSwitcher, Topbar, WorkspaceSwitcher } from "./Topbar";
 import { CurrentUserProvider } from "./current-user";
 import { clearTaskDraftsForProject, clearTaskDraftsForUser, taskDraftStorage } from "../tasks/task-draft-snapshot";
 
@@ -18,6 +18,7 @@ type DirectoryState="loading"|"ready"|"error";
 type ExactReadIssue="unavailable"|"outage";
 
 export function AppShell({children,workspaceId,projectId}:ShellProps) {
+  const router=useRouter();
   const mounted=useRef(true);
   const userRef=useRef<CurrentUser|undefined>(undefined);
   const identityRequest=useRef(0);
@@ -129,16 +130,21 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   return <AstryxAppShell
     variant="section"
     height="fill"
-    topNav={<Topbar user={user!} workspaces={quickWorkspaces} projects={quickProjects} workspace={workspaceRecord} project={navigationProject} profileReturnTo={profileReturnTo} onOpenNavigation={()=>setMobileNavigationOpen(true)}/>}
+    topNav={<Topbar user={user!} workspaces={quickWorkspaces} projects={quickProjects} workspace={workspaceRecord} project={navigationProject} profileReturnTo={profileReturnTo}/>}
     sideNav={<ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed}/>}
-    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord&&navigationProject?<div className="shrink-0 min-w-0 border-b border-border p-3"><ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/></div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>}
+    mobileNav={{
+      breakpoint:"lg",
+      isOpen:mobileNavigationOpen,
+      onOpenChange:setMobileNavigationOpen,
+      content:<MobileNav side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord?<div className="shrink-0 min-w-0 space-y-4 border-b border-border p-4"><WorkspaceSwitcher workspaces={quickWorkspaces} workspace={workspaceRecord} onSelect={(id)=>router.push(`/workspaces/${id}`)} onViewAll={()=>router.push("/")} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>{navigationProject?<ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>:null}</div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>
+    }}
   ><CurrentUserProvider user={user!}><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState==="error"?<DirectoryNotice onRetry={()=>loadNavigation(true)}/>:null}{contextError??children}</div></CurrentUserProvider></AstryxAppShell>;
 }
 
-function ShellLoadingFrame(){return <><DocumentTitle title="Loading"/><div className="min-h-screen bg-body"><header className="sticky top-0 flex h-[3.25rem] items-center border-b border-border bg-surface px-4 md:px-5"><Logo linked={false}/></header><div className="flex min-h-[calc(100vh-3.25rem)]"><aside className="hidden w-60 border-r border-border bg-muted md:block" aria-hidden="true"/><main className="grid min-w-0 flex-1 place-items-center"><Heading level={1} className="sr-only">Loading AgentSmith</Heading><Spinner label="Loading workspace..."/></main></div></div></>}
+function ShellLoadingFrame(){return <><DocumentTitle title="Loading"/><div className="min-h-screen bg-body"><header className="sticky top-0 flex h-14 items-center border-b border-border bg-surface px-3 sm:px-5 lg:px-6"><Logo linked={false}/></header><div className="flex min-h-[calc(100vh-3.5rem)]"><aside className="hidden w-60 border-r border-border bg-muted lg:block" aria-hidden="true"/><main className="grid min-w-0 flex-1 place-items-center"><Heading level={1} className="sr-only">Loading AgentSmith</Heading><Spinner label="Loading workspace..."/></main></div></div></>}
 function ShellStatePage({title,detail,action}:{title:string;detail?:string;action?:ReactNode}){return <><DocumentTitle title={title}/><main className="grid min-h-screen place-items-center bg-body px-6"><section className="max-w-md text-center"><Logo linked={false} className="justify-center"/><Heading level={1} className="mt-5">{title}</Heading>{detail?<Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text>:null}{action?<div className="mt-6">{action}</div>:null}</section></main></>}
 function DirectoryNotice({onRetry}:{onRetry:()=>Promise<void>}){return <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted px-4 py-2" role="status"><Text color="secondary">Workspace navigation is unavailable. This page may still be used.</Text><Button label="Retry navigation" size="sm" variant="ghost" onClick={()=>void onRetry()}/></div>}
-function ShellRecoveryState({title,detail,projectsHref,projectHref,retryLabel="Check access again",retry}:{title:string;detail:string;projectsHref?:string;projectHref?:string;retryLabel?:string;retry:()=>Promise<void>}){return <><DocumentTitle title={title}/><section className="grid min-h-[calc(100vh-3.25rem)] place-items-center px-6"><div className="max-w-lg text-center"><Heading level={1}>{title}</Heading><Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref?<Button label="Open project" variant="primary" href={projectHref}/>:null}{projectsHref?<Button label="View all projects" variant="secondary" href={projectsHref}/>:null}<Button label="Back to workspaces" variant="secondary" href="/"/><Button label={retryLabel} variant="ghost" onClick={()=>void retry()}/></div></div></section></>}
+function ShellRecoveryState({title,detail,projectsHref,projectHref,retryLabel="Check access again",retry}:{title:string;detail:string;projectsHref?:string;projectHref?:string;retryLabel?:string;retry:()=>Promise<void>}){return <><DocumentTitle title={title}/><section className="grid min-h-[calc(100vh-3.5rem)] place-items-center px-6"><div className="max-w-lg text-center"><Heading level={1}>{title}</Heading><Text as="p" display="block" color="secondary" className="mt-3">{detail}</Text><div className="mt-6 flex flex-wrap justify-center gap-2">{projectHref?<Button label="Open project" variant="primary" href={projectHref}/>:null}{projectsHref?<Button label="View all projects" variant="secondary" href={projectsHref}/>:null}<Button label="Back to workspaces" variant="secondary" href="/"/><Button label={retryLabel} variant="ghost" onClick={()=>void retry()}/></div></div></section></>}
 
 function exactReadIssue(reason:unknown):ExactReadIssue {
   return reason instanceof ApiError&&(reason.status===403||reason.status===404)?"unavailable":"outage";

@@ -17,18 +17,16 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
   const contentWidthProps = contentWidth === "full"
     ? {}
     : { contentWidth: contentWidth === "narrow" ? "64rem" : "1480px" };
-  const gutters = immersive
-    ? "px-2"
-    : "px-5 md:px-8";
+  const gutters = "px-3 sm:px-5 lg:px-6";
   const topPadding = immersive
     ? "pt-2"
-    : "pt-5 md:pt-7";
+    : "pt-4 sm:pt-5 lg:pt-6";
   const bottomPadding = immersive
     ? "pb-2"
-    : "pb-5 md:pb-7";
-  const gap = immersive ? "gap-2" : "gap-5";
+    : "pb-4 sm:pb-5 lg:pb-6";
+  const gap = immersive ? "gap-2" : "gap-4";
   const bodyTopPadding = header || toolbar
-    ? immersive ? "pt-2" : "pt-5"
+    ? immersive ? "pt-2" : "pt-4 sm:pt-5"
     : topPadding;
 
   return (
@@ -36,7 +34,7 @@ export function PageLayout({ header, toolbar, children, footer, density = "defau
       data-testid="page-layout"
       height={height}
       padding={0}
-      className={fill ? "min-h-0 overflow-hidden" : undefined}
+      className={fill ? "min-h-0" : undefined}
       {...contentWidthProps}
       header={header || toolbar ? (
         <LayoutHeader padding={0}>
