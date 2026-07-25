@@ -1,4 +1,4 @@
-import { ApiError } from "../../lib/api/client.js";
+import { ApiError } from "../../lib/api/client.ts";
 
 export type SandboxCapacityRecovery =
   | {
