@@ -31,7 +31,7 @@ export type AlertRuleMetric = "active_tasks" | "provider_requests" | "provider_t
 export type AlertRuleCondition = "greater_than_or_equal";
 export type AlertRuleScope = { kind: "project" } | { kind: "endpoint"; endpointId: string };
 export interface ProjectAlertRule { id: string; projectId: string; name?: string; alertType: ProjectAlertType; metric?: AlertRuleMetric; condition?: AlertRuleCondition; threshold?: number; windowSeconds?: number | null; scope?: AlertRuleScope; enabled: boolean; createdAt: ISODateString; updatedAt: ISODateString; }
-export type ProjectAlertRuleView = ProjectAlertRule;
+export type ProjectAlertRuleView = ProjectAlertRule & { endpointName: string | null };
 
 export type ProjectMembershipRole = "owner" | "admin" | "member" | "viewer";
 export type ManagedProjectMembershipRole = Exclude<ProjectMembershipRole, "owner">;
@@ -154,6 +154,8 @@ export interface ProjectResourcePolicy {
 }
 export type EndpointPolicyMetric = "providerRequests" | "providerTokens" | "providerCost";
 export interface EndpointPolicyWindow { endpointId: string; metric: EndpointPolicyMetric; limit: number; windowSeconds: number; }
+export type EndpointPolicyWindowView = EndpointPolicyWindow & { endpointName: string | null };
+export type ProjectResourcePolicyView = Omit<ProjectResourcePolicy,"endpointWindows"> & { endpointWindows: EndpointPolicyWindowView[] };
 
 export interface ProjectResourceUsage {
   projectId: string;

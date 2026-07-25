@@ -3,7 +3,7 @@
 import { FlaskConical, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Banner, Button, EmptyState, Heading, IconButton, Text, useToast } from "@astryxdesign/core";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type ProjectAlertRule } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type ProjectAlertRule } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { ConfirmationDialog } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
@@ -17,8 +17,6 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   const mounted = useRef(true);
   const loadRequest = useRef(0);
   const [rules, setRules] = useState<ProjectAlertRule[]>([]);
-  const [endpointNames,setEndpointNames]=useState<Map<string,string>>(new Map());
-  const [selectedEndpoint,setSelectedEndpoint]=useState<Endpoint>();
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ProjectAlertRule | null>(null);
@@ -38,12 +36,6 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       const listed = await apiClient.alertRules(projectId);
       if (!mounted.current || request !== loadRequest.current) return;
       setRules(listed);
-      const names=new Map<string,string>();
-      for(const endpointId of new Set(listed.flatMap((rule)=>rule.scope?.kind==="endpoint"?[rule.scope.endpointId]:[]))){
-        try{const endpoint=await apiClient.endpoint(projectId,endpointId);names.set(endpoint.id,endpoint.name)}catch{}
-      }
-      if(!mounted.current||request!==loadRequest.current)return;
-      setEndpointNames(names);
       setState("ready");
     } catch {
       if (!mounted.current || request !== loadRequest.current) return;
@@ -96,7 +88,6 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   function openCreate() {
     mutationKeys.clear("alert-rule.create");
     setEditing(null);
-    setSelectedEndpoint(undefined);
     setValue(initialValue);
     setFormError("");
     setPanelError("");
@@ -107,9 +98,6 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
   function openEdit(rule: ProjectAlertRule) {
     setEditing(rule);
     setValue(alertRuleFormValue(rule));
-    if(rule.scope?.kind==="endpoint"){
-      void apiClient.endpoint(projectId,rule.scope.endpointId).then((endpoint)=>{if(mounted.current)setSelectedEndpoint(endpoint)}).catch(()=>setSelectedEndpoint(undefined));
-    }else setSelectedEndpoint(undefined);
     setFormError("");
     setPanelError("");
     setPanelNotice("");
@@ -130,12 +118,6 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       else mutationKeys.complete("alert-rule.create", projectId);
       if (!mounted.current) return;
       setRules((current) => editing ? current.map((rule) => rule.id === saved.id ? saved : rule) : [...current, saved]);
-      if(saved.scope?.kind==="endpoint"){
-        try{
-          const endpoint=await apiClient.endpoint(projectId,saved.scope.endpointId);
-          if(mounted.current)setEndpointNames((current)=>new Map(current).set(endpoint.id,endpoint.name));
-        }catch{}
-      }
       await onInstancesChanged?.();
       if (!mounted.current) return;
       setDialogOpen(false);
@@ -230,7 +212,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
     {state === "ready" && rules.length === 0 ? <EmptyState className="mt-4" isCompact title="No alert rules configured" /> : null}
     {state === "ready" && rules.length > 0 ? <ul className="mt-4 divide-y divide-border border-y border-border">
       {rules.map((rule) => <li className="flex items-center justify-between gap-3 py-3" key={rule.id}>
-        <span className="min-w-0"><Text weight="semibold" display="block" maxLines={1}>{rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</Text><Text type="supporting" color="secondary" display="block" className="mt-1">{`Threshold ${rule.threshold ?? 1} · ${rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · ${scopeLabel(rule, endpointNames)}`}</Text></span>
+        <span className="min-w-0"><Text weight="semibold" display="block" maxLines={1}>{rule.name ?? alertRuleTypes.find((type) => type.value === rule.alertType)?.label}</Text><Text type="supporting" color="secondary" display="block" className="mt-1">{`Threshold ${rule.threshold ?? 1} · ${rule.windowSeconds ? formatWindow(rule.windowSeconds) : "current value"} · ${scopeLabel(rule)}`}</Text></span>
         <div className="flex items-center gap-2">
           {canManage ? <Button label={rule.enabled ? "Enabled" : "Disabled"} variant="ghost" isDisabled={busyRuleId !== null} onClick={() => void toggle(rule)} /> : <Text type="supporting" color="secondary">{rule.enabled ? "Enabled" : "Disabled"}</Text>}
           {canManage ? <IconButton label="Test alert rule" tooltip="Test alert rule" variant="ghost" icon={<FlaskConical size={16} />} isDisabled={busyRuleId !== null} onClick={() => void test(rule)} /> : null}
@@ -239,7 +221,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
         </div>
       </li>)}
     </ul> : null}
-    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} projectId={projectId} {...(selectedEndpoint?{selectedEndpoint}:{})} saving={saving} canSave={busyRuleId===null&&(editing===null||alertRuleChanged(value,editing))&&(value.scope.kind==="project"||Boolean(value.scope.endpointId))} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) { mutationKeys.clear("alert-rule.create"); setFormError(""); } }} onChange={(next)=>{setValue(next);if(next.scope.kind==="project")setSelectedEndpoint(undefined)}} onSubmit={save} />
+    <AlertRuleFormDialog open={dialogOpen} editing={editing !== null} value={value} projectId={projectId} saving={saving} canSave={busyRuleId===null&&(editing===null||alertRuleChanged(value,editing))&&(value.scope.kind==="project"||Boolean(value.scope.endpointId))} error={formError} onOpenChange={(open) => { setDialogOpen(open); if (!open) { mutationKeys.clear("alert-rule.create"); setFormError(""); } }} onChange={setValue} onSubmit={save} />
     <DeleteAlertRuleDialog open={removing !== null} busy={busyRuleId !== null} error={removeError} onOpenChange={(open) => { if (!open && busyRuleId === null) { setRemoving(null); setRemoveError(""); } }} onConfirm={remove} />
   </section>;
 }
@@ -270,7 +252,7 @@ function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: {
   );
 }
 function formatWindow(seconds:number){if(seconds%86400===0)return `${seconds/86400} day window`;if(seconds%3600===0)return `${seconds/3600} hour window`;return `${seconds} second window`;}
-function scopeLabel(rule:ProjectAlertRule,endpointNames:Map<string,string>){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return endpointNames.get(scope.endpointId)??`Endpoint ${scope.endpointId}`;}
+function scopeLabel(rule:ProjectAlertRule){const scope=rule.scope;if(!scope||scope.kind==="project")return "Project";return rule.endpointName??`Endpoint ${scope.endpointId}`;}
 function alertRuleFormValue(rule: ProjectAlertRule): AlertRuleFormValue { const type=alertRuleType(rule.alertType);return {name:rule.name??type.label,alertType:type.value,metric:type.metric,threshold:rule.threshold??1,windowSeconds:rule.windowSeconds??type.defaultWindowSeconds,scope:rule.scope??{kind:"project"},enabled:rule.enabled}; }
 function alertRuleChanged(value: AlertRuleFormValue, rule: ProjectAlertRule): boolean { const original=alertRuleFormValue(rule);return value.name!==original.name||value.alertType!==original.alertType||value.metric!==original.metric||value.threshold!==original.threshold||value.windowSeconds!==original.windowSeconds||value.enabled!==original.enabled||value.scope.kind!==original.scope.kind||(value.scope.kind==="endpoint"&&original.scope.kind==="endpoint"&&value.scope.endpointId!==original.scope.endpointId); }
 function isMissingRule(error:unknown):boolean{return error instanceof ApiError&&error.status===404&&error.message==="Alert rule not found";}

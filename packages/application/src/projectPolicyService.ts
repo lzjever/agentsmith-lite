@@ -1,10 +1,10 @@
-import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditIdentityPage, type ProjectAuditIdentityQuery, type ProjectAuditQuery, type ProjectAuditResourceKind, type ProjectEndpointUsagePage, type ProjectEndpointUsageQuery, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
+import { sanitizeProjectAuditDetail, type EndpointHealthErrorCategory, type ProjectAlert, type ProjectAlertCursorKey, type ProjectAlertType, type ProjectAlertView, type ProjectAuditAction, type ProjectAuditIdentityPage, type ProjectAuditIdentityQuery, type ProjectAuditQuery, type ProjectAuditResourceKind, type ProjectEndpointUsagePage, type ProjectEndpointUsageQuery, type ProjectFileStorageUsage, type ProjectResourcePolicy, type ProjectResourcePolicyView, type ProjectResourceUsage, type ProjectSandboxRunHistoryPage, type ProjectUsageLimit, type ProjectUsageOverview, type ProviderUsage, type UpdateProjectResourcePolicyInput, type UpdateProjectResourcePolicyRequest } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { formatDecimal } from "../../domain/src/kubernetesQuantity.js";
 import type { ProductStore } from "../../ports/src/store.js";
 import { AuthorizationService } from "./authorizationService.js";
-import { decodeProviderDirectoryCursor, encodeProviderDirectoryCursor, normalizeProviderDirectoryQuery, providerDirectoryLimit } from "./endpointCredentialDirectory.js";
+import { decodeEndpointUsageCursor, encodeEndpointUsageCursor, normalizeProviderDirectoryQuery, providerDirectoryLimit, type EndpointUsageSnapshot } from "./endpointCredentialDirectory.js";
 import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
@@ -69,7 +69,7 @@ function validCursorId(value:string):boolean{return value.length>0&&value.length
 export class ProjectPolicyService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
 
-  async getPolicy(userId: string, projectId: string): Promise<ProjectResourcePolicy> { await this.authorization.requireProject(userId, projectId); return this.requirePolicy(projectId); }
+  async getPolicy(userId: string, projectId: string): Promise<ProjectResourcePolicyView> { await this.authorization.requireProject(userId, projectId); return this.requirePolicyView(projectId); }
   async getUsageOverview(userId: string, projectId: string, endpointId?: string, selectedUserId = userId): Promise<ProjectUsageOverview> {
     const access=await this.requireUsageScope(userId,projectId,selectedUserId);
     const measuredAt=nowIso(),today=new Date(measuredAt);today.setUTCHours(0,0,0,0);
@@ -100,16 +100,14 @@ export class ProjectPolicyService {
     const selectedUserId=query.userId??userId;
     await this.requireUsageScope(userId,projectId,selectedUserId);
     const q=normalizeProviderDirectoryQuery(query.q),limit=providerDirectoryLimit(query.limit);
-    const scope={actorId:userId,projectId,kind:"endpoint-usage" as const,q,mode:selectedUserId};
-    const after=query.cursor!==undefined?decodeProviderDirectoryCursor(query.cursor,scope):undefined;
-    const measuredAt=nowIso(),today=new Date(measuredAt);today.setUTCHours(0,0,0,0);
-    const firstDay=new Date(today);firstDay.setUTCDate(firstDay.getUTCDate()-29);
+    const scope={actorId:userId,projectId,userId:selectedUserId,q};
+    const decoded=query.cursor!==undefined?decodeEndpointUsageCursor(query.cursor,scope):undefined;
+    const snapshot=decoded?.snapshot??endpointUsageSnapshot(nowIso());
     const page=await this.store.queryProjectEndpointUsagePage({
-      projectId,userId:selectedUserId,periodStart:firstDay.toISOString(),
-      periodEnd:new Date(today.getTime()+24*60*60_000).toISOString(),measuredAt,q,...(after?{after}:{}),limit
+      projectId,userId:selectedUserId,...snapshot,q,...(decoded?{after:decoded.after}:{}),limit
     });
     const last=page.items.at(-1);
-    return{items:page.items.map(({cursorCreatedAt:_,cursorId:__,...item})=>item),nextCursor:page.hasMore&&last?encodeProviderDirectoryCursor(scope,{createdAt:last.cursorCreatedAt,id:last.cursorId}):null,total:page.total};
+    return{items:page.items.map(({cursorCreatedAt:_,cursorId:__,...item})=>item),nextCursor:page.hasMore&&last?encodeEndpointUsageCursor(scope,snapshot,{createdAt:last.cursorCreatedAt,id:last.cursorId}):null,total:page.total};
   }
   async getSandboxRunHistory(userId:string,projectId:string,query:Readonly<{selectedUserId?:string;cursor?:string;limit?:number}>={}):Promise<ProjectSandboxRunHistoryPage>{
     const selectedUserId=query.selectedUserId??userId,access=await this.requireUsageScope(userId,projectId,selectedUserId),limit=query.limit??20;
@@ -187,7 +185,7 @@ export class ProjectPolicyService {
     const last=page.items.at(-1);
     return{items:page.items,nextCursor:page.hasMore&&last?encodeProjectAuditIdentityCursor({v:1,projectId,role:query.role,q,key:{id:last.id}}):null};
   }
-  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput & Partial<Pick<UpdateProjectResourcePolicyRequest,"expectedUpdatedAt">>, idempotencyKey?: string): Promise<ProjectResourcePolicy> {
+  async updatePolicy(userId: string, projectId: string, input: UpdateProjectResourcePolicyInput & Partial<Pick<UpdateProjectResourcePolicyRequest,"expectedUpdatedAt">>, idempotencyKey?: string): Promise<ProjectResourcePolicyView> {
     try {
       await this.authorization.requireProject(userId, projectId, "admin");
     } catch (error) {
@@ -216,7 +214,7 @@ export class ProjectPolicyService {
       }
       await this.auditEvent(projectId, userId, "policy.update", "accepted", projectId);
       await this.recoverChangedPolicyAlerts(previous, result);
-      return result;
+      return this.requirePolicyView(projectId);
     };
     if (!idempotencyKey) return update();
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.policy.update", key: idempotencyKey, request: input, resourceId: projectId, failureMessage: "Project policy could not be updated", run: update });
@@ -332,6 +330,7 @@ export class ProjectPolicyService {
     else{await evaluateProjectAlertRules(this.store,projectId,"project_file_bytes_limit");await recoverProjectAlerts(this.store,projectId,"project_file_bytes_limit",{unconfiguredFallback:true})}
   }
   private async requirePolicy(projectId: string) { const policy = await this.store.findProjectResourcePolicy(projectId); if (!policy) throw new ProductError("Project policy not found", 409); return policy; }
+  private async requirePolicyView(projectId:string){const policy=await this.store.findProjectResourcePolicyView(projectId);if(!policy)throw new ProductError("Project policy not found",409);return policy}
   private async bestEffortFileProjection(label:string,action:()=>Promise<void>):Promise<void>{try{await action()}catch(error){console.error(`${label} failed`,error)}}
   private async usage(projectId: string) { return (await this.store.findProjectResourceUsage(projectId)) ?? zeroUsage(projectId); }
   private async recoverChangedPolicyAlerts(previous: ProjectResourcePolicy, updated: ProjectResourcePolicy): Promise<void> {
@@ -462,6 +461,7 @@ function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdatePro
 }
 function expectedPolicyTimestamp(value:string|undefined,current:string):string{if(value===undefined)return current;if(!Number.isFinite(Date.parse(value)))throw new ProductError("expectedUpdatedAt must be an ISO timestamp");return new Date(value).toISOString()}
 function nextTimestamp(previous:string):string{const now=Date.now();const prior=Date.parse(previous);return new Date(Number.isFinite(prior)&&now<=prior?prior+1:now).toISOString()}
+function endpointUsageSnapshot(measuredAt:string):EndpointUsageSnapshot{const today=new Date(measuredAt);today.setUTCHours(0,0,0,0);const firstDay=new Date(today);firstDay.setUTCDate(firstDay.getUTCDate()-29);return{periodStart:firstDay.toISOString(),periodEnd:new Date(today.getTime()+24*60*60_000).toISOString(),measuredAt}}
 function safeAuditDetail(detail:import("../../contracts/src/api.js").ProjectAuditSafeDetail|undefined){return sanitizeProjectAuditDetail(detail)}
 function normalizeProjectAuditFilters(query:ProjectAuditQuery):ProjectAuditFilters{
   const actor=Object.hasOwn(query,"actorId")?normalizeAuditUserFilter(query.actorId,"actorId"):undefined;

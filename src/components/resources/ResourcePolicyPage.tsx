@@ -47,7 +47,6 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   const active = useRef(true);
   const loadRequest = useRef(0);
   const [policy, setPolicy] = useState<ProjectResourcePolicy>();
-  const [endpointViews,setEndpointViews]=useState<Map<string,Endpoint>>(new Map());
   const [selectedEndpoint,setSelectedEndpoint]=useState<Endpoint>();
   const [caps, setCaps] = useState<ProjectCapabilities>();
   const [draft, setDraft] = useState<PolicyDraft>();
@@ -81,12 +80,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
     }
     setPolicy(policyResult.value);
     setDraft(policyDraft(policyResult.value));
-    const views=new Map<string,Endpoint>();
-    for(const endpointId of new Set((policyResult.value.endpointWindows??[]).map((window)=>window.endpointId))){
-      try{const endpoint=await apiClient.endpoint(projectId,endpointId);views.set(endpoint.id,endpoint)}catch{}
-    }
-    if(!active.current||request!==loadRequest.current)return;
-    setEndpointViews(views);setSelectedEndpoint(undefined);
+    setSelectedEndpoint(undefined);
     if (capabilitiesResult.status === "fulfilled") {
       setCaps(capabilitiesResult.value);
     } else {
@@ -124,7 +118,6 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
       if (cause instanceof ApiError && cause.status === 403) {
         setPolicy(undefined);
         setDraft(undefined);
-        setEndpointViews(new Map());
         setCaps(undefined);
         setState("loading");
         await load();
@@ -144,7 +137,8 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   }
   const configuredEndpointIds=[...new Set(draft?.endpointWindows.map((window)=>window.endpointId)??[])];
   if(selectedEndpoint&&!configuredEndpointIds.includes(selectedEndpoint.id))configuredEndpointIds.push(selectedEndpoint.id);
-  const policyEndpoints=configuredEndpointIds.map((id)=>endpointViews.get(id)??(selectedEndpoint?.id===id?selectedEndpoint:undefined)??{id,name:`Endpoint ${id}`} as Pick<Endpoint,"id"|"name">);
+  const endpointLabels=new Map(policy?.endpointWindows.map((window)=>[window.endpointId,window.endpointName] as const)??[]);
+  const policyEndpoints=configuredEndpointIds.map((id)=>selectedEndpoint?.id===id?selectedEndpoint:{id,name:endpointLabels.get(id)??`Endpoint ${id}`} as Pick<Endpoint,"id"|"name">);
   return (
     <PageLayout
       contentWidth="narrow"
@@ -276,7 +270,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
             <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
               Each limit applies independently to every user over the selected rolling window.
             </Text>
-            {canManage?<div className="mt-3"><EndpointPicker projectId={projectId} value={selectedEndpoint?.id??""} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={saving} label="Add endpoint window" onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointViews((current)=>new Map(current).set(endpoint.id,endpoint))}}/></div>:null}
+            {canManage?<div className="mt-3"><EndpointPicker projectId={projectId} value={selectedEndpoint?.id??""} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={saving} label="Add endpoint window" onChange={setSelectedEndpoint} onUnavailable={(id)=>setSelectedEndpoint((current)=>current?.id===id?undefined:current)}/></div>:null}
             {policyEndpoints.map((endpoint) => (
               <fieldset
                 className="mt-4 border-t border-border pt-3"

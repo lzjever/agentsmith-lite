@@ -16,9 +16,10 @@ export type TaskCreateValue = {
 };
 
 export function TaskCreateDialog({
-  projectId, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
+  projectId, endpointPickerRevision, libraries, librariesLoading, policyHref = "policy", open, saving, onClose, onCreate
 }: {
   projectId:string;
+  endpointPickerRevision:number;
   libraries: FileLibrary[];
   librariesLoading: boolean;
   policyHref?: string;
@@ -60,6 +61,12 @@ export function TaskCreateDialog({
     setLibraryId((current) => availableLibraries.some((library) => library.id === current) ? current : (availableLibraries[0]?.id ?? ""));
   }, [libraries, open]);
 
+  useEffect(()=>{
+    if(!open)return;
+    setEndpointId("");
+    setSelectedEndpoint(undefined);
+  },[endpointPickerRevision,open]);
+
   function changeTitle(nextTitle: string) {
     setTitle(nextTitle);
     if (!libraryNameEdited) setLibraryName(generatedLibraryName(nextTitle));
@@ -93,7 +100,7 @@ export function TaskCreateDialog({
           <>
             <div className="grid gap-4">
               <TextInput label="Title" isOptional value={title} onChange={(value) => changeTitle(value.slice(0, 160))} placeholder="Task title" hasAutoFocus isDisabled={busy} width="100%" />
-              <EndpointPicker projectId={projectId} mode="task_ready" value={endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={busy} onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointId(endpoint.id)}}/>
+              <EndpointPicker key={`${endpointPickerRevision}:${open?"open":"closed"}`} projectId={projectId} mode="task_ready" value={endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={busy} onChange={(endpoint)=>{setSelectedEndpoint(endpoint);setEndpointId(endpoint.id)}} onUnavailable={()=>{setSelectedEndpoint(undefined);setEndpointId("")}}/>
             </div>
             <div className="grid gap-3">
               <RadioList label="File Library" htmlName="file-library-mode" value={libraryMode} onChange={(value) => setLibraryMode(value as typeof libraryMode)} isDisabled={busy}>

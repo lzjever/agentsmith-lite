@@ -6,12 +6,15 @@ export const MAX_PROVIDER_DIRECTORY_LIMIT=50;
 export interface ProviderDirectoryScope {
   actorId:string;
   projectId:string;
-  kind:"credentials"|"endpoints"|"endpoint-usage";
+  kind:"credentials"|"endpoints";
   q:string;
   mode:string|null;
 }
 
 export interface ProviderDirectoryAfter {createdAt:string;id:string}
+export interface EndpointUsageCursorScope {actorId:string;projectId:string;userId:string;q:string}
+export interface EndpointUsageSnapshot {periodStart:string;periodEnd:string;measuredAt:string}
+export interface EndpointUsageCursorValue {snapshot:EndpointUsageSnapshot;after:ProviderDirectoryAfter}
 
 export function providerDirectoryLimit(value:number|undefined):number{
   if(value===undefined)return DEFAULT_PROVIDER_DIRECTORY_LIMIT;
@@ -45,5 +48,34 @@ export function decodeProviderDirectoryCursor(cursor:string,scope:ProviderDirect
   return after;
 }
 
+export function encodeEndpointUsageCursor(scope:EndpointUsageCursorScope,snapshot:EndpointUsageSnapshot,after:ProviderDirectoryAfter):string{
+  return Buffer.from(JSON.stringify({v:1,...scope,...snapshot,after}),"utf8").toString("base64url");
+}
+
+export function decodeEndpointUsageCursor(cursor:string,scope:EndpointUsageCursorScope):EndpointUsageCursorValue{
+  const invalid=()=>new ProductError("Provider directory cursor is invalid",400);
+  if(cursor.length===0||cursor.length>4096)throw invalid();
+  let value:unknown;
+  try{value=JSON.parse(Buffer.from(cursor,"base64url").toString("utf8"))}catch{throw invalid()}
+  if(!record(value)||!keys(value,["v","actorId","projectId","userId","q","periodStart","periodEnd","measuredAt","after"])||value.v!==1||!record(value.after))throw invalid();
+  if(value.actorId!==scope.actorId||value.projectId!==scope.projectId||value.userId!==scope.userId||value.q!==scope.q)throw invalid();
+  if(typeof value.periodStart!=="string"||typeof value.periodEnd!=="string"||typeof value.measuredAt!=="string")throw invalid();
+  if(!keys(value.after,["createdAt","id"])||typeof value.after.createdAt!=="string"||typeof value.after.id!=="string")throw invalid();
+  const snapshot={periodStart:value.periodStart,periodEnd:value.periodEnd,measuredAt:value.measuredAt};
+  const after={createdAt:value.after.createdAt,id:value.after.id};
+  const start=canonicalTime(snapshot.periodStart),end=canonicalTime(snapshot.periodEnd),measured=canonicalTime(snapshot.measuredAt);
+  if(start===null||end===null||measured===null||!matchesEndpointUsageSnapshot(snapshot,measured))throw invalid();
+  if(canonicalTime(after.createdAt)===null||after.id.length===0||after.id.length>1024||/[\u0000-\u001f\u007f]/u.test(after.id))throw invalid();
+  if(encodeEndpointUsageCursor(scope,snapshot,after)!==cursor)throw invalid();
+  return{snapshot,after};
+}
+
 function record(value:unknown):value is Record<string,unknown>{return typeof value==="object"&&value!==null&&!Array.isArray(value)}
 function keys(value:Record<string,unknown>,expected:string[]):boolean{const actual=Object.keys(value);return actual.length===expected.length&&expected.every((key,index)=>actual[index]===key)}
+function canonicalTime(value:string):number|null{const time=Date.parse(value);return Number.isFinite(time)&&new Date(time).toISOString()===value?time:null}
+function matchesEndpointUsageSnapshot(snapshot:EndpointUsageSnapshot,measuredAt:number):boolean{
+  const day=new Date(measuredAt);day.setUTCHours(0,0,0,0);
+  const periodEnd=new Date(day.getTime()+24*60*60_000);
+  const periodStart=new Date(day);periodStart.setUTCDate(periodStart.getUTCDate()-29);
+  return snapshot.periodStart===periodStart.toISOString()&&snapshot.periodEnd===periodEnd.toISOString();
+}

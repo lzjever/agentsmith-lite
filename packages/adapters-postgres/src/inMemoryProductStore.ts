@@ -519,6 +519,11 @@ export class InMemoryProductStore implements ProductStore {
 
   async createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy> { this.policies.set(policy.projectId, clone(policy)); return clone(policy); }
   async findProjectResourcePolicy(projectId: string): Promise<ProjectResourcePolicy | null> { return clone(this.policies.get(projectId) ?? null); }
+  async findProjectResourcePolicyView(projectId:string):Promise<import("../../contracts/src/api.js").ProjectResourcePolicyView|null>{
+    const policy=this.policies.get(projectId);
+    if(!policy)return null;
+    return clone({...policy,endpointWindows:(policy.endpointWindows??[]).map((window)=>{const endpoint=this.endpoints.get(window.endpointId);return{...window,endpointName:endpoint?.projectId===projectId?endpoint.name:null}})});
+  }
   async patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null> {
     const policy = this.policies.get(projectId);
     if (!policy || (expectedUpdatedAt !== undefined && policy.updatedAt !== expectedUpdatedAt)) return null;
@@ -786,7 +791,9 @@ export class InMemoryProductStore implements ProductStore {
   async deleteProjectContextEntry(v:Pick<ProjectContextEntry,"id"|"workspaceId"|"projectId"|"scope"|"ownerUserId"|"version">){const current=this.contexts.get(v.id);if(!current||current.workspaceId!==v.workspaceId||current.projectId!==v.projectId||current.scope!==v.scope||current.ownerUserId!==v.ownerUserId||current.version!==v.version)return false;return this.contexts.delete(v.id)}
   async createProjectAlertRule(v:ProjectAlertRule){if([...this.alertRules.values()].filter((rule)=>rule.projectId===v.projectId).length>=50)return null;this.alertRules.set(v.id,clone(v));return clone(v)}
   async listProjectAlertRules(id:string){const rules=[...this.alertRules.values()].filter((rule)=>rule.projectId===id).sort((left,right)=>compareOrdinal(left.createdAt,right.createdAt)||compareC(left.id,right.id));if(rules.length>50)throw new Error("Project alert rule limit exceeded");return rules.map(clone)}
+  async listProjectAlertRuleViews(projectId:string){return(await this.listProjectAlertRules(projectId)).map((rule)=>this.alertRuleView(rule))}
   async findProjectAlertRule(projectId:string,id:string){const rule=this.alertRules.get(id);return rule?.projectId===projectId?clone(rule):null}
+  async findProjectAlertRuleView(projectId:string,id:string){const rule=await this.findProjectAlertRule(projectId,id);return rule?this.alertRuleView(rule):null}
   async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const current=this.alertRules.get(v.id);if(!current||current.projectId!==v.projectId||(expectedUpdatedAt!==undefined&&current.updatedAt!==expectedUpdatedAt))return null;this.alertRules.set(v.id,clone(v));return clone(v)}
   async deleteProjectAlertRule(projectId:string,id:string){
     const current=this.alertRules.get(id);
@@ -888,6 +895,10 @@ export class InMemoryProductStore implements ProductStore {
   private alertView(alert:ProjectAlert):ProjectAlert{
     const endpoint=alert.endpointId?this.endpoints.get(alert.endpointId):undefined;
     return clone({...alert,endpointName:endpoint?.projectId===alert.projectId?endpoint.name:null});
+  }
+  private alertRuleView(rule:ProjectAlertRule):import("../../contracts/src/api.js").ProjectAlertRuleView{
+    const endpoint=rule.scope?.kind==="endpoint"?this.endpoints.get(rule.scope.endpointId):undefined;
+    return clone({...rule,endpointName:endpoint?.projectId===rule.projectId?endpoint.name:null});
   }
 
   async createTaskAtomically(input: AtomicTaskCreateInput) {

@@ -11,7 +11,7 @@ import {
   TextInput,
 } from "@astryxdesign/core";
 import type { AlertRuleMetric } from "../../../packages/contracts/src/api.js";
-import type { Endpoint, ProjectAlertType } from "../../lib/api/client";
+import type { ProjectAlertType } from "../../lib/api/client";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
 
@@ -30,8 +30,8 @@ export interface AlertRuleFormValue { name: string; alertType: ProjectAlertType;
 
 const standardWindowSeconds = new Set([3600, 86400, 604800]);
 
-export function AlertRuleFormDialog({ open, editing, value, projectId, selectedEndpoint, saving, canSave, error, onOpenChange, onChange, onSubmit }: {
-  open: boolean; editing: boolean; value: AlertRuleFormValue; projectId:string;selectedEndpoint?:Endpoint;saving: boolean; error: string;
+export function AlertRuleFormDialog({ open, editing, value, projectId, saving, canSave, error, onOpenChange, onChange, onSubmit }: {
+  open: boolean; editing: boolean; value: AlertRuleFormValue; projectId:string;saving: boolean; error: string;
   canSave: boolean;
   onOpenChange: (open: boolean) => void; onChange: (value: AlertRuleFormValue) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -146,7 +146,7 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, selectedE
                 isDisabled={saving || !supportsEndpointScope(value.alertType)}
                 size="lg"
               />
-              {supportsEndpointScope(value.alertType)&&value.scope.kind==="endpoint"?<EndpointPicker projectId={projectId} value={value.scope.endpointId} {...(selectedEndpoint?{selected:selectedEndpoint}:{})} disabled={saving} onChange={(endpoint)=>onChange({...value,scope:{kind:"endpoint",endpointId:endpoint.id}})}/>:null}
+              {supportsEndpointScope(value.alertType)&&value.scope.kind==="endpoint"?<EndpointPicker projectId={projectId} value={value.scope.endpointId} disabled={saving} onChange={(endpoint)=>onChange({...value,scope:{kind:"endpoint",endpointId:endpoint.id}})} onUnavailable={()=>onChange({...value,scope:{kind:"endpoint",endpointId:""}})}/>:null}
               <CheckboxInput
                 label="Enabled"
                 value={value.enabled}

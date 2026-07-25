@@ -1,4 +1,4 @@
-import { type AlertRuleMetric, type AlertRuleScope, type ProjectAlertRule, type ProjectAlertType } from "../../contracts/src/api.js";
+import { type AlertRuleMetric, type AlertRuleScope, type ProjectAlertRule, type ProjectAlertRuleView, type ProjectAlertType } from "../../contracts/src/api.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { ProductError, NotFoundError } from "../../domain/src/errors.js";
 import type { ProductStore } from "../../ports/src/store.js";
@@ -13,9 +13,9 @@ type RuleAuditAction="alert.rule.create"|"alert.rule.update"|"alert.rule.delete"
 
 export class AlertRuleService {
   constructor(private readonly store: ProductStore, private readonly authorization: AuthorizationService) {}
-  async list(userId:string,projectId:string){await this.authorization.requireProject(userId,projectId);return this.store.listProjectAlertRules(projectId)}
-  async find(userId:string,projectId:string,id:string){await this.authorization.requireProject(userId,projectId);return requireRule(await this.store.findProjectAlertRule(projectId,id))}
-  async create(userId:string,projectId:string,input:Input,idempotencyKey?:string){await this.authorization.requireProject(userId,projectId,"admin");const type=alertType(input.alertType);const selectedMetric=metric(input.metric,type);const normalized={projectId,name:text(input.name,"name",type.replaceAll("_"," ")),alertType:type,metric:selectedMetric,condition:"greater_than_or_equal" as const,threshold:number(input.threshold,"threshold",1),windowSeconds:window(input.windowSeconds,selectedMetric),scope:await this.scope(projectId,type,input.scope),enabled:input.enabled===undefined?true:boolean(input.enabled,"enabled")};const create=async(id:string)=>{const existing=await this.store.findProjectAlertRule(projectId,id);if(existing)return existing;const timestamp=nowIso();const saved=await this.store.createProjectAlertRule({id,...normalized,createdAt:timestamp,updatedAt:timestamp});if(!saved)throw new ProductError("Project alert rule limit reached",409,"alert_rule_limit_reached");await this.audit(projectId,userId,"alert.rule.create",saved.id);if(saved.enabled)await evaluateProjectAlertRules(this.store,projectId,saved.alertType,evaluationContext(saved.scope));return saved};if(!idempotencyKey)return create(newId("alert_rule"));return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.alert-rule.create",key:idempotencyKey,request:normalized,resourceId:newId("alert_rule"),failureMessage:"Alert rule could not be created",run:create})}
+  async list(userId:string,projectId:string){await this.authorization.requireProject(userId,projectId);return this.store.listProjectAlertRuleViews(projectId)}
+  async find(userId:string,projectId:string,id:string){await this.authorization.requireProject(userId,projectId);return requireRuleView(await this.store.findProjectAlertRuleView(projectId,id))}
+  async create(userId:string,projectId:string,input:Input,idempotencyKey?:string){await this.authorization.requireProject(userId,projectId,"admin");const type=alertType(input.alertType);const selectedMetric=metric(input.metric,type);const normalized={projectId,name:text(input.name,"name",type.replaceAll("_"," ")),alertType:type,metric:selectedMetric,condition:"greater_than_or_equal" as const,threshold:number(input.threshold,"threshold",1),windowSeconds:window(input.windowSeconds,selectedMetric),scope:await this.scope(projectId,type,input.scope),enabled:input.enabled===undefined?true:boolean(input.enabled,"enabled")};const create=async(id:string)=>{const existing=await this.store.findProjectAlertRuleView(projectId,id);if(existing)return existing;const timestamp=nowIso();const saved=await this.store.createProjectAlertRule({id,...normalized,createdAt:timestamp,updatedAt:timestamp});if(!saved)throw new ProductError("Project alert rule limit reached",409,"alert_rule_limit_reached");await this.audit(projectId,userId,"alert.rule.create",saved.id);if(saved.enabled)await evaluateProjectAlertRules(this.store,projectId,saved.alertType,evaluationContext(saved.scope));return requireRuleView(await this.store.findProjectAlertRuleView(projectId,saved.id))};if(!idempotencyKey)return create(newId("alert_rule"));return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.alert-rule.create",key:idempotencyKey,request:normalized,resourceId:newId("alert_rule"),failureMessage:"Alert rule could not be created",run:create})}
   async update(userId:string,projectId:string,id:string,input:Input,idempotencyKey?:string){
     await this.authorization.requireProject(userId,projectId,"admin");
     const update=async()=>{
@@ -33,7 +33,7 @@ export class AlertRuleService {
       await this.audit(projectId,userId,"alert.rule.update",id);
       await recoverProjectAlerts(this.store,projectId,current.alertType,{ruleId:id,endpointId:scopeEndpoint(current.scope)??null});
       if(saved.enabled)await evaluateProjectAlertRules(this.store,projectId,saved.alertType,evaluationContext(saved.scope));
-      return saved;
+      return requireRuleView(await this.store.findProjectAlertRuleView(projectId,saved.id));
     };
     if(!idempotencyKey)return update();
     return runIdempotentMutation({store:this.store,actorId:userId,scopeId:projectId,operation:"project.alert-rule.update",key:idempotencyKey,request:{id,input},resourceId:id,failureMessage:"Alert rule could not be updated",run:update});
@@ -76,5 +76,6 @@ function supportsEndpointScope(type:ProjectAlertType){return type!=="active_task
 function scopeEndpoint(scope:AlertRuleScope|undefined){return scope?.kind==="endpoint"?scope.endpointId:undefined}
 function evaluationContext(scope:AlertRuleScope|undefined){return scope?.kind==="endpoint"?{endpointId:scope.endpointId}:{} }
 function requireRule(rule:ProjectAlertRule|null|undefined):ProjectAlertRule{if(!rule)throw new NotFoundError("Alert rule not found");return rule}
+function requireRuleView(rule:ProjectAlertRuleView|null|undefined):ProjectAlertRuleView{if(!rule)throw new NotFoundError("Alert rule not found");return rule}
 function isProjectAlertType(value:string):value is ProjectAlertType{return types.some((type)=>type===value)}
 function isAlertRuleMetric(value:string):value is AlertRuleMetric{return metrics.some((metric)=>metric===value)}

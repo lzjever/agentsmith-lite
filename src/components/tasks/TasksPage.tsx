@@ -35,6 +35,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const active = useRef(true);
   const [page, setPage] = useState<TaskListPage>(emptyPage);
   const [taskReadyEndpointCount,setTaskReadyEndpointCount]=useState(0);
+  const [endpointPickerRevision,setEndpointPickerRevision]=useState(0);
   const [libraries, setLibraries] = useState<FileLibrary[]>([]);
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
   const [endpointsState, setEndpointsState] = useState<DependencyState>("loading");
@@ -195,6 +196,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
         setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
         setError(detail);
       } else if (isTaskEndpointDrift(reason)) {
+        setEndpointPickerRevision((current)=>current+1);
         await loadEndpoints();
       } else if (isTaskLibraryDrift(reason)) {
         await loadLibraries();
@@ -220,7 +222,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {state === "loading" ? <div className="grid min-h-48 place-items-center px-4 py-6"><Spinner label="Loading tasks..." /></div> : null}
     {state === "error" ? <Banner status="error" container="section" title="Tasks unavailable" description={error || "Tasks could not be loaded."} endContent={<AstryxButton label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
     {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <Text display="block" type="supporting" color="secondary" className="mt-4">Your project access is read-only.</Text> : null}{canCreate && endpointsState === "ready" && taskReadyEndpointCount===0 ? <Text display="block" type="supporting" color="secondary" className="mt-4">No task-ready endpoint is available. <Link className="text-primary hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}><Text weight="medium">Open endpoints</Text></Link></Text> : null}</> : null}
-    <TaskCreateDialog projectId={projectId} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    <TaskCreateDialog projectId={projectId} endpointPickerRevision={endpointPickerRevision} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 

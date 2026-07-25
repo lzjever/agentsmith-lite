@@ -14,11 +14,13 @@ import type {
   ProjectMembershipCandidate,
   ProjectMembershipRole,
   ProjectAlert,
+  ProjectAlertRuleView,
   ProjectAuditEvent,
   ProjectAuditEventView,
   ProjectAuditIdentity,
   ProjectAuditIdentityRole,
   ProjectResourcePolicy,
+  ProjectResourcePolicyView,
   ProjectResourceUsage,
   ProviderUsage,
   ProjectProviderSettlement,
@@ -642,7 +644,9 @@ export interface ProductStore {
   deleteProjectContextEntry(value: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean>;
   createProjectAlertRule(value: ProjectAlertRule): Promise<ProjectAlertRule | null>;
   listProjectAlertRules(projectId: string): Promise<ProjectAlertRule[]>;
+  listProjectAlertRuleViews(projectId:string):Promise<ProjectAlertRuleView[]>;
   findProjectAlertRule(projectId: string, id: string): Promise<ProjectAlertRule | null>;
+  findProjectAlertRuleView(projectId:string,id:string):Promise<ProjectAlertRuleView|null>;
   updateProjectAlertRule(value: ProjectAlertRule, expectedUpdatedAt?: string): Promise<ProjectAlertRule | null>;
   deleteProjectAlertRule(projectId: string, id: string): Promise<boolean>;
   findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null>;
@@ -660,6 +664,7 @@ export interface ProductStore {
   deleteManagedProjectMembership(projectId: string, userId: string, expectedUpdatedAt: string): Promise<ManagedProjectMembershipDeleteResult>;
   createProjectResourcePolicy(policy: ProjectResourcePolicy): Promise<ProjectResourcePolicy>;
   findProjectResourcePolicy(projectId: string): Promise<ProjectResourcePolicy | null>;
+  findProjectResourcePolicyView(projectId:string):Promise<ProjectResourcePolicyView|null>;
   patchProjectResourcePolicy(projectId: string, input: UpdateProjectResourcePolicyInput, updatedAt: string, expectedUpdatedAt?: string): Promise<ProjectResourcePolicy | null>;
   findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null>;
   upsertProjectResourceUsage(usage: ProjectResourceUsage): Promise<ProjectResourceUsage>;

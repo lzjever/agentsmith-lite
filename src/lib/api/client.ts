@@ -4,7 +4,7 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRule as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileStorageRefreshResponse, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
@@ -118,17 +118,7 @@ export type ContextContentType = ProjectContextContentType;
 export type ContextEntry = ProjectContextEntry;
 export type ContextEntryMetadata = ProjectContextEntryMetadata;
 export type ContextPage = ProjectContextPage;
-export interface ProjectResourcePolicy {
-  projectId: string;
-  activeTasksLimit: number;
-  providerRequestsLimit: number | null;
-  providerTokensLimit: number | null;
-  providerCostLimit: number | null;
-  projectFileBytesLimit: number | null;
-  endpointWindows?: Array<{endpointId:string;metric:"providerRequests"|"providerTokens"|"providerCost";limit:number;windowSeconds:number}>;
-  createdAt: string;
-  updatedAt: string;
-}
+export type ProjectResourcePolicy=ApiProjectResourcePolicy;
 export interface ProjectResourceUsage {
   projectId: string;
   activeTasks: number;

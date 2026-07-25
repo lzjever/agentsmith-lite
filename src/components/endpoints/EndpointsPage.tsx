@@ -11,7 +11,7 @@ import {
   useToast,
 } from "@astryxdesign/core";
 import { Plus, RefreshCw, Server } from "lucide-react";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Endpoint, type EndpointInput, type ProjectCapabilities } from "../../lib/api/client";
 import { useMutationKeys } from "../../lib/api/use-mutation-keys";
@@ -21,10 +21,13 @@ import { DeleteEndpointDialog } from "./DeleteEndpointDialog";
 import { EndpointDialog } from "./EndpointDialog";
 import { applyEndpointSave, emptyEndpointInput, endpointInputForEdit, removeEndpoint } from "./endpoints-page-utils";
 import { EndpointsContent } from "./endpoints-page/EndpointsContent";
+import { endpointLocationWithoutFocus } from "./endpoints-page/endpointFocus";
 
 type LoadState = "loading" | "ready" | "error";
 
 export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: string }) {
+  const router=useRouter();
+  const pathname=usePathname();
   const routeSearchParams = useSearchParams();
   const focusedEndpointId =
     routeSearchParams?.get("endpointId") ??
@@ -56,6 +59,7 @@ export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: 
   const [actionError, setActionError] = useState("");
   const discoveryRevision = useRef(0);
   const endpointsLoadRevision = useRef(0);
+  const focusedLoadRevision=useRef(0);
   const capabilitiesLoadRevision = useRef(0);
   const projectRevision = useRef(0);
   const currentProjectId = useRef(projectId);
@@ -112,10 +116,10 @@ export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: 
 
   useEffect(()=>{const timer=window.setTimeout(()=>{setCommittedQuery(query.trim());setCursorHistory([]);setCursor(undefined)},250);return()=>window.clearTimeout(timer)},[query]);
   useEffect(()=>{
+    const revision=++focusedLoadRevision.current;
     if(!focusedEndpointId){setFocusedEndpoint(undefined);return}
-    let live=true;
-    void apiClient.endpoint(projectId,focusedEndpointId).then((endpoint)=>{if(live)setFocusedEndpoint(endpoint)}).catch(()=>{if(live)setFocusedEndpoint(undefined)});
-    return()=>{live=false};
+    void apiClient.endpoint(projectId,focusedEndpointId).then((endpoint)=>{if(revision===focusedLoadRevision.current)setFocusedEndpoint(endpoint)}).catch(()=>{if(revision===focusedLoadRevision.current)setFocusedEndpoint(undefined)});
+    return()=>{focusedLoadRevision.current+=1};
   },[focusedEndpointId,projectId]);
 
   useEffect(() => {
@@ -195,6 +199,7 @@ export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: 
   function forgetMissingEndpoint(reason: unknown, endpointId: string) {
     if (!isMissing(reason, "Endpoint not found")) return false;
     setEndpoints((items) => removeEndpoint(items, endpointId));
+    clearEndpointFocus(endpointId);
     if (editing?.id === endpointId) {
       setDialogOpen(false);
       setActionProjectId(undefined);
@@ -326,6 +331,7 @@ export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: 
       mutationKeys.complete("endpoint.delete", deleting.id);
       if (revision !== projectRevision.current) return;
       setEndpoints((items) => removeEndpoint(items, deleting.id));
+      clearEndpointFocus(deleting.id);
       setDeleting(undefined);
       void resetPage();
       showToast({ body: "Endpoint deleted" });
@@ -344,6 +350,13 @@ export function EndpointsPage({ projectId }: { workspaceId?: string; projectId: 
     setActionError("");
     void load();
     loadDependencies();
+  }
+  function clearEndpointFocus(endpointId:string){
+    if(focusedEndpointId!==endpointId)return;
+    focusedLoadRevision.current+=1;
+    setFocusedEndpoint(undefined);
+    const search=routeSearchParams?.toString()??(typeof window==="undefined"?"":window.location.search.slice(1));
+    router.replace(endpointLocationWithoutFocus(pathname,search,endpointId),{scroll:false});
   }
   async function resetPage(){setCursorHistory([]);setCursor(undefined);if(cursor===undefined)await load()}
   const visibleEndpoints=focusedEndpoint&&!endpoints.some((endpoint)=>endpoint.id===focusedEndpoint.id)?[focusedEndpoint,...endpoints]:endpoints;

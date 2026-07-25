@@ -162,7 +162,7 @@ export function EndpointDialog({
                     width="100%"
                   />
                 </div>
-                <CredentialPicker projectId={projectId} value={input.credentialId} disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})}/>
+                <CredentialPicker projectId={projectId} value={input.credentialId} disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})} onUnavailable={()=>onChange({...input,credentialId:"",baseUrl:""})}/>
                 <NumberInput
                   label="Timeout"
                   value={input.requestTimeoutSecs}

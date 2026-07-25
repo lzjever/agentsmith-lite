@@ -279,7 +279,7 @@ function ProviderUsage({
             {firstDay && lastDay ? `30-day period: ${formatProviderDay(firstDay)} through ${formatProviderDay(lastDay)}` : "30-day period"}
           </Text>
         </div>
-        <div className="w-full max-w-sm space-y-2"><Button label="All endpoints" variant={selectedEndpointId==="all"?"primary":"secondary"} size="sm" onClick={()=>onEndpointChange("all")}/><EndpointPicker projectId={projectId} value={selectedEndpointId==="all"?"":selectedEndpointId} label="Filter to endpoint" onChange={(endpoint)=>onEndpointChange(endpoint.id)}/></div>
+        <div className="w-full max-w-sm space-y-2"><Button label="All endpoints" variant={selectedEndpointId==="all"?"primary":"secondary"} size="sm" onClick={()=>onEndpointChange("all")}/><EndpointPicker projectId={projectId} value={selectedEndpointId==="all"?"":selectedEndpointId} label="Filter to endpoint" onChange={(endpoint)=>onEndpointChange(endpoint.id)} onUnavailable={()=>onEndpointChange("all")}/></div>
       </div>
       {hasTrend ? (
         <>

@@ -31,7 +31,7 @@ describe("bounded endpoint and credential directories",()=>{
     await assert.rejects(()=>fixture.services.credentials.get(fixture.owner.id,fixture.otherProject.id,"credential_\uE000"),status(404));
   });
 
-  it("pages endpoint views by C keyset, task readiness, exact metadata, and bounded business lookups",async()=>{
+  it("pages endpoint views by C keyset, task readiness, exact metadata, and bounded business lookups",async(t)=>{
     const fixture=await createFixture();
     const tiedAt="2026-07-24T00:02:00.000Z";
     const credential=await fixture.credential("credential_endpoint","Provider",tiedAt);
@@ -68,10 +68,41 @@ describe("bounded endpoint and credential directories",()=>{
       {endpointId:"endpoint_\uE000",metric:"providerTokens",limit:100,windowSeconds:3600}
     ]});
     assert.deepEqual(batches,[["endpoint_\uE000"]]);
+    assert.deepEqual((await fixture.services.policies.getPolicy(fixture.owner.id,fixture.project.id)).endpointWindows?.map((window)=>[window.endpointId,window.endpointName]),[
+      ["endpoint_\uE000","High BMP"],
+      ["endpoint_\uE000","High BMP"]
+    ]);
     await assert.rejects(()=>fixture.services.policies.updatePolicy(fixture.owner.id,fixture.project.id,{endpointWindows:[{endpointId:"missing",metric:"providerRequests",limit:1,windowSeconds:3600}]}),status(404));
 
+    const alertRule=await fixture.services.alertRules.create(fixture.owner.id,fixture.project.id,{alertType:"endpoint_failure",scope:{kind:"endpoint",endpointId:"endpoint_\uE000"}});
+    assert.equal(alertRule.endpointName,"High BMP");
+    const exactEndpointView=fixture.store.findEndpointView.bind(fixture.store);
+    fixture.store.findEndpointView=async()=>{throw new Error("presentation projections must not hydrate endpoints one at a time")};
+    try{
+      assert.equal((await fixture.services.policies.getPolicy(fixture.owner.id,fixture.project.id)).endpointWindows[0]?.endpointName,"High BMP");
+      assert.equal((await fixture.services.alertRules.list(fixture.owner.id,fixture.project.id))[0]?.endpointName,"High BMP");
+      assert.equal((await fixture.services.alertRules.find(fixture.owner.id,fixture.project.id,alertRule.id)).endpointName,"High BMP");
+    }finally{fixture.store.findEndpointView=exactEndpointView}
+
+    const usageQueries:Parameters<typeof fixture.store.queryProjectEndpointUsagePage>[0][]=[],queryUsage=fixture.store.queryProjectEndpointUsagePage.bind(fixture.store);
+    fixture.store.queryProjectEndpointUsagePage=async(query)=>{usageQueries.push(structuredClone(query));return queryUsage(query)};
+    t.mock.timers.enable({apis:["Date"],now:new Date("2026-07-24T23:59:59.900Z")});
     const usage=await fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{limit:1});
     assert.equal(usage.items.length,1);assert.ok(usage.nextCursor);
+    t.mock.timers.setTime(Date.parse("2026-07-25T00:00:01.000Z"));
+    await fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{cursor:usage.nextCursor!,limit:1});
+    assert.deepEqual(
+      usageQueries.map(({periodStart,periodEnd,measuredAt})=>({periodStart,periodEnd,measuredAt})),
+      [
+        {periodStart:"2026-06-25T00:00:00.000Z",periodEnd:"2026-07-25T00:00:00.000Z",measuredAt:"2026-07-24T23:59:59.900Z"},
+        {periodStart:"2026-06-25T00:00:00.000Z",periodEnd:"2026-07-25T00:00:00.000Z",measuredAt:"2026-07-24T23:59:59.900Z"}
+      ]
+    );
+    const changedSnapshot=JSON.parse(Buffer.from(usage.nextCursor!,"base64url").toString("utf8"));
+    changedSnapshot.measuredAt="2026-07-23T23:59:59.900Z";
+    const changedSnapshotCursor=Buffer.from(JSON.stringify(changedSnapshot),"utf8").toString("base64url");
+    await assert.rejects(()=>fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{cursor:changedSnapshotCursor,limit:1}),invalidCursor);
+    await assert.rejects(()=>fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{q:"changed",cursor:usage.nextCursor!,limit:1}),invalidCursor);
     const viewerUsage=await fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{userId:fixture.viewer.id,limit:1});
     assert.ok(viewerUsage.nextCursor);
     await assert.rejects(()=>fixture.services.policies.getEndpointUsagePage(fixture.owner.id,fixture.project.id,{cursor:viewerUsage.nextCursor!}),invalidCursor);
