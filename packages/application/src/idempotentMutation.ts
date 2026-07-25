@@ -1,24 +1,30 @@
 import { createHash } from "node:crypto";
 import { ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
-import type { CompleteTaskIdempotencyInput, ProductStore, TaskIdempotencyOperation } from "../../ports/src/store.js";
+import type {
+  ClaimedTaskIdempotencyOperation,
+  CompleteTaskIdempotencyInput,
+  ProductStore,
+  TaskIdempotencyOperation
+} from "../../ports/src/store.js";
 
 type ProductMutationOperation = Extract<TaskIdempotencyOperation, `${"workspace" | "project"}.${string}`>;
-interface IdempotentMutationRunContext {
+interface IdempotentMutationRunContext<Operation extends ProductMutationOperation> {
+  owner: ClaimedTaskIdempotencyOperation & { operation: Operation };
   completion(responseStatus: number, responseBody: unknown): CompleteTaskIdempotencyInput;
 }
 
-export async function runIdempotentMutation<T>(input: {
+export async function runIdempotentMutation<T, Operation extends ProductMutationOperation>(input: {
   store: ProductStore;
   actorId: string;
   scopeId: string;
-  operation: ProductMutationOperation;
+  operation: Operation;
   key: string;
   request: unknown;
   resourceId: string;
   failureMessage: string;
   completeServerErrors?: boolean;
-  run: (resourceId: string, context: IdempotentMutationRunContext) => Promise<T>;
+  run: (resourceId: string, context: IdempotentMutationRunContext<Operation>) => Promise<T>;
 }): Promise<T> {
   const timestamp = nowIso();
   const requestHash = canonicalRequestHash(input.request);
@@ -38,13 +44,27 @@ export async function runIdempotentMutation<T>(input: {
   if (begun.kind === "in_progress") throw new ProductError("Idempotent operation is still in progress", 409, "idempotency_in_progress");
   if (begun.kind === "replay") {
     if (begun.responseStatus >= 400) {
-      const body = begun.responseBody as { error?: unknown };
-      throw new ProductError(typeof body?.error === "string" ? body.error : input.failureMessage, begun.responseStatus);
+      const body = begun.responseBody as { error?: unknown; code?: unknown };
+      throw new ProductError(
+        typeof body?.error === "string" ? body.error : input.failureMessage,
+        begun.responseStatus,
+        typeof body?.code === "string" ? body.code : undefined
+      );
     }
     return begun.responseBody as T;
   }
+  const owner: ClaimedTaskIdempotencyOperation & { operation: Operation } = {
+    actorId: input.actorId,
+    projectId: input.scopeId,
+    operation: input.operation,
+    key: input.key,
+    requestHash,
+    resourceId: begun.resourceId,
+    claimToken: begun.claimToken
+  };
   try {
     const response = await input.run(begun.resourceId, {
+      owner,
       completion: (responseStatus, responseBody) => ({
         actorId: input.actorId,
         projectId: input.scopeId,
@@ -80,7 +100,10 @@ export async function runIdempotentMutation<T>(input: {
       requestHash,
       claimToken: begun.claimToken,
       responseStatus: productError.statusCode,
-      responseBody: { error: productError.message },
+      responseBody: {
+        error: productError.message,
+        ...(productError.code ? { code: productError.code } : {})
+      },
       updatedAt: nowIso()
     });
     throw productError;

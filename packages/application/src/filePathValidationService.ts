@@ -49,6 +49,58 @@ export class FilePathValidationService {
     await assertNoSymlinkExistingPrefix(await realpath(projectRoot), candidate);
     return candidate;
   }
+
+  assertOrdinaryFilePath(normalizedPath: string): void {
+    if (normalizedPath === "workspace/.artifacts" || normalizedPath.startsWith("workspace/.artifacts/")) {
+      throw artifactNamespaceProtected();
+    }
+  }
+
+  isArtifactNamespaceEntry(parentPath: string, entryName: string): boolean {
+    return parentPath === "workspace" && entryName === ".artifacts";
+  }
+
+  deleteCapability(normalizedPath: string, canWrite: boolean) {
+    if (normalizedPath === "workspace") {
+      return {
+        canDelete: false,
+        deleteUnavailableReason: "artifact_namespace_protected" as const
+      };
+    }
+    if (!canWrite) {
+      return {
+        canDelete: false,
+        deleteUnavailableReason: "read_only" as const
+      };
+    }
+    return {
+      canDelete: true,
+      deleteUnavailableReason: null
+    };
+  }
+
+  assertEntryDeleteAllowed(normalizedPath: string): void {
+    this.assertOrdinaryFilePath(normalizedPath);
+    if (normalizedPath === "workspace") {
+      throw artifactNamespaceProtected();
+    }
+  }
+
+  async openProjectRoot(projectRoot: string, create: boolean) {
+    if (this.trustedDataRoot) {
+      return openProjectRootDescriptor(this.trustedDataRoot, projectRoot, create);
+    }
+    if (create) await mkdir(projectRoot, { recursive: true });
+    try {
+      return await open(path.resolve(projectRoot), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    } catch (error) {
+      throw unsafeProjectStorageError(error);
+    }
+  }
+}
+
+function artifactNamespaceProtected(): ProductError {
+  return new ProductError("Task Artifact namespace is protected", 409, "artifact_namespace_protected");
 }
 
 export async function openProjectRootDescriptor(dataRoot:string,projectRoot:string,create:boolean){

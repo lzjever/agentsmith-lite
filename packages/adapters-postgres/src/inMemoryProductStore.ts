@@ -23,7 +23,7 @@ import type {
   UserProfilePreferences, ProjectCredential, StoredProjectCredential, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectAlertType, WorkspaceMembership, WorkspaceMembershipView, WorkspaceDirectoryItem, ProjectDirectoryItem
 } from "../../contracts/src/api.js";
 import { classifyPreviewMediaType, isActiveProjectAlert, sandboxCapacityErrorEnvelope, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
-import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
+import { CredentialVersionConflictError, EndpointNameConflictError, isFileDeletionOperationTransition } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
 import type {
@@ -69,6 +69,8 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
+  FileDeletionOperationOwner,
+  FileDeletionOperationState,
   TaskIdempotencyLookupInput,
   TaskIdempotencyResourceLookupInput,
   TaskSandboxReleaseMutationInput,
@@ -1273,6 +1275,22 @@ export class InMemoryProductStore implements ProductStore {
     if(row.status==="completed")return{kind:"replay",resourceId:row.resourceId,responseStatus:row.responseStatus!,responseBody:clone(row.responseBody)};
     return{kind:"in_progress",resourceId:row.resourceId};
   }
+  async findFileDeletionOperation(owner:FileDeletionOperationOwner):Promise<FileDeletionOperationState|null>{
+    const row=[...this.taskIdempotency.values()].find((record)=>
+      taskIdempotencyRecordOwnsFileDeletion(record,owner)
+    );
+    return row?.fileDeletion?clone(row.fileDeletion):null;
+  }
+  async persistFileDeletionOperation(owner:FileDeletionOperationOwner,state:FileDeletionOperationState):Promise<boolean>{
+    const recordEntry=[...this.taskIdempotency.entries()].find(([,record])=>
+      taskIdempotencyRecordOwnsFileDeletion(record,owner)
+    );
+    if(!recordEntry)return false;
+    const [key,record]=recordEntry;
+    if(!isFileDeletionOperationTransition(record.fileDeletion??null,state))return false;
+    this.taskIdempotency.set(key,{...record,fileDeletion:clone(state)});
+    return true;
+  }
   async findInProgressTerminalStartOperation(runId:string):Promise<import("../../ports/src/store.js").InProgressTerminalStartOperation|null>{
     const row=[...this.taskIdempotency.values()].find((record)=>record.operation==="terminal-start"&&record.resourceId===runId&&record.status==="in_progress");
     return row?{actorId:row.actorId,projectId:row.projectId,operation:"terminal-start",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId,claimToken:row.claimToken}:null;
@@ -2115,6 +2133,21 @@ interface InMemoryTaskIdempotencyRecord {
   responseBody: unknown;
   now: string;
   updatedAt: string;
+  fileDeletion?: FileDeletionOperationState;
+}
+
+function taskIdempotencyRecordOwnsFileDeletion(
+  record: InMemoryTaskIdempotencyRecord,
+  owner: FileDeletionOperationOwner
+): boolean {
+  return record.actorId === owner.actorId &&
+    record.projectId === owner.projectId &&
+    record.operation === owner.operation &&
+    record.key === owner.key &&
+    record.requestHash === owner.requestHash &&
+    record.resourceId === owner.resourceId &&
+    record.claimToken === owner.claimToken &&
+    record.status === "in_progress";
 }
 
 function canonicalTaskMessage(message:PersistedTaskMessage,resourceId:string):PersistedTaskMessage {

@@ -703,8 +703,8 @@ async function routeApi(
       if(libraryId&&segments[6]==="files"){
         const action=segments[7];
         if(!action&&method==="GET"){
-          assertOnlySearchParams(url,["path"]);const {library,projectRoot}=await services.fileLibraries.require(user.id,projectId,libraryId);
-          return sendJson(res,200,await services.files.listLibraryFiles(projectRoot,library.rootSubPath,url.searchParams.get("path")??""));
+          assertOnlySearchParams(url,["path"]);const {library,projectRoot,canWriteFiles}=await services.fileLibraries.require(user.id,projectId,libraryId);
+          return sendJson(res,200,await services.files.listLibraryFiles(projectRoot,library.rootSubPath,url.searchParams.get("path")??"",canWriteFiles));
         }
         if(!action&&method==="PUT"){
           assertOnlySearchParams(url,["path","overwrite"]);const key=requireIdempotencyKey(req);
@@ -714,7 +714,7 @@ async function routeApi(
         }
         if(!action&&method==="DELETE"){
           assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,["path"]);const filePath=asString(body.path);
-          const response=await services.settings.runIdempotentMutation(user.id,projectId,"project.file.delete",key,{projectId,libraryId,filePath},`${libraryId}:${filePath}`,()=>services.fileLibraries.withLibraryMutation(user.id,projectId,libraryId,async({library,projectRoot,rootSubPaths})=>(await services.files.deleteLibraryFileWithAccounting(projectRoot,library.rootSubPath,filePath,{rootSubPaths,reconcile:async(measured)=>{await services.policies.reconcileFileLibraryBytes(projectId,measured)},record:(storedPath,delta,file)=>services.policies.recordFileMutation(projectId,user.id,"file.delete",library.id,`${library.rootSubPath}/${storedPath}`,delta,file.bytes,file.mediaType)})).response));
+          const response=await services.fileLibraries.deleteEntry(user.id,projectId,libraryId,filePath,key,(measured)=>services.policies.reconcileFileLibraryBytes(projectId,measured).then(()=>undefined));
           return sendJson(res,200,response);
         }
         if((action==="download"||action==="preview")&&!segments[8]&&method==="GET"){

@@ -362,8 +362,8 @@ export interface ProjectAuditEvent {
   detail?: ProjectAuditSafeDetail;
   createdAt: ISODateString;
 }
-export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; runId?: string; releaseReason?: SandboxReleaseReason; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "accepted" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; trigger?:"task_create"|"task_message"|"terminal"; scope?:"project_policy"|"substrate_namespace"; activeSandboxes?:number; sandboxLimit?:number; }
-export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","runId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.releaseReason==="string"&&["requested","failed","cleanup"].includes(source.releaseReason))safe.releaseReason=source.releaseReason as SandboxReleaseReason;if(typeof source.metric==="string"&&["active_sandboxes","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","accepted","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(typeof source.trigger==="string"&&["task_create","task_message","terminal"].includes(source.trigger))safe.trigger=source.trigger as NonNullable<ProjectAuditSafeDetail["trigger"]>;if(typeof source.scope==="string"&&["project_policy","substrate_namespace"].includes(source.scope))safe.scope=source.scope as NonNullable<ProjectAuditSafeDetail["scope"]>;if(isCanonicalLibraryAuditPath(source.filePath))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes","activeSandboxes","sandboxLimit"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
+export interface ProjectAuditSafeDetail { endpointId?: string; metric?: AlertRuleMetric; limit?: number; current?: number; windowSeconds?: number; alertRuleId?: string; alertId?: string; taskId?: string; runId?: string; releaseReason?: SandboxReleaseReason; messageId?: string; deliveryStatus?: "pending" | "dispatching" | "accepted" | "failed"; credentialVersion?: number; healthStatus?: EndpointHealthStatus; errorCategory?: EndpointHealthErrorCategory; modelCount?: number; filePath?: string; bytes?: number; mediaType?: string; entryType?: ProjectFileDeletionEntryType; trigger?:"task_create"|"task_message"|"terminal"; scope?:"project_policy"|"substrate_namespace"; activeSandboxes?:number; sandboxLimit?:number; }
+export function sanitizeProjectAuditDetail(input:unknown):ProjectAuditSafeDetail{if(!input||typeof input!=="object"||Array.isArray(input))return{};const source=input as Record<string,unknown>;const safe:ProjectAuditSafeDetail={};for(const key of ["endpointId","alertRuleId","alertId","taskId","runId","messageId"] as const){const value=source[key];if(typeof value==="string"&&value.length<=128&&/^[A-Za-z0-9._:-]+$/.test(value))Object.assign(safe,{[key]:value})}if(typeof source.releaseReason==="string"&&["requested","failed","cleanup"].includes(source.releaseReason))safe.releaseReason=source.releaseReason as SandboxReleaseReason;if(typeof source.metric==="string"&&["active_sandboxes","provider_requests","provider_tokens","provider_cost","project_file_bytes","failure_count"].includes(source.metric))safe.metric=source.metric as AlertRuleMetric;if(typeof source.deliveryStatus==="string"&&["pending","dispatching","accepted","failed"].includes(source.deliveryStatus))safe.deliveryStatus=source.deliveryStatus as NonNullable<ProjectAuditSafeDetail["deliveryStatus"]>;if(typeof source.healthStatus==="string"&&["healthy","unavailable","unknown"].includes(source.healthStatus))safe.healthStatus=source.healthStatus as EndpointHealthStatus;if(typeof source.errorCategory==="string"&&["auth","network","upstream","timeout","rate_limit","unknown"].includes(source.errorCategory))safe.errorCategory=source.errorCategory as EndpointHealthErrorCategory;if(typeof source.trigger==="string"&&["task_create","task_message","terminal"].includes(source.trigger))safe.trigger=source.trigger as NonNullable<ProjectAuditSafeDetail["trigger"]>;if(typeof source.scope==="string"&&["project_policy","substrate_namespace"].includes(source.scope))safe.scope=source.scope as NonNullable<ProjectAuditSafeDetail["scope"]>;if(typeof source.entryType==="string"&&["file","directory","symlink","unsupported"].includes(source.entryType))safe.entryType=source.entryType as ProjectFileDeletionEntryType;if(isCanonicalLibraryAuditPath(source.filePath))safe.filePath=source.filePath;if(typeof source.mediaType==="string"&&["text/plain","text/csv","text/markdown","application/json","image/png","image/jpeg","image/gif","image/webp","application/octet-stream"].includes(source.mediaType))safe.mediaType=source.mediaType;for(const key of ["limit","current","windowSeconds","credentialVersion","modelCount","bytes","activeSandboxes","sandboxLimit"] as const){const value=source[key];if(typeof value==="number"&&Number.isFinite(value)&&value>=0)Object.assign(safe,{[key]:value})}return safe}
 function isCanonicalLibraryAuditPath(input:unknown):input is string{if(typeof input!=="string"||input.length>1024||input.includes("\\")||/[\u0000-\u001f]/.test(input))return false;const segments=input.split("/");return segments.length>=4&&segments[0]==="libraries"&&/^[A-Za-z0-9._:-]+$/.test(segments[1]??"")&&segments[2]==="home"&&segments.slice(3).every((segment)=>segment!==""&&segment!=="."&&segment!=="..");}
 
 export interface ProjectAuditEventView extends ProjectAuditEvent {
@@ -902,6 +902,12 @@ export interface CreateTaskInput {
 }
 
 export type ProjectFileEntryType = "file" | "directory";
+export type ProjectFileDeletionEntryType = ProjectFileEntryType | "symlink" | "unsupported";
+
+export interface ProjectFileEntryCapabilities {
+  canDelete: boolean;
+  deleteUnavailableReason: "artifact_namespace_protected" | "read_only" | null;
+}
 
 export interface ProjectFileEntry {
   name: string;
@@ -910,10 +916,15 @@ export interface ProjectFileEntry {
   size?: number;
   mediaType?: string;
   updatedAt: ISODateString;
+  capabilities?: ProjectFileEntryCapabilities;
+}
+
+export interface ProjectFileListEntry extends ProjectFileEntry {
+  capabilities: ProjectFileEntryCapabilities;
 }
 
 export interface ProjectFileListResponse {
-  entries: ProjectFileEntry[];
+  entries: ProjectFileListEntry[];
 }
 
 export interface UploadProjectFileInput {

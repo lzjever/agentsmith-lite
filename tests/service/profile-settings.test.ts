@@ -198,6 +198,35 @@ describe("profile and settings services", () => {
     assert.deepEqual(result, { resourceId: "original-resource" });
   });
 
+  it("replays a typed idempotent error with the original status, message, and code", async () => {
+    const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
+    const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "typed-error-owner", email: "typed-error-owner@example.test", emailVerified: true });
+    const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project" });
+    let runs = 0;
+    const mutation = () => services.settings.runIdempotentMutation(
+      owner.user.id,
+      project.id,
+      "project.settings.update",
+      "typed-error-key",
+      { path: "missing" },
+      project.id,
+      async () => {
+        runs += 1;
+        throw new ProductError("File path not found", 404, "file_path_not_found");
+      }
+    );
+    const typedError = (error: unknown) =>
+      error instanceof ProductError &&
+      error.statusCode === 404 &&
+      error.message === "File path not found" &&
+      error.code === "file_path_not_found";
+
+    await assert.rejects(mutation, typedError);
+    await assert.rejects(mutation, typedError);
+    assert.equal(runs, 1);
+  });
+
   it("reauthorizes settings before replaying a completed response", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/asl", builtinAdminPassword: "admin-password" });
     const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-owner", email: "settings-owner@example.test", emailVerified: true });

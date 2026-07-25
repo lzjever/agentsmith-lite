@@ -793,6 +793,8 @@ export interface ProductStore {
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
   findTaskIdempotency(input: TaskIdempotencyLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   findTaskIdempotencyByResource(input: TaskIdempotencyResourceLookupInput): Promise<TaskIdempotencyBeginResult | null>;
+  findFileDeletionOperation(owner: FileDeletionOperationOwner): Promise<FileDeletionOperationState | null>;
+  persistFileDeletionOperation(owner: FileDeletionOperationOwner, state: FileDeletionOperationState): Promise<boolean>;
   findInProgressTerminalStartOperation(runId:string):Promise<InProgressTerminalStartOperation|null>;
   findTaskPreparationOperation(taskId:string):Promise<TaskPreparationOperation|null>;
   completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean>;
@@ -1068,6 +1070,12 @@ export interface BeginTaskIdempotencyInput extends TaskIdempotencyScope {
   leaseExpiresAt: string;
 }
 
+export interface ClaimedTaskIdempotencyOperation extends TaskIdempotencyScope {
+  requestHash: string;
+  resourceId: string;
+  claimToken: string;
+}
+
 export type TaskIdempotencyBeginResult =
   | { kind: "claimed"; resourceId: string; claimToken: string }
   | { kind: "in_progress"; resourceId: string }
@@ -1110,6 +1118,44 @@ export interface TaskIdempotencyResourceLookupInput {
   key: string;
   requestHash: string;
   resourceId: string;
+}
+
+export type FileDeletionOperationOwner = ClaimedTaskIdempotencyOperation & {
+  operation: "project.file.delete";
+};
+export type FileDeletionOperationPhase = "isolated" | "removed";
+export type FileDeletionOperationEntryType = "file" | "directory" | "symlink" | "unsupported";
+export interface FileDeletionOperationState {
+  phase: FileDeletionOperationPhase;
+  quarantineDevice: string;
+  quarantineInode: string;
+  entryType: FileDeletionOperationEntryType;
+  bytes: number;
+}
+
+export function isFileDeletionOperationTransition(
+  current: FileDeletionOperationState | null,
+  next: FileDeletionOperationState
+): boolean {
+  if (!isValidFileDeletionOperationState(next) || current && !isValidFileDeletionOperationState(current)) return false;
+  if (!current) return next.phase === "isolated";
+  if (
+    current.quarantineDevice !== next.quarantineDevice ||
+    current.quarantineInode !== next.quarantineInode ||
+    current.entryType !== next.entryType ||
+    current.bytes !== next.bytes
+  ) return false;
+  if (current.phase === "isolated") return next.phase === "isolated" || next.phase === "removed";
+  return next.phase === "removed";
+}
+
+export function isValidFileDeletionOperationState(state: FileDeletionOperationState): boolean {
+  return (state.phase === "isolated" || state.phase === "removed") &&
+    /^[0-9]+$/.test(state.quarantineDevice) &&
+    /^[0-9]+$/.test(state.quarantineInode) &&
+    ["file", "directory", "symlink", "unsupported"].includes(state.entryType) &&
+    Number.isSafeInteger(state.bytes) &&
+    state.bytes >= 0;
 }
 
 export interface TaskPreparationOperation {

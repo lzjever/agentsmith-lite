@@ -103,22 +103,80 @@ export class FileLibraryService {
     });
   }
 
-  async require(userId: string, projectId: string, libraryId: string, write = false): Promise<{ library: FileLibrary; projectRoot: string }> {
-    const project = await this.authorization.requireProject(userId, projectId, write ? "write" : "view");
+  async require(userId: string, projectId: string, libraryId: string, write = false): Promise<{ library: FileLibrary; projectRoot: string; canWriteFiles: boolean }> {
+    const access = await this.authorization.projectAccess(userId, projectId);
+    if (write) await this.authorization.requireProject(userId, projectId, "write");
     const library = await this.requireInProject(projectId, libraryId);
-    return { library, projectRoot: this.projectAbsoluteRoot(project.rootPath) };
+    return {
+      library,
+      projectRoot: this.projectAbsoluteRoot(access.project.rootPath),
+      canWriteFiles: access.canWrite && access.writableLifecycle
+    };
+  }
+
+  async deleteEntry(
+    userId: string,
+    projectId: string,
+    libraryId: string,
+    filePath: string,
+    idempotencyKey: string,
+    reconcile: (bytes: number) => Promise<void>
+  ): Promise<{ deleted: true }> {
+    return withFileLibraryLifecycleLock(projectId, async () => {
+      const {
+        library,
+        projectRoot,
+        rootSubPaths
+      } = await this.requireLibraryFileScopeUnlocked(userId, projectId, libraryId);
+      return runIdempotentMutation({
+        store: this.store,
+        actorId: userId,
+        scopeId: projectId,
+        operation: "project.file.delete",
+        key: idempotencyKey,
+        request: { projectId, libraryId, filePath },
+        resourceId: newId("file_delete"),
+        failureMessage: "File entry could not be deleted",
+        completeServerErrors: false,
+        run: async (operationId, context) => (await this.files.deleteLibraryFileWithAccounting(
+          projectRoot,
+          library.rootSubPath,
+          filePath,
+          {
+            rootSubPaths,
+            reconcile,
+            record: async (storedPath, _delta, entry) => {
+              await this.store.appendProjectAuditEvent({
+                id: `audit:${operationId}`,
+                projectId,
+                actorId: userId,
+                action: "file.delete",
+                status: "accepted",
+                resourceKind: "file",
+                resourceId: library.id,
+                detail: {
+                  filePath: `${library.rootSubPath}/${storedPath}`,
+                  bytes: entry.bytes,
+                  ...(entry.entryType ? { entryType: entry.entryType } : {})
+                },
+                createdAt: nowIso()
+              });
+            }
+          },
+          {
+            owner: context.owner,
+            operations: this.store
+          }
+        )).response
+      });
+    });
   }
 
   async withLibraryMutation<T>(userId: string, projectId: string, libraryId: string, action: (scope: LibraryFileScope) => Promise<T>): Promise<T> {
-    return withFileLibraryLifecycleLock(projectId, async () => {
-      const project = await this.authorization.requireProject(userId, projectId, "write");
-      const library = await this.requireInProject(projectId, libraryId);
-      return action({
-        library,
-        projectRoot: this.projectAbsoluteRoot(project.rootPath),
-        rootSubPaths: await this.rootSubPaths(projectId)
-      });
-    });
+    return withFileLibraryLifecycleLock(
+      projectId,
+      async () => action(await this.requireLibraryFileScopeUnlocked(userId, projectId, libraryId))
+    );
   }
 
   async measureProjectFileBytes(userId: string, projectId: string): Promise<number> {
@@ -139,6 +197,20 @@ export class FileLibraryService {
 
   private async rootSubPaths(projectId: string): Promise<string[]> {
     return (await this.store.listFileLibrariesForProject(projectId)).map((library) => library.rootSubPath);
+  }
+
+  private async requireLibraryFileScopeUnlocked(
+    userId: string,
+    projectId: string,
+    libraryId: string
+  ): Promise<LibraryFileScope> {
+    const project = await this.authorization.requireProject(userId, projectId, "write");
+    const library = await this.requireInProject(projectId, libraryId);
+    return {
+      library,
+      projectRoot: this.projectAbsoluteRoot(project.rootPath),
+      rootSubPaths: await this.rootSubPaths(projectId)
+    };
   }
 
   private async requireInProject(projectId: string, id: string): Promise<FileLibrary> {

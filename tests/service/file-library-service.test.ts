@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { DescriptorFileTreeWalker } from "../../packages/application/src/descriptorFileTreeWalker.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
+import { FileLibraryService } from "../../packages/application/src/fileLibraryService.js";
+import { FilePathValidationService } from "../../packages/application/src/filePathValidationService.js";
+import { FileService } from "../../packages/application/src/fileService.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from "../../packages/ports/src/botified.js";
 import type { ProductStore } from "../../packages/ports/src/store.js";
 
@@ -96,6 +101,172 @@ describe("file library service", () => {
     release();
     await mutation;
     await assert.rejects(deletion, /File Library is not empty/);
+  });
+
+  it("holds the lifecycle lock before an expired same-key delete can reclaim its lease", async () => {
+    const { services, store, ownerId, projectId } = await fixture();
+    const library = await services.fileLibraries.create(ownerId, projectId, { name: "Delete lease" });
+    const project = await services.authorization.requireProject(ownerId, projectId);
+    const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+    await services.files.uploadLibraryFile(projectRoot, library.rootSubPath, {
+      path: "selected/value.txt",
+      bytes: Buffer.from("value")
+    });
+
+    const originalBegin = store.beginTaskIdempotency.bind(store);
+    let beginCalls = 0;
+    store.beginTaskIdempotency = (input) => {
+      beginCalls += 1;
+      if (beginCalls === 1) return originalBegin(input);
+      const now = new Date(Date.parse(input.leaseExpiresAt) + 1).toISOString();
+      return originalBegin({
+        ...input,
+        now,
+        leaseExpiresAt: new Date(Date.parse(now) + 30_000).toISOString()
+      });
+    };
+
+    let entered!: () => void;
+    const accountingEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const accountingRelease = new Promise<void>((resolve) => { release = resolve; });
+    const first = services.fileLibraries.deleteEntry(
+      ownerId,
+      projectId,
+      library.id,
+      "selected",
+      "delete-lease-key",
+      async () => {
+        entered();
+        await accountingRelease;
+      }
+    );
+    await accountingEntered;
+    const second = services.fileLibraries.deleteEntry(
+      ownerId,
+      projectId,
+      library.id,
+      "selected",
+      "delete-lease-key",
+      async () => undefined
+    );
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const callsWhileFirstOwnsLock = beginCalls;
+    release();
+    const results = await Promise.allSettled([first, second]);
+
+    assert.equal(callsWhileFirstOwnsLock, 1);
+    assert.equal(results.every((result) => result.status === "fulfilled"), true);
+  });
+
+  it("keeps a post-isolation typed failure retryable and leaves a recreated source untouched", async () => {
+    const { services, store, ownerId, projectId } = await fixture();
+    const library = await services.fileLibraries.create(ownerId, projectId, { name: "Delete retry" });
+    const project = await services.authorization.requireProject(ownerId, projectId);
+    const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+    await services.files.uploadLibraryFile(projectRoot, library.rootSubPath, {
+      path: "selected/original.txt",
+      bytes: Buffer.from("original")
+    });
+
+    const originalComplete = store.completeTaskIdempotency.bind(store);
+    let deleteCompletionCalls = 0;
+    store.completeTaskIdempotency = (input) => {
+      if (input.operation === "project.file.delete") deleteCompletionCalls += 1;
+      return originalComplete(input);
+    };
+    let rejectAccounting = true;
+    const deletion = () => services.fileLibraries.deleteEntry(
+      ownerId,
+      projectId,
+      library.id,
+      "selected",
+      "post-isolation-key",
+      async () => {
+        if (rejectAccounting) {
+          rejectAccounting = false;
+          throw new ProductError("Accounting changed", 409, "accounting_changed");
+        }
+      }
+    );
+
+    await assert.rejects(deletion, (error: unknown) =>
+      error instanceof ProductError &&
+      error.statusCode === 500 &&
+      error.code === "file_deletion_incomplete"
+    );
+    assert.equal(deleteCompletionCalls, 0);
+
+    await services.files.uploadLibraryFile(projectRoot, library.rootSubPath, {
+      path: "selected/recreated.txt",
+      bytes: Buffer.from("replacement")
+    });
+    const originalBegin = store.beginTaskIdempotency.bind(store);
+    store.beginTaskIdempotency = (input) => {
+      const now = new Date(Date.parse(input.leaseExpiresAt) + 1).toISOString();
+      return originalBegin({
+        ...input,
+        now,
+        leaseExpiresAt: new Date(Date.parse(now) + 30_000).toISOString()
+      });
+    };
+
+    assert.deepEqual(await deletion(), { deleted: true });
+    assert.equal(
+      await readFile(path.join(projectRoot, library.rootSubPath, "selected", "recreated.txt"), "utf8"),
+      "replacement"
+    );
+  });
+
+  it("writes one Audit event with the actual rename-time substituted entry type", async () => {
+    const { services, store, dataRoot, ownerId, projectId } = await fixture();
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-file-delete-audit-outside-"));
+    roots.push(outside);
+    const project = await services.authorization.requireProject(ownerId, projectId);
+    const projectRoot = services.projectAbsoluteRoot(project.rootPath);
+    let source = "";
+    let substituted = false;
+    const files = new FileService(
+      new FilePathValidationService(dataRoot),
+      new DescriptorFileTreeWalker(),
+      {
+        async beforeRename() {
+          if (substituted) return;
+          substituted = true;
+          await unlink(source);
+          await symlink(path.join(outside, "retained.txt"), source);
+        }
+      }
+    );
+    const libraries = new FileLibraryService(
+      store,
+      services.authorization,
+      files,
+      services.projectAbsoluteRoot
+    );
+    const library = await libraries.create(ownerId, projectId, { name: "Substituted Audit" });
+    source = path.join(projectRoot, library.rootSubPath, "selected.txt");
+    await files.uploadLibraryFile(projectRoot, library.rootSubPath, {
+      path: "selected.txt",
+      bytes: Buffer.from("static")
+    });
+    await writeFile(path.join(outside, "retained.txt"), "retained");
+
+    assert.deepEqual(
+      await libraries.deleteEntry(ownerId, projectId, library.id, "selected.txt", "substituted-audit-key", async () => undefined),
+      { deleted: true }
+    );
+    assert.equal(substituted, true);
+    const audits = (await store.queryProjectAuditEvents(projectId, { limit: 100 })).items
+      .filter((event) => event.action === "file.delete" && event.resourceId === library.id);
+    assert.equal(audits.length, 1);
+    assert.deepEqual(audits[0]?.detail, {
+      filePath: `${library.rootSubPath}/selected.txt`,
+      bytes: 0,
+      entryType: "symlink"
+    });
+    assert.equal(await readFile(path.join(outside, "retained.txt"), "utf8"), "retained");
   });
 
   it("keeps libraries isolated and rejects traversal and symlink paths", async () => {

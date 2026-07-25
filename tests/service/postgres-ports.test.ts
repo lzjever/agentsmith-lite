@@ -3,7 +3,13 @@ import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
-import type { BeginTaskIdempotencyInput, TaskIdempotencyOperation } from "../../packages/ports/src/store.js";
+import { isFileDeletionOperationTransition } from "../../packages/ports/src/store.js";
+import type {
+  BeginTaskIdempotencyInput,
+  FileDeletionOperationOwner,
+  FileDeletionOperationState,
+  TaskIdempotencyOperation,
+} from "../../packages/ports/src/store.js";
 
 describe("postgres adapter ports", () => {
   it("exposes JSONB document and fenced lease semantics without Redis or Mongo", async () => {
@@ -263,6 +269,143 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migration.sql, /file_library_id.*agent_tasks|sandbox/i);
   });
 
+  it("fences file deletion phases with the current full idempotency owner", async () => {
+    const store = createInMemoryProductStore();
+    const base = {
+      actorId: "user_delete",
+      projectId: "project_delete",
+      operation: "project.file.delete" as const,
+      key: "delete-key",
+      requestHash: "delete-request",
+      resourceId: "delete-operation",
+    };
+    const first: FileDeletionOperationOwner = { ...base, claimToken: "claim-one" };
+    assert.equal((await store.beginTaskIdempotency({
+      ...base,
+      claimToken: first.claimToken,
+      now: "2026-07-25T00:00:00.000Z",
+      leaseExpiresAt: "2026-07-25T00:00:30.000Z",
+    })).kind, "claimed");
+    const isolated: FileDeletionOperationState = {
+      phase: "isolated",
+      quarantineDevice: "100",
+      quarantineInode: "200",
+      entryType: "directory",
+      bytes: 12,
+    };
+    assert.equal(await store.persistFileDeletionOperation(first, isolated), true);
+
+    const second: FileDeletionOperationOwner = { ...base, claimToken: "claim-two" };
+    assert.equal((await store.beginTaskIdempotency({
+      ...base,
+      claimToken: second.claimToken,
+      now: "2026-07-25T00:00:31.000Z",
+      leaseExpiresAt: "2026-07-25T00:01:01.000Z",
+    })).kind, "claimed");
+    assert.equal(await store.findFileDeletionOperation(first), null);
+    assert.equal(await store.persistFileDeletionOperation(first, { ...isolated, phase: "removed" }), false);
+    assert.deepEqual(await store.findFileDeletionOperation(second), isolated);
+    assert.equal(await store.persistFileDeletionOperation(second, { ...isolated, phase: "removed" }), true);
+  });
+
+  it("uses every idempotency owner field to fence PostgreSQL file deletion transitions", async () => {
+    const statements: string[] = [];
+    const owner: FileDeletionOperationOwner = {
+      actorId: "user_delete",
+      projectId: "project_delete",
+      operation: "project.file.delete",
+      key: "delete-key",
+      requestHash: "delete-request",
+      resourceId: "delete-operation",
+      claimToken: "delete-claim",
+    };
+    const state: FileDeletionOperationState = {
+      phase: "isolated",
+      quarantineDevice: "100",
+      quarantineInode: "200",
+      entryType: "file",
+      bytes: 8,
+    };
+    const client = {
+      async query(sql: string) {
+        statements.push(sql);
+        if (/select \* from task_idempotency_records/i.test(sql)) {
+          return {
+            rows: [{
+              file_deletion_phase: null,
+              file_deletion_quarantine_device: null,
+              file_deletion_quarantine_inode: null,
+              file_deletion_entry_type: null,
+              file_deletion_bytes: null,
+            }],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      },
+      release() {},
+    };
+    const store = Object.create(PostgresProductStore.prototype) as PostgresProductStore;
+    Object.defineProperty(store, "pool", {
+      value: { async connect() { return client; } },
+    });
+
+    assert.equal(await store.persistFileDeletionOperation(owner, state), true);
+    const fencedSql = statements.filter((sql) => /task_idempotency_records/i.test(sql)).join("\n");
+    for (const column of [
+      "actor_id",
+      "project_id",
+      "operation",
+      "idempotency_key",
+      "request_hash",
+      "resource_id",
+      "claim_token",
+      "status",
+    ]) {
+      assert.match(fencedSql, new RegExp(column, "i"));
+    }
+  });
+
+  it("stores only isolated and removed file deletion phases in migration 075", async () => {
+    const migration = (await readPostgresMigrations()).find((item) => item.id === "075_file_entry_deletion_operations");
+    assert.ok(migration);
+    assert.match(migration.sql, /file_deletion_quarantine_device/i);
+    assert.match(migration.sql, /file_deletion_quarantine_inode/i);
+    assert.match(migration.sql, /file_deletion_phase in \('isolated', 'removed'\)/i);
+    assert.match(migration.sql, /file_deletion_quarantine_device\s*~\s*'\^\[0-9\]\+\$'/i);
+    assert.match(migration.sql, /file_deletion_quarantine_inode\s*~\s*'\^\[0-9\]\+\$'/i);
+    assert.match(migration.sql, /file_deletion_bytes\s*<=\s*9007199254740991/i);
+    for (const column of [
+      "file_deletion_phase",
+      "file_deletion_quarantine_device",
+      "file_deletion_quarantine_inode",
+      "file_deletion_entry_type",
+      "file_deletion_bytes"
+    ]) {
+      assert.match(migration.sql, new RegExp(`${column} is not null`, "i"));
+    }
+    assert.doesNotMatch(migration.sql, /source_claimed|file_deletion_source_/i);
+  });
+
+  it("keeps transition validation at parity with migration 075 scalar bounds", () => {
+    const valid: FileDeletionOperationState = {
+      phase: "isolated",
+      quarantineDevice: "0",
+      quarantineInode: "200",
+      entryType: "file",
+      bytes: Number.MAX_SAFE_INTEGER
+    };
+    assert.equal(isFileDeletionOperationTransition(null, valid), true);
+    for (const invalid of [
+      { ...valid, quarantineDevice: "" },
+      { ...valid, quarantineDevice: " 100" },
+      { ...valid, quarantineInode: "-1" },
+      { ...valid, bytes: Number.MAX_SAFE_INTEGER + 1 }
+    ]) {
+      assert.equal(isFileDeletionOperationTransition(null, invalid), false);
+    }
+  });
+
   it("defines the sole Phase 2 Task File Library binding in migration 061",async()=>{
     const migrations = await readPostgresMigrations();
     const interactionMigration = migrations.find((item) => item.id === "047_task_interaction_changes");
@@ -277,7 +420,7 @@ describe("postgres adapter ports", () => {
     assert.match(migration.sql,/delete from agent_task_artifacts/i);
     assert.match(migration.sql,/foreign key \(file_library_id, workspace_id, project_id\)[\s\S]*references file_libraries\(id, workspace_id, project_id\)[\s\S]*on delete restrict/i);
     assert.match(migration.sql,/deleted_at is null and file_library_id is not null[\s\S]*deleted_at is not null and file_library_id is null/i);
-    assert.match(migration.sql,/unique index agent_tasks_file_library_active_unique[\s\S]*where deleted_at is null and file_library_id is not null/i);
+    assert.match(migration.sql,/unique index agent_tasks_file_library_active_unique[\s\S]*where deleted_at is null\s*;/i);
     assert.match(migration.sql,/drop column if exists input_paths/i);
     assert.match(migration.sql,/drop column if exists source_task_id/i);
     assert.doesNotMatch(migration.sql,/\btask_follow_ups\b/i);

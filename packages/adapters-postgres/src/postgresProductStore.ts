@@ -29,7 +29,7 @@ import type {
   Workspace, ManagedWorkspaceMembershipRole, WorkspaceMembership, WorkspaceMembershipView, WorkspaceListProjection, WorkspaceDirectoryItem, ProjectDirectoryItem, UserProfilePreferences, ProfileGreetingPreference, ProjectContextEntry, UserNotification, ProjectAlertRule, ProjectCredential, StoredProjectCredential, TaskPresentation
 } from "../../contracts/src/api.js";
 import { PREVIEW_IMAGE_MEDIA_TYPES, PREVIEW_TEXT_MEDIA_TYPES, PROFILE_GREETING_PREFERENCES, isActiveProjectAlert, sandboxCapacityErrorEnvelope, sanitizeProjectAuditDetail } from "../../contracts/src/api.js";
-import { CredentialVersionConflictError, EndpointNameConflictError } from "../../ports/src/store.js";
+import { CredentialVersionConflictError, EndpointNameConflictError, isFileDeletionOperationTransition, isValidFileDeletionOperationState } from "../../ports/src/store.js";
 import { USER_NOTIFICATION_INBOX_LIMIT } from "./notificationRetention.js";
 import { strictStructuralEqual } from "./strictStructuralEqual.js";
 import type {
@@ -75,6 +75,8 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
+  FileDeletionOperationOwner,
+  FileDeletionOperationState,
   TaskIdempotencyLookupInput,
   TaskIdempotencyResourceLookupInput,
   TaskSandboxReleaseMutationInput,
@@ -1561,6 +1563,50 @@ export class PostgresProductStore implements ProductStore {
     if(row.status==="completed")return{kind:"replay",resourceId:row.resource_id,responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
     return{kind:"in_progress",resourceId:row.resource_id};
   }
+  async findFileDeletionOperation(owner:FileDeletionOperationOwner):Promise<FileDeletionOperationState|null>{
+    const rows=await this.queryRows<TaskIdempotencyRow>(
+      "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and resource_id=$6 and claim_token=$7 and status='in_progress' limit 1",
+      [owner.actorId,owner.projectId,owner.operation,owner.key,owner.requestHash,owner.resourceId,owner.claimToken]
+    );
+    return rows[0]?mapFileDeletionOperation(rows[0]):null;
+  }
+  async persistFileDeletionOperation(owner:FileDeletionOperationOwner,state:FileDeletionOperationState):Promise<boolean>{
+    return transaction(this.pool,async(client)=>{
+      const rows=(await client.query<TaskIdempotencyRow>(
+        "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and resource_id=$6 and claim_token=$7 and status='in_progress' for update",
+        [owner.actorId,owner.projectId,owner.operation,owner.key,owner.requestHash,owner.resourceId,owner.claimToken]
+      )).rows;
+      if(rows.length!==1)return false;
+      const row=rows[0]!;
+      if(!isFileDeletionOperationTransition(mapFileDeletionOperation(row),state))return false;
+      const result=await client.query(
+        `update task_idempotency_records
+            set file_deletion_phase=$8,
+                file_deletion_quarantine_device=$9,
+                file_deletion_quarantine_inode=$10,
+                file_deletion_entry_type=$11,
+                file_deletion_bytes=$12
+          where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
+            and request_hash=$5 and resource_id=$6 and claim_token=$7
+            and status='in_progress'`,
+        [
+          owner.actorId,
+          owner.projectId,
+          owner.operation,
+          owner.key,
+          owner.requestHash,
+          owner.resourceId,
+          owner.claimToken,
+          state.phase,
+          state.quarantineDevice,
+          state.quarantineInode,
+          state.entryType,
+          state.bytes
+        ]
+      );
+      return result.rowCount===1;
+    });
+  }
   async findInProgressTerminalStartOperation(runId:string):Promise<import("../../ports/src/store.js").InProgressTerminalStartOperation|null>{
     const rows=await this.queryRows<TaskIdempotencyRow>("select * from task_idempotency_records where operation='terminal-start' and resource_id=$1 and status='in_progress' order by created_at,idempotency_key collate \"C\" limit 1",[runId]);
     const row=rows[0];
@@ -1968,6 +2014,24 @@ function mapTaskIdempotencyResponseBody(operation:string,value:unknown):unknown{
     if(response.metric==="active_tasks")response.metric="active_sandboxes";
   }
   return response;
+}
+
+function mapFileDeletionOperation(row:TaskIdempotencyRow):FileDeletionOperationState|null{
+  if(!row.file_deletion_phase)return null;
+  if(!row.file_deletion_quarantine_device||!row.file_deletion_quarantine_inode||!row.file_deletion_entry_type||row.file_deletion_bytes===null){
+    throw new Error("File deletion operation state is incomplete");
+  }
+  const bytes=Number(row.file_deletion_bytes);
+  if(!Number.isSafeInteger(bytes)||bytes<0)throw new Error("File deletion operation byte measurement is invalid");
+  const state:FileDeletionOperationState={
+    phase:row.file_deletion_phase,
+    quarantineDevice:row.file_deletion_quarantine_device,
+    quarantineInode:row.file_deletion_quarantine_inode,
+    entryType:row.file_deletion_entry_type,
+    bytes
+  };
+  if(!isValidFileDeletionOperationState(state))throw new Error("File deletion operation state is invalid");
+  return state;
 }
 
 async function claimTaskIdempotencyWithClient(client:PoolClient,input:BeginTaskIdempotencyInput):Promise<
@@ -2433,7 +2497,7 @@ interface AgentTaskArtifactRow {
 }
 interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; content:string; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
 interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
-interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown; }
+interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }

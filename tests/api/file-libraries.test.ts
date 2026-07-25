@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -11,6 +11,7 @@ describe("file library API", () => {
   let dataRoot: string;
   let cookie: string;
   let csrf: string;
+  let workspaceId: string;
   let projectId: string;
   const store = createLocalInMemoryProductStore();
 
@@ -22,6 +23,7 @@ describe("file library API", () => {
     cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
     csrf = (await login.json()).csrfToken;
     const workspace = (await json("POST", "/api/v1/workspaces", { name: "Files" })).workspace;
+    workspaceId = workspace.id;
     projectId = (await json("POST", `/api/v1/workspaces/${workspace.id}/projects`, { name: "Project" })).id;
   });
 
@@ -83,6 +85,173 @@ describe("file library API", () => {
     await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}/files`, { path: "readme.md" });
     assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,6);
     assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}`, {}), { deleted: true });
+  });
+
+  it("enforces reserved paths and performs one idempotent recursive entry deletion", async () => {
+    await store.patchProjectResourcePolicy(projectId, { projectFileBytesLimit: null }, new Date().toISOString());
+    const library = await json("POST", `/api/v1/projects/${projectId}/file-libraries`, { name: "Recursive files" });
+    const project = await store.findProject(projectId);
+    assert.ok(project);
+    const libraryRoot = path.join(dataRoot, project.rootPath, library.rootSubPath);
+    await mkdir(path.join(libraryRoot, "workspace", ".artifacts"), { recursive: true });
+    await writeFile(path.join(libraryRoot, "workspace", ".artifacts", "task-owned.txt"), "owned");
+
+    const nestedUpload = async (filePath: string, body: string) => {
+      const response = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=${encodeURIComponent(filePath)}`, {
+        method: "PUT",
+        headers: {
+          cookie,
+          "x-csrf-token": csrf,
+          "content-type": "application/octet-stream",
+          "idempotency-key": crypto.randomUUID()
+        },
+        body
+      });
+      assert.equal(response.status, 200, await response.text());
+    };
+    await nestedUpload("selected/first.txt", "one");
+    await nestedUpload("selected/nested/second.txt", "two");
+    await nestedUpload("keep.txt", "keep");
+
+    const listed = await json("GET", `/api/v1/projects/${projectId}/file-libraries/${library.id}/files`);
+    assert.deepEqual(listed.entries.map((entry: { path: string; capabilities: unknown }) => ({
+      path: entry.path,
+      capabilities: entry.capabilities
+    })), [
+      {
+        path: "keep.txt",
+        capabilities: { canDelete: true, deleteUnavailableReason: null }
+      },
+      {
+        path: "selected",
+        capabilities: { canDelete: true, deleteUnavailableReason: null }
+      },
+      {
+        path: "workspace",
+        capabilities: { canDelete: false, deleteUnavailableReason: "artifact_namespace_protected" }
+      }
+    ]);
+
+    const hidden = await json("GET", `/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=workspace`);
+    assert.deepEqual(hidden.entries, []);
+    const reserved = await raw("DELETE", `/api/v1/projects/${projectId}/file-libraries/${library.id}/files`, { path: "workspace" });
+    assert.equal(reserved.status, 409);
+    assert.equal((await reserved.json()).code, "artifact_namespace_protected");
+
+    const missing = await raw("GET", `/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=removed`);
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json()).code, "file_path_not_found");
+
+    const deleteKey = crypto.randomUUID();
+    const deleteSelected = () => fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files`, {
+      method: "DELETE",
+      headers: {
+        cookie,
+        "x-csrf-token": csrf,
+        "content-type": "application/json",
+        "idempotency-key": deleteKey
+      },
+      body: JSON.stringify({ path: "selected" })
+    });
+    assert.equal((await deleteSelected()).status, 200);
+    assert.equal((await deleteSelected()).status, 200);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes, 15);
+
+    const deleteAudits = (await store.queryProjectAuditEvents(projectId, { limit: 100 })).items
+      .filter((event) => event.action === "file.delete" && event.resourceId === library.id && event.detail?.filePath?.endsWith("/selected"));
+    assert.equal(deleteAudits.length, 1);
+    assert.deepEqual(deleteAudits[0]?.detail, {
+      filePath: `${library.rootSubPath}/selected`,
+      bytes: 6,
+      entryType: "directory"
+    });
+
+    await nestedUpload("selected/recreated.txt", "new");
+    assert.equal((await deleteSelected()).status, 200);
+    assert.equal(await readFile(path.join(libraryRoot, "selected", "recreated.txt"), "utf8"), "new");
+    assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${library.id}/files`, { path: "selected" }), { deleted: true });
+    assert.equal(await readFile(path.join(libraryRoot, "workspace", ".artifacts", "task-owned.txt"), "utf8"), "owned");
+  });
+
+  it("projects read-only delete capability and structurally replays a typed DELETE error", async () => {
+    const library = await json("POST", `/api/v1/projects/${projectId}/file-libraries`, { name: "Read only files" });
+    const upload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=retained.txt`, {
+      method: "PUT",
+      headers: {
+        cookie,
+        "x-csrf-token": csrf,
+        "content-type": "application/octet-stream",
+        "idempotency-key": crypto.randomUUID()
+      },
+      body: "retained"
+    });
+    assert.equal(upload.status, 200, await upload.text());
+
+    const timestamp = "2026-07-25T12:00:00.000Z";
+    await store.createUser({
+      id: "file_viewer",
+      email: "file-viewer@example.test",
+      emailVerified: true,
+      passwordHash: "external:oidc",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    await store.createSession({
+      id: "file-viewer-session",
+      userId: "file_viewer",
+      csrfToken: "file-viewer-csrf",
+      createdAt: timestamp,
+      expiresAt: "2999-01-01T00:00:00.000Z"
+    });
+    assert.notEqual(await store.createWorkspaceMembership({
+      workspaceId,
+      userId: "file_viewer",
+      role: "viewer",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }), "already_exists");
+    assert.notEqual(await store.createProjectMembershipForWorkspaceMember({
+      projectId,
+      userId: "file_viewer",
+      role: "viewer",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }), "already_exists");
+
+    const viewerListing = await fetch(
+      `${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files`,
+      { headers: { cookie: "asl_session=file-viewer-session" } }
+    );
+    assert.equal(viewerListing.status, 200);
+    assert.deepEqual((await viewerListing.json()).entries.map((entry: { path: string; capabilities: unknown }) => ({
+      path: entry.path,
+      capabilities: entry.capabilities
+    })), [{
+      path: "retained.txt",
+      capabilities: { canDelete: false, deleteUnavailableReason: "read_only" }
+    }]);
+
+    const key = crypto.randomUUID();
+    const missingDelete = () => fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files`, {
+      method: "DELETE",
+      headers: {
+        cookie,
+        "x-csrf-token": csrf,
+        "content-type": "application/json",
+        "idempotency-key": key
+      },
+      body: JSON.stringify({ path: "missing.txt" })
+    });
+    const first = await missingDelete();
+    const firstBody = await first.json();
+    const replay = await missingDelete();
+    assert.equal(first.status, 404);
+    assert.equal(replay.status, 404);
+    assert.deepEqual(firstBody, {
+      error: "File path not found",
+      code: "file_path_not_found"
+    });
+    assert.deepEqual(await replay.json(), firstBody);
   });
 
   async function json(method: string, pathname: string, body?: unknown, authenticated = true): Promise<any> {

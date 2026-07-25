@@ -905,11 +905,18 @@ deletes the server-observed entry type:
 - regular file: delete that file;
 - directory: recursively delete that directory and all descendants;
 - Library root: reject;
-- `workspace/.artifacts`, its descendants, and an ancestor deletion that would
-  remove it: reject through the ordinary entry endpoint;
-- symlink or path crossing a symlink: reject;
+- `workspace/.artifacts`, its descendants, and the permanently reserved
+  `workspace` ancestor: reject through the ordinary entry endpoint;
+- statically observed symlink or path crossing a symlink: reject;
 - missing entry: return the existing not-found result;
-- unsupported entry type: reject without mutation.
+- statically observed unsupported entry type: reject without mutation.
+
+If the final name is concurrently substituted after that static check, the
+atomic rename still linearizes deletion on the object at that name. A
+rename-time symlink or unsupported object is contained in quarantine, never
+followed, persisted and removed as an isolated leaf, and reported only as the
+actual deletion type; this does not widen ordinary listed-entry or selection
+types.
 
 Each listed entry carries server-owned destructive capability:
 
@@ -923,10 +930,10 @@ interface ProjectFileEntryCapabilities {
 }
 ```
 
-A visible ancestor such as `workspace` that currently contains the protected
-Artifact subtree does not show an enabled Delete action and displays the
-reason in its selected details. The server returns the same typed reason if a
-client bypasses the Web.
+The visible `workspace` ancestor never shows an enabled Delete action and
+displays the protected-Artifact reason in its selected details, even before
+`.artifacts` exists. The server returns the same typed reason if a client
+bypasses the Web.
 
 There is no `recursive` switch. A directory Delete command is recursive by
 definition and always uses a folder-specific confirmation:
@@ -944,8 +951,10 @@ After success:
 - the current folder listing refreshes in place;
 - Project file-byte usage is reconciled to the remaining authorized Library
   roots;
-- one `file.delete` Audit event records `entryType`, normalized path, and total
-  bytes removed without descendant names or content;
+- one `file.delete` Audit event records the actual server-observed deletion
+  `entryType` (`file`, `directory`, or the contained rename-time `symlink` or
+  `unsupported` leaf), normalized path, and total bytes removed without
+  descendant names or content;
 - deleting a folder never emits one event per child;
 - focus moves to the next entry, previous entry, or list heading in that order,
   and an accessible status message announces the deleted object.
@@ -1431,8 +1440,13 @@ Operation identity is unambiguous:
 
 The owning service claims the operation identity before calling the engine.
 The engine reuses the existing durable idempotency-operation storage to record
-only filesystem source identity and phase for that operation. It does not
-write Project usage, Audit, domain rows, HTTP responses, or request completion.
+only isolated filesystem identity and phase for that operation. Entry deletion
+linearizes at the descriptor-anchored atomic rename of the normalized source
+name into its operation quarantine. The object at that name at the rename
+instant is the operation target. Standard Node/Linux rename cannot compare an
+expected pre-observed source inode, so no earlier inode observation claims the
+operation target. The engine does not write Project usage, Audit, domain rows,
+HTTP responses, or request completion.
 
 The engine then:
 
@@ -1441,17 +1455,20 @@ The engine then:
 3. for an entry, normalize the relative path and walk each parent relative to
    an opened directory descriptor; for a Library, anchor its canonical parent
    and the claimed root entry;
-4. reject every symlink component and unsupported final entry type, then
+4. reject statically observed symlink or unsupported final targets, then
    enforce the selected root/Artifact policy;
-5. persist the source identity and deletion phase, then atomically rename the
-   final entry through descriptor-anchored paths to
-   `<projectRoot>/.deletions/<operationId>/entry`;
-6. persist the isolated phase and return the isolated entry identity and
-   aggregate regular-file bytes to the owning service;
-7. after the owning service persists its point-in-time Project accounting,
-   remove the quarantine entry and marker;
-8. persist the physical-removal phase and return control to the owning
-   service.
+5. create and durably validate one exact versioned operation marker containing
+   kind, Project ID, canonical Library root, normalized relative path,
+   operation ID, and request hash;
+6. atomically rename the final entry through descriptor-anchored paths to
+   `<projectRoot>/.deletions/<operationId>/entry`; a concurrent final-entry
+   substitution is contained by quarantine, is never followed, and becomes the
+   rename-time operation target;
+7. descriptor-safely measure the quarantined entry and persist phase
+   `isolated` with its device, inode, type, and aggregate regular-file bytes;
+8. after the owning service persists its point-in-time Project accounting,
+   remove the quarantine entry with an explicit descriptor walk, persist phase
+   `removed`, remove the marker, and return control to the owning service.
 
 The owning service is the sole completion owner:
 
@@ -1470,16 +1487,19 @@ The quarantine is on the same JuiceFS volume but outside every File Library
 root and Sandbox mount, and storage accounting excludes it.
 
 Linux descriptor-anchored `/proc/self/fd/<fd>` operations are required for this
-contract. If that capability is unavailable, deletion fails closed; do not
-fall back to validate-then-`rm(path)`.
+contract. Measurement and physical removal explicitly walk opened directories
+with `O_NOFOLLOW`; recursive string traversal and recursive `rm` are forbidden.
+If descriptor anchoring is unavailable, deletion fails closed.
 
-The durable operation state records enough phase/source identity to resume:
+The database deletion phases are exactly `isolated | removed`. The exact marker
+plus quarantine entry is the durable crash fact before `isolated` is persisted:
 
-- if the quarantine entry exists, continue only that isolated operation;
-- if isolation had not completed and the source still has the claimed
-  identity, resume the descriptor-anchored rename;
-- if the source path now refers to a different entry, never delete the new
-  entry as part of the old operation;
+- if an exact-marker quarantine entry exists, recover its identity and bytes,
+  persist `isolated`, and never touch the source path;
+- if the marker exists without a quarantine entry, retry the atomic rename of
+  the normalized source name; no pre-rename database source phase exists;
+- once quarantine exists, every failure remains retryable under that same
+  operation and cannot complete a permanent idempotency error;
 - if physical deletion completed before the final response was stored,
   the owning service completes its remaining domain transaction and request
   without touching a recreated source path;
@@ -1953,8 +1973,8 @@ Deliver:
 
 Implementation/commit order:
 
-1. Descriptor-anchored delete operation/idempotency state and reserved-path
-   policy.
+1. Rename-linearized descriptor-anchored delete operation/idempotency state,
+   exact-marker recovery, and reserved-path policy.
 2. FileService entry delete, point-in-time accounting, Audit, and missing-path
    contract.
 3. Files row selection/open/details/delete and narrow-region behavior.
@@ -1977,6 +1997,8 @@ Focused checks:
 - reject Library root, traversal, symlink, and unsupported entry types;
 - reject reserved Artifact paths and an ancestor deletion that would remove
   them;
+- recover a crash after rename but before database `isolated` persistence
+  without touching a recreated source path;
 - a concurrently replaced parent cannot redirect deletion outside the selected
   Library;
 - recursive delete removes only the selected Library subtree;

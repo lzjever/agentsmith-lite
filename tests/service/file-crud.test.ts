@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { describe, it } from "node:test";
+import { DescriptorFileTreeWalker } from "../../packages/application/src/descriptorFileTreeWalker.js";
 import { FileService, readRegularFileWithoutFollowingSymlink } from "../../packages/application/src/fileService.js";
+import { FilePathValidationService } from "../../packages/application/src/filePathValidationService.js";
+import { RecursiveDeletionService, TransientFileDeletionOperationStore } from "../../packages/application/src/recursiveDeletionService.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../packages/domain/src/fileDefaults.js";
+import type { FileDeletionOperationOwner, FileDeletionOperationState } from "../../packages/ports/src/store.js";
 
 const LIBRARY_ROOT="libraries/library_test/home";
+const execFileAsync = promisify(execFile);
 
 describe("file CRUD service", () => {
   it("uploads, lists, downloads, and deletes arbitrary Library file bytes", async () => {
@@ -127,23 +134,100 @@ describe("file CRUD service", () => {
     }
   });
 
-  it("rejects directory downloads and only deletes regular files", async () => {
+  it("returns typed missing-folder errors instead of empty listings", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-missing-folder-"));
+    try {
+      const service = new FileService();
+      await service.ensureLibraryRoot(root, LIBRARY_ROOT);
+
+      await assert.rejects(
+        () => service.listLibraryFiles(root, LIBRARY_ROOT, "removed"),
+        (error) => {
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode, 404);
+          assert.equal(error.code, "file_path_not_found");
+          return true;
+        }
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters the Artifact namespace and projects server-owned delete capability", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-artifact-policy-"));
+    try {
+      const service = new FileService();
+      await mkdir(path.join(root, LIBRARY_ROOT, "workspace", ".artifacts"), { recursive: true });
+      await writeFile(path.join(root, LIBRARY_ROOT, "workspace", ".artifacts", "owned.txt"), "artifact");
+      await writeFile(path.join(root, LIBRARY_ROOT, "workspace", "notes.txt"), "notes");
+
+      const rootListing = await service.listLibraryFiles(root, LIBRARY_ROOT);
+      assert.deepEqual(rootListing.entries.map((entry) => ({
+        path: entry.path,
+        capabilities: entry.capabilities
+      })), [{
+        path: "workspace",
+        capabilities: {
+          canDelete: false,
+          deleteUnavailableReason: "artifact_namespace_protected"
+        }
+      }]);
+
+      const workspaceListing = await service.listLibraryFiles(root, LIBRARY_ROOT, "workspace");
+      assert.deepEqual(workspaceListing.entries.map((entry) => ({
+        path: entry.path,
+        capabilities: entry.capabilities
+      })), [{
+        path: "workspace/notes.txt",
+        capabilities: {
+          canDelete: true,
+          deleteUnavailableReason: null
+        }
+      }]);
+
+      const readOnlyListing = await service.listLibraryFiles(root, LIBRARY_ROOT, "workspace", false);
+      assert.deepEqual(readOnlyListing.entries[0]?.capabilities, {
+        canDelete: false,
+        deleteUnavailableReason: "read_only"
+      });
+
+      for (const action of [
+        () => service.listLibraryFiles(root, LIBRARY_ROOT, "workspace/.artifacts"),
+        () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "workspace/.artifacts/new.txt", bytes: Buffer.from("no") }),
+        () => service.downloadLibraryFile(root, LIBRARY_ROOT, "workspace/.artifacts/owned.txt"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "workspace/.artifacts/owned.txt"),
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "workspace")
+      ]) {
+        await assert.rejects(action, (error) => {
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.code, "artifact_namespace_protected");
+          return true;
+        });
+      }
+      assert.equal(await readFile(path.join(root, LIBRARY_ROOT, "workspace", ".artifacts", "owned.txt"), "utf8"), "artifact");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects directory downloads and recursively deletes observed directories", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-"));
     try {
       const service = new FileService();
-      await mkdir(path.join(root, LIBRARY_ROOT, "notes"), { recursive: true });
+      await mkdir(path.join(root, LIBRARY_ROOT, "notes", "nested"), { recursive: true });
+      await writeFile(path.join(root, LIBRARY_ROOT, "notes", "first.txt"), "one");
+      await writeFile(path.join(root, LIBRARY_ROOT, "notes", "nested", "second.txt"), "two");
 
       await assert.rejects(
         () => service.downloadLibraryFile(root, LIBRARY_ROOT, "notes"),
         (error) => productError(error, 400, /Path is a directory/)
       );
-      await assert.rejects(
-        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "notes"),
-        (error) => productError(error, 400, /Path is not a regular file/)
-      );
+      assert.deepEqual(await service.deleteLibraryFile(root, LIBRARY_ROOT, "notes"), { deleted: true });
+      assert.deepEqual((await service.listLibraryFiles(root, LIBRARY_ROOT)).entries, []);
       await assert.rejects(
         () => service.deleteLibraryFile(root, LIBRARY_ROOT, "missing.txt"),
-        (error) => productError(error, 404, /File not found/)
+        (error) => productError(error, 404, /File path not found/)
       );
       await assert.rejects(
         () => service.deleteLibraryFile(root, LIBRARY_ROOT, ""),
@@ -151,6 +235,392 @@ describe("file CRUD service", () => {
       );
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates recursive deletion before complete remaining-byte accounting", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-recursive-accounting-"));
+    const service = new FileService();
+    const reconciled: number[] = [];
+    const recorded: Array<{ path: string; delta: number; bytes: number; entryType: string | undefined }> = [];
+    try {
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "selected/first.txt", bytes: Buffer.from("one") });
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "selected/nested/second.txt", bytes: Buffer.from("two") });
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "keep.txt", bytes: Buffer.from("keep") });
+
+      await service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", {
+        rootSubPaths: [LIBRARY_ROOT],
+        async reconcile(bytes) {
+          reconciled.push(bytes);
+          await assert.rejects(readFile(path.join(root, LIBRARY_ROOT, "selected", "first.txt")));
+          const operationDirectories = await readdir(path.join(root, ".deletions"));
+          assert.equal(operationDirectories.length, 1);
+          assert.equal(await readFile(path.join(root, ".deletions", operationDirectories[0]!, "entry", "first.txt"), "utf8"), "one");
+        },
+        async record(deletedPath, delta, entry) {
+          recorded.push({ path: deletedPath, delta, bytes: entry.bytes, entryType: entry.entryType });
+        }
+      });
+
+      assert.deepEqual(reconciled, [4]);
+      assert.deepEqual(recorded, [{ path: "selected", delta: -6, bytes: 6, entryType: "directory" }]);
+      assert.deepEqual((await service.listLibraryFiles(root, LIBRARY_ROOT)).entries.map((entry) => entry.path), ["keep.txt"]);
+      assert.deepEqual(await readdir(path.join(root, ".deletions")), []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("measures remaining roots without following a directory replaced by a symlink", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-measure-race-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-files-measure-race-outside-"));
+    const nested = path.join(root, LIBRARY_ROOT, "nested");
+    let substituted = false;
+    const walker = new DescriptorFileTreeWalker({
+      async beforeOpenEntry(event) {
+        if (event.purpose !== "measure" || event.name !== "nested" || substituted) return;
+        substituted = true;
+        await rm(nested, { recursive: true });
+        await symlink(outside, nested);
+      }
+    });
+    try {
+      await mkdir(nested, { recursive: true });
+      await writeFile(path.join(nested, "local.txt"), "local");
+      await writeFile(path.join(root, LIBRARY_ROOT, "retained.txt"), "kept");
+      await writeFile(path.join(outside, "outside.txt"), "must-not-count");
+
+      const service = new FileService(new FilePathValidationService(), walker);
+      assert.equal(await service.measureFileRootsBytes(root, [LIBRARY_ROOT]), 4);
+      assert.equal(substituted, true);
+      assert.equal(await readFile(path.join(outside, "outside.txt"), "utf8"), "must-not-count");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes the same isolated operation after accounting fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-delete-resume-"));
+    const service = new FileService();
+    const operations = new TransientFileDeletionOperationStore();
+    const owner: FileDeletionOperationOwner = {
+      actorId: "user_delete_resume",
+      projectId: "project_delete_resume",
+      operation: "project.file.delete",
+      key: "delete-resume-key",
+      requestHash: "delete-resume-request",
+      resourceId: "file_delete_resume",
+      claimToken: "delete-resume-claim"
+    };
+    const context = {
+      owner,
+      operations
+    };
+    let rejectAccounting = true;
+    try {
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "selected/value.txt", bytes: Buffer.from("value") });
+      const accounting = {
+        rootSubPaths: [LIBRARY_ROOT],
+        async reconcile() {
+          if (rejectAccounting) throw new Error("accounting unavailable");
+        },
+        async record() {}
+      };
+
+      await assert.rejects(
+        () => service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", accounting, context),
+        /accounting unavailable/
+      );
+      assert.equal(
+        await readFile(path.join(root, ".deletions", owner.resourceId, "entry", "value.txt"), "utf8"),
+        "value"
+      );
+
+      rejectAccounting = false;
+      assert.deepEqual(
+        (await service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", accounting, context)).response,
+        { deleted: true }
+      );
+      assert.deepEqual(await readdir(path.join(root, ".deletions")), []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers an exact quarantined entry after crashing before isolated state persistence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-rename-recovery-"));
+    let state: FileDeletionOperationState | null = null;
+    let rejectFirstPersistence = true;
+    const owner: FileDeletionOperationOwner = {
+      actorId: "user_rename_recovery",
+      projectId: "project_rename_recovery",
+      operation: "project.file.delete",
+      key: "rename-recovery-key",
+      requestHash: "rename-recovery-request",
+      resourceId: "file_delete_rename_recovery",
+      claimToken: "rename-recovery-claim"
+    };
+    const operations = {
+      async findFileDeletionOperation(requestedOwner: FileDeletionOperationOwner) {
+        assert.deepEqual(requestedOwner, owner);
+        return state ? { ...state } : null;
+      },
+      async persistFileDeletionOperation(requestedOwner: FileDeletionOperationOwner, next: FileDeletionOperationState) {
+        assert.deepEqual(requestedOwner, owner);
+        if (rejectFirstPersistence) {
+          rejectFirstPersistence = false;
+          throw new Error("database unavailable after rename");
+        }
+        state = { ...next };
+        return true;
+      }
+    };
+    const target = {
+      owner,
+      projectRoot: root,
+      libraryRoot: LIBRARY_ROOT,
+      relativePath: "selected/target.txt",
+    };
+    try {
+      const sourceParent = path.join(root, LIBRARY_ROOT, "selected");
+      await mkdir(sourceParent, { recursive: true });
+      await writeFile(path.join(sourceParent, "target.txt"), "original");
+
+      const deletion = new RecursiveDeletionService();
+      await assert.rejects(
+        () => deletion.isolateEntry(target, operations),
+        /database unavailable after rename/
+      );
+      const operationRoot = path.join(root, ".deletions", owner.resourceId);
+      assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "original");
+      assert.deepEqual(JSON.parse(await readFile(path.join(operationRoot, "operation.json"), "utf8")), {
+        version: 1,
+        kind: "entry",
+        projectId: owner.projectId,
+        libraryRoot: LIBRARY_ROOT,
+        relativePath: "selected/target.txt",
+        operationId: owner.resourceId,
+        requestHash: owner.requestHash
+      });
+
+      await mkdir(sourceParent, { recursive: true });
+      await writeFile(path.join(sourceParent, "target.txt"), "replacement");
+      assert.deepEqual(await deletion.isolateEntry(target, operations), {
+        operationId: owner.resourceId,
+        entryType: "file",
+        bytes: 8
+      });
+      assert.equal(await readFile(path.join(sourceParent, "target.txt"), "utf8"), "replacement");
+
+      await deletion.removeIsolatedEntry(target, operations);
+      assert.equal(await readFile(path.join(sourceParent, "target.txt"), "utf8"), "replacement");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("never adopts a quarantined entry without an exact pre-existing marker", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-marker-missing-"));
+    const owner = deletionOwner("marker-missing");
+    const operationRoot = path.join(root, ".deletions", owner.resourceId);
+    let persistenceCalls = 0;
+    const operations = {
+      async findFileDeletionOperation() { return null; },
+      async persistFileDeletionOperation() {
+        persistenceCalls += 1;
+        return true;
+      }
+    };
+    try {
+      await mkdir(operationRoot, { recursive: true });
+      await writeFile(path.join(operationRoot, "entry"), "unowned");
+      await assert.rejects(
+        () => new RecursiveDeletionService().isolateEntry(deletionTarget(root, owner), operations),
+        (error: unknown) => productError(error, 500, /marker is missing/, "file_deletion_incomplete")
+      );
+      assert.equal(persistenceCalls, 0);
+      assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "unowned");
+      await assert.rejects(readFile(path.join(operationRoot, "operation.json")));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails retryably on mismatched or partial markers around a quarantined entry", async () => {
+    for (const marker of [
+      { name: "operation.json", content: "{\"version\":1,\"kind\":\"other\"}" },
+      { name: "operation.json.pending", content: "{\"version\":" }
+    ]) {
+      const root = await mkdtemp(path.join(tmpdir(), `asl-files-marker-${marker.name.includes("pending") ? "partial" : "mismatch"}-`));
+      const owner = deletionOwner(marker.name);
+      const operationRoot = path.join(root, ".deletions", owner.resourceId);
+      try {
+        await mkdir(operationRoot, { recursive: true });
+        await writeFile(path.join(operationRoot, "entry"), "contained");
+        await writeFile(path.join(operationRoot, marker.name), marker.content);
+        await assert.rejects(
+          () => new RecursiveDeletionService().isolateEntry(deletionTarget(root, owner), {
+            async findFileDeletionOperation() { return null; },
+            async persistFileDeletionOperation() { return true; }
+          }),
+          (error: unknown) => productError(error, 500, /marker/, "file_deletion_incomplete")
+        );
+        assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "contained");
+        assert.equal(await readFile(path.join(operationRoot, marker.name), "utf8"), marker.content);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("repairs a partial pending marker only while the operation directory is pre-rename empty", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-marker-repair-"));
+    const owner = deletionOwner("marker-repair");
+    const operationRoot = path.join(root, ".deletions", owner.resourceId);
+    const source = path.join(root, LIBRARY_ROOT, "selected", "target.txt");
+    const operations = new TransientFileDeletionOperationStore();
+    try {
+      await mkdir(operationRoot, { recursive: true });
+      await writeFile(path.join(operationRoot, "operation.json.pending"), "{\"version\":");
+      await mkdir(path.dirname(source), { recursive: true });
+      await writeFile(source, "target");
+
+      assert.deepEqual(
+        await new RecursiveDeletionService().isolateEntry(deletionTarget(root, owner), operations),
+        { operationId: owner.resourceId, entryType: "file", bytes: 6 }
+      );
+      assert.deepEqual((await readdir(operationRoot)).sort(), ["entry", "operation.json"]);
+      assert.deepEqual(JSON.parse(await readFile(path.join(operationRoot, "operation.json"), "utf8")), {
+        version: 1,
+        kind: "entry",
+        projectId: owner.projectId,
+        libraryRoot: LIBRARY_ROOT,
+        relativePath: "selected/target.txt",
+        operationId: owner.resourceId,
+        requestHash: owner.requestHash
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records rename-time symlink and unsupported substitutions as isolated leaf types", async () => {
+    for (const entryType of ["symlink", "unsupported"] as const) {
+      const root = await mkdtemp(path.join(tmpdir(), `asl-files-final-${entryType}-`));
+      const outside = await mkdtemp(path.join(tmpdir(), `asl-files-final-${entryType}-outside-`));
+      const source = path.join(root, LIBRARY_ROOT, "selected");
+      const records: Array<{ bytes: number; entryType?: string }> = [];
+      let substituted = false;
+      const service = new FileService(
+        new FilePathValidationService(),
+        new DescriptorFileTreeWalker(),
+        {
+          async beforeRename() {
+            if (substituted) return;
+            substituted = true;
+            await unlink(source);
+            if (entryType === "symlink") await symlink(path.join(outside, "retained.txt"), source);
+            else await execFileAsync("mkfifo", [source]);
+          }
+        }
+      );
+      try {
+        await mkdir(path.dirname(source), { recursive: true });
+        await writeFile(source, "static");
+        await writeFile(path.join(outside, "retained.txt"), "retained");
+        await service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", {
+          async record(_storedPath, _delta, entry) {
+            records.push({
+              bytes: entry.bytes,
+              ...(entry.entryType ? { entryType: entry.entryType } : {})
+            });
+          }
+        });
+
+        assert.equal(substituted, true);
+        assert.deepEqual(records, [{ bytes: 0, entryType }]);
+        assert.equal(await readFile(path.join(outside, "retained.txt"), "utf8"), "retained");
+        await assert.rejects(readFile(source));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("rejects statically observed symlink and unsupported final targets before rename", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-static-leaf-types-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-files-static-leaf-types-outside-"));
+    try {
+      const parent = path.join(root, LIBRARY_ROOT, "selected");
+      await mkdir(parent, { recursive: true });
+      await writeFile(path.join(parent, "retained.txt"), "retained");
+      await symlink(path.join(parent, "retained.txt"), path.join(parent, "link"));
+      await execFileAsync("mkfifo", [path.join(parent, "fifo")]);
+
+      const service = new FileService();
+      await assert.rejects(
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "selected/link"),
+        (error: unknown) => productError(error, 400, /symlink/)
+      );
+      await assert.rejects(
+        () => service.deleteLibraryFile(root, LIBRARY_ROOT, "selected/fifo"),
+        (error: unknown) => productError(error, 409, /type is not supported/)
+      );
+      assert.equal(await readFile(path.join(parent, "retained.txt"), "utf8"), "retained");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow symlink descendants during recursive deletion", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-recursive-symlink-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-files-recursive-outside-"));
+    try {
+      await mkdir(path.join(root, LIBRARY_ROOT, "selected"), { recursive: true });
+      await writeFile(path.join(root, LIBRARY_ROOT, "selected", "local.txt"), "local");
+      await writeFile(path.join(outside, "retained.txt"), "retained");
+      await symlink(outside, path.join(root, LIBRARY_ROOT, "selected", "outside-link"));
+
+      await new FileService().deleteLibraryFile(root, LIBRARY_ROOT, "selected");
+
+      assert.equal(await readFile(path.join(outside, "retained.txt"), "utf8"), "retained");
+      assert.deepEqual((await new FileService().listLibraryFiles(root, LIBRARY_ROOT)).entries, []);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow a descendant replaced by a symlink after isolation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "asl-files-isolated-symlink-race-"));
+    const outside = await mkdtemp(path.join(tmpdir(), "asl-files-isolated-symlink-outside-"));
+    try {
+      const service = new FileService();
+      await service.uploadLibraryFile(root, LIBRARY_ROOT, {
+        path: "selected/nested/value.txt",
+        bytes: Buffer.from("value")
+      });
+      await writeFile(path.join(outside, "retained.txt"), "retained");
+
+      await service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", {
+        rootSubPaths: [LIBRARY_ROOT],
+        async reconcile() {},
+        async record() {
+          const [operationId] = await readdir(path.join(root, ".deletions"));
+          assert.ok(operationId);
+          const nested = path.join(root, ".deletions", operationId, "entry", "nested");
+          await rm(nested, { recursive: true });
+          await symlink(outside, nested);
+        }
+      });
+
+      assert.equal(await readFile(path.join(outside, "retained.txt"), "utf8"), "retained");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
     }
   });
 
@@ -361,9 +831,32 @@ describe("file CRUD service", () => {
   });
 });
 
-function productError(error: unknown, statusCode: number, message: RegExp): boolean {
+function deletionOwner(suffix: string): FileDeletionOperationOwner {
+  const normalized = suffix.replace(/[^A-Za-z0-9._:-]/g, "_");
+  return {
+    actorId: `user_${normalized}`,
+    projectId: `project_${normalized}`,
+    operation: "project.file.delete",
+    key: `key_${normalized}`,
+    requestHash: `request_${normalized}`,
+    resourceId: `file_delete_${normalized}`,
+    claimToken: `claim_${normalized}`
+  };
+}
+
+function deletionTarget(root: string, owner: FileDeletionOperationOwner) {
+  return {
+    owner,
+    projectRoot: root,
+    libraryRoot: LIBRARY_ROOT,
+    relativePath: "selected/target.txt"
+  };
+}
+
+function productError(error: unknown, statusCode: number, message: RegExp, code?: string): boolean {
   assert.ok(error instanceof ProductError);
   assert.equal(error.statusCode, statusCode);
   assert.match(error.message, message);
+  if (code) assert.equal(error.code, code);
   return true;
 }
