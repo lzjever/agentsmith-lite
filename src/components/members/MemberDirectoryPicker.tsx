@@ -4,6 +4,7 @@ import { Button, Selector, Text, TextInput } from "@astryxdesign/core";
 import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiClient, type ProjectMemberCandidate } from "../../lib/api/client";
+import { memberDirectoryPickerItems } from "./memberDirectoryPickerItems";
 import { useMemberDirectory } from "./useMemberDirectory";
 
 type PickerKind="workspace"|"project"|"projectCandidates";
@@ -17,18 +18,14 @@ export function MemberDirectoryPicker({kind,scopeId,label,value,onChange,exclude
   },[kind,scopeId]);
   const directory=useMemberDirectory<PickerItem>(fetchPage,`${kind}:${scopeId}`);
   const [selected,setSelected]=useState<PickerItem|undefined>(pinned.find((item)=>item.userId===value));
-  const pinnedValue=pinned.find((item)=>item.userId===value);
+  const items=useMemo(()=>memberDirectoryPickerItems<PickerItem>({page:directory.page.items,pinned,...(selected?{selected}:{}),...(excludeUserId?{excludeUserId}:{})}),[directory.page.items,excludeUserId,pinned,selected]);
+  const selectedValue=items.find((item)=>item.userId===value);
   useEffect(()=>{
     if(!value){setSelected(undefined);return;}
-    const found=directory.page.items.find((item)=>item.userId===value)??pinnedValue;
-    if(found)setSelected((current)=>sameMember(current,found)?current:found);
-  },[directory.page.items,pinnedValue?.displayName,pinnedValue?.email,pinnedValue?.userId,value]);
-  const options=useMemo(()=>{
-    const items=directory.page.items.filter((item)=>item.userId!==excludeUserId);
-    const fixed=[...pinned,...(selected?[selected]:[])].filter((item,index,all)=>item.userId!==excludeUserId&&all.findIndex((candidate)=>candidate.userId===item.userId)===index);
-    return [...fixed,...items.filter((item)=>!fixed.some((candidate)=>candidate.userId===item.userId))].map((item)=>({value:item.userId,label:memberLabel(item)}));
-  },[directory.page.items,excludeUserId,pinned,selected]);
-  function select(userId:string){const member=(selected?.userId===userId?selected:directory.page.items.find((item)=>item.userId===userId));if(member){setSelected(member);onChange(member);}}
+    if(selectedValue)setSelected((current)=>sameMember(current,selectedValue)?current:selectedValue);
+  },[selectedValue?.displayName,selectedValue?.email,selectedValue?.userId,value]);
+  const options=useMemo(()=>items.map((item)=>({value:item.userId,label:memberLabel(item)})),[items]);
+  function select(userId:string){const member=items.find((item)=>item.userId===userId);if(member){setSelected(member);onChange(member);}}
   return <div className="grid gap-2">
     <TextInput label={`Search ${label.toLowerCase()}`} isLabelHidden startIcon={<Search size={15}/>} value={directory.query} onChange={directory.setSearch} placeholder={`Search ${label.toLowerCase()}`} isDisabled={disabled} size="lg"/>
     <Selector label={label} options={options} value={options.some((option)=>option.value===value)?value:""} onChange={select} placeholder={directory.state==="loading"?"Loading members...":"Select a member"} isDisabled={disabled||directory.state!=="ready"||options.length===0} size="lg" width="100%"/>

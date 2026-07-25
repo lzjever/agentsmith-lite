@@ -43,6 +43,10 @@ describe("bounded membership directories", () => {
       () => fixture.services.workspaceMemberships.list(fixture.owner.id, fixture.workspace.id, { q: "bad\u0007query" }),
       status(400)
     );
+    await assert.rejects(
+      () => fixture.services.workspaceMemberships.list(fixture.owner.id, fixture.workspace.id, { cursor: "" }),
+      invalidCursor("Membership directory cursor is invalid")
+    );
   });
 
   it("returns bounded project candidates from workspace membership minus project membership", async () => {
@@ -65,6 +69,14 @@ describe("bounded membership directories", () => {
     assert.deepEqual(
       (await fixture.services.memberships.listCandidates(fixture.owner.id, fixture.project.id, { q: "CANDIDATE-B" })).items.map((candidate) => candidate.userId),
       [candidateB.id]
+    );
+    await assert.rejects(
+      () => fixture.services.memberships.listMembers(fixture.owner.id, fixture.project.id, { cursor: "" }),
+      invalidCursor("Membership directory cursor is invalid")
+    );
+    await assert.rejects(
+      () => fixture.services.memberships.listCandidates(fixture.owner.id, fixture.project.id, { cursor: "" }),
+      invalidCursor("Membership directory cursor is invalid")
     );
     await assert.rejects(() => fixture.services.memberships.listCandidates(existing.id, fixture.project.id), status(403));
   });

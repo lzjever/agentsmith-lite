@@ -18,7 +18,7 @@ export class MembershipService {
     const role = membershipRole(query.role);
     const limit = membershipDirectoryLimit(query.limit);
     const scope:MembershipCursorScope={actorId:actorUserId,kind:"project-members",scopeId:projectId,q,role};
-    const after=query.cursor?decodeMembershipCursor(query.cursor,scope):undefined;
+    const after=query.cursor!==undefined?decodeMembershipCursor(query.cursor,scope):undefined;
     const rows=await this.store.listProjectMembershipDirectoryPage(projectId,{q,role,...(after?{after}:{}),limit:limit+1});
     const items=rows.slice(0,limit),last=items.at(-1);
     return{items,nextCursor:rows.length>limit&&last?encodeMembershipCursor(scope,{createdAt:last.createdAt,userId:last.userId}):null};
@@ -28,7 +28,7 @@ export class MembershipService {
     await this.authorization.requireProject(actorUserId,projectId,"admin");
     const q=normalizeMembershipQuery(query.q),limit=membershipDirectoryLimit(query.limit);
     const scope:MembershipCursorScope={actorId:actorUserId,kind:"project-member-candidates",scopeId:projectId,q,role:null};
-    const after=query.cursor?decodeMembershipCursor(query.cursor,scope):undefined;
+    const after=query.cursor!==undefined?decodeMembershipCursor(query.cursor,scope):undefined;
     const rows=await this.store.listProjectMembershipCandidatesPage(projectId,{q,...(after?{after}:{}),limit:limit+1});
     const pageItems=rows.slice(0,limit),last=pageItems.at(-1);
     return{items:pageItems.map(({createdAt:_createdAt,...candidate})=>candidate),nextCursor:rows.length>limit&&last?encodeMembershipCursor(scope,{createdAt:last.createdAt,userId:last.userId}):null};
