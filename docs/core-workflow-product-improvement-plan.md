@@ -35,6 +35,18 @@ details in older plans:
   deletion;
 - user-facing `active task` terminology for capacity that is actually held by
   an unreleased Sandbox Run;
+- any capacity implementation that treats a denormalized Project usage counter
+  as admission truth, creates an unreleased Run outside the shared admission
+  primitive, or lets substrate rejection win when Project and namespace are
+  simultaneously saturated;
+- any Terminal path in which selecting the peer view or opening its WebSocket
+  starts compute, or in which a database transaction stays open during the
+  Kubernetes/Botified start;
+- any route-specific capacity envelope, public `activeTasks`/`activeTasksLimit`
+  alias, or public `task_capacity`/`active_tasks` Alert vocabulary;
+- any claim that Sandbox terminology requires no Slice 1 data migration, or
+  that the Slice 1 generated-copy migration and Slice 3 Library lifecycle
+  migration are one combined migration;
 - any claim that the first Astryx migration completed the shell, dialog, or
   visual-composition work.
 
@@ -108,6 +120,9 @@ decoration.
   and links to the direct recovery.
 - A capacity race reports that the Sandbox could not be started; it never
   claims that an accepted message failed after the fact.
+- Once released-message admission succeeds, the message remains accepted.
+  Any later startup failure appears through the durable Run and interaction
+  state while failed cleanup continues to hold capacity.
 - Project policy capacity and substrate namespace capacity are distinct:
   Project capacity offers release/policy recovery, while substrate capacity
   offers release/retry and operator guidance without a misleading policy link.
@@ -126,9 +141,10 @@ decoration.
 - Page headers and work surfaces feel connected; dialogs have one predictable
   anatomy, correct focus and overflow behavior, and usable actions at narrow
   widths and low heights.
-- Leaving a Task for Files or another product page and returning as the same
-  user in the same browser session restores its unsent draft and selected peer
-  view.
+- Returning to a Task as the same user in the same browser session restores
+  its unsent draft. The selected peer view is restored only by browser history
+  or a validated Files `returnTo`; every other Task navigation opens
+  Conversation.
 - Task, Files, Usage, Alerts, Audit, directories, and settings feel like parts
   of one long-lived Astryx work environment without obscuring operational
   content.
@@ -161,14 +177,27 @@ decoration.
 
 - One atomic Sandbox admission result for released Tasks and initial Task
   creation.
+- Run-row capacity truth, absolute same-transaction Project usage projection,
+  Project-first simultaneous-saturation precedence, and the explicit
+  namespace/admission versus Project/policy lock disciplines.
 - Message and Terminal cold-start capacity presentation and typed race errors.
+- Idempotency-key replay for capacity rejection and fenced, transaction-free
+  Terminal startup after a committed reservation.
+- Failed Terminal startup state that remains capacity-holding until the
+  Kubernetes resource is confirmed absent, with exact same-key failure replay.
 - Consistent Sandbox capacity terminology in Task creation, Task detail,
   Usage, Resource Policy, Alerts, and relevant Audit details.
 - Correct Audit action attribution for capacity rejection.
 - A shared atomic Project/namespace Sandbox admission path for initial Task,
   released-message, and released-Terminal cold-start.
-- User-and-Task-scoped draft plus URL peer-view continuity without a global
-  client state framework.
+- User-and-Task-scoped draft plus history/validated-return URL peer-view
+  continuity without a global client state framework.
+- A 32,768 UTF-8-byte `sessionStorage` draft-snapshot ceiling that never limits
+  message editing or submission, plus validated same-origin Task-to-Files
+  return navigation.
+- One narrow Slice 1 forward data migration for exact system-generated legacy
+  Alert/notification copy, separate from the Slice 3 Library lifecycle
+  migration.
 - File/folder row selection, folder navigation, keyboard behavior, selected
   details, and destructive actions.
 - Recursive folder deletion with complete point-in-time Project file-byte
@@ -214,6 +243,12 @@ decoration.
 - Persisting Task drafts to the server, persisting follow/read mode or scroll
   anchors across routes, sharing drafts across users/devices, or introducing a
   global frontend store.
+- A capacity preflight, a second admission route, an unreleased-Run creation
+  escape hatch, multiple Terminal capability fields, or WebSocket-owned
+  startup.
+- Public compatibility aliases for old Task-capacity fields or Alert values.
+- A server or Web Task-message byte limit tied to the browser draft-snapshot
+  ceiling.
 
 ## 5. Current Product Findings
 
@@ -237,10 +272,10 @@ safe errors and recovery copy.
 ### 5.2 Capacity language describes the wrong durable object
 
 `activeTasks`, `activeTasksLimit`, `Task capacity`, and
-`active_tasks_limit_reached` are used for a counter now held by starting or
-active Sandbox Runs. A released Task does not consume the resource. This
-language confuses Task lifecycle with compute allocation and leaks into Usage,
-Resource Policy, Alerts, and Audit.
+`active_tasks_limit_reached` are used for a counter held by every Sandbox Run
+not yet confirmed `released`, including failed/pending-cleanup Runs. A released
+Task does not consume the resource. This language confuses Task lifecycle with
+compute allocation and leaks into Usage, Resource Policy, Alerts, and Audit.
 
 The current rejection recorder also classifies every reservation rejection as
 `task.create`, including a restart triggered by an existing Task message or
@@ -375,7 +410,7 @@ Every cold-start returns one of:
 
 ```ts
 type SandboxAdmissionResult =
-  | { kind: "admitted" }
+  | { kind: "admitted"; runId: string }
   | {
       kind: "project_capacity_rejected";
       activeSandboxes: number;
@@ -389,10 +424,21 @@ Rules:
 - an existing starting or active Run does not reserve another slot;
 - initial Task creation, a released-Task message, and a released-Task Terminal
   start use the same Store admission primitive;
-- Project and substrate admission happen in the same transaction and fixed
-  lock order;
-- capacity-holding means every Run not yet confirmed `released`, including
-  startup, active work, release cleanup, and failed cleanup;
+- Project and substrate admission happen in the same transaction under the
+  capacity-writer lock order in section 7.1;
+- the authoritative Project and namespace count is the number of Run rows
+  whose `state != released`, including reserved startup, active work, release
+  cleanup, and failed cleanup;
+- `project_resource_usage.active_tasks` is only a compatibility storage
+  projection of that count. Admission and release finalization set it to the
+  absolute authoritative value while holding the required locks; no path
+  blindly increments or decrements it;
+- no service, Store method, repair path, fixture helper used by production, or
+  alternate route may create a Run with `state != released` without the shared
+  admission primitive;
+- Project capacity is evaluated first. If Project and namespace are both
+  saturated in the same locked snapshot, the result is always
+  `project_capacity_rejected`;
 - Project rejection may expose current Project count and limit;
 - substrate rejection never exposes another Project's allocation or
   infrastructure internals;
@@ -402,11 +448,56 @@ Rules:
 The Web never joins policy and usage data to infer admission. Usage remains the
 place to inspect live allocation after a rejection.
 
+Capacity rejection is an idempotent terminal result for the supplied key. The
+server stores the exact code, canonical message, details snapshot, and
+presentation chosen for that request. Any replay with the same key returns the
+same status and byte-equivalent JSON envelope even after capacity changes.
+`Retry` is an explicit user action and always sends a new idempotency key.
+
 Task creation does not preflight capacity. Its atomic rejection preserves the
 dialog's title, prompt, Endpoint, Library mode, selected Library, and new
 Library name. It shows the same scope-correct recovery as released Task start.
-A rejected create writes no Task, File Library, message, Run, or accepted Audit
-event.
+A rejected create creates no admitted Task, newly bindable/visible File
+Library, message, or unreleased Run. It may persist only request idempotency
+and one deduplicated rejected Audit record. In create-new-Library mode, any
+candidate-directory preparation required before admission returns its own
+typed error if it fails before a capacity result exists. Only after capacity
+rejection has been determined does failure to compensate that candidate yield
+to the canonical capacity envelope. Any such filesystem remnant stays outside
+all list/bind projections and cannot be selected or bound. Existing-Library
+mode does not mutate that Library before admission and bind.
+
+All Slice 1 retryable failures use exactly one envelope:
+
+```ts
+{
+  error: {
+    code:
+      | "project_sandbox_capacity_reached"
+      | "substrate_sandbox_capacity_reached"
+      | "sandbox_start_failed";
+    message: string;
+    retryable: true;
+    details: {
+      activeSandboxes: number;
+      sandboxLimit: number;
+    } | null;
+    presentation: TaskPresentation | null;
+  };
+}
+```
+
+`project_sandbox_capacity_reached` uses the canonical message `Project Sandbox
+capacity reached`, with non-null `details`. `substrate_sandbox_capacity_reached`
+uses `Local Sandbox capacity unavailable`, with `details: null`.
+`sandbox_start_failed` uses `Sandbox could not be started`, with
+`details: null`, and is reserved for the Terminal-start command. Task-create
+capacity errors use `presentation: null`; released-message capacity errors use
+the original canonical released `TaskPresentation`; Terminal capacity errors
+use the same released presentation. Terminal startup failure instead carries
+the canonical failed/pending-cleanup presentation for its capacity-holding
+Run. There is no legacy envelope, route-local serializer, or alternate
+capacity shape.
 
 ### 6.2 Released Task message behavior
 
@@ -414,42 +505,96 @@ event.
   Botified session, and File Library;
 - the draft remains editable and Send remains available while Task capability
   permits it;
+- the server and Web impose no 32 KiB Task-message business limit. Ordinary
+  message validation, including trimmed non-empty validation, is independent
+  of browser draft persistence;
 - admitted Send atomically creates one Run and one message, then shows startup
   progress in the same workbench;
 - rejected Send creates no Run, message, queued interaction, or accepted
   message Audit event and leaves the Task released;
-- the safe error envelope returns `retryable: true`, the same canonical Task
-  presentation, and either `project_sandbox_capacity_reached` with Project
-  count/limit or `substrate_sandbox_capacity_reached`;
+- the sole error envelope in section 6.1 returns `retryable: true`, the same
+  canonical released Task presentation, and either
+  `project_sandbox_capacity_reached` with Project count/limit or
+  `substrate_sandbox_capacity_reached`;
+- once admission succeeds, the message is accepted and the request never later
+  becomes `sandbox_start_failed`. A subsequent Sandbox startup failure is
+  represented by the persisted Run/interaction failure and cleanup state; the
+  Run keeps holding capacity until release finalization;
 - the Web keeps draft, focus, timeline, and peer view, and titles the inline
   error `Sandbox could not be started`;
 - Project rejection links to live Sandboxes and, for administrators, Resource
   Policy;
 - substrate rejection links to live Sandboxes and says to release one the user
   controls or try again later, without a misleading Project Policy link;
-- after capacity changes, the user retries through the same Send action;
+- same-key replay returns the exact original rejection; after capacity changes,
+  explicit `Retry` uses the same Send command with a new idempotency key;
 - there is no automatic retry, compute queue, future slot, or auto-release.
 
 ### 6.3 Released Task Terminal behavior
 
-- Selecting Terminal on an active Sandbox opens the existing peer workbench
-  without reserving another slot.
-- Restoring `?view=terminal`, refreshing, or browser history navigation never
-  starts compute. A released Task first shows a static Terminal start surface.
-- Only the explicit `Start sandbox and open Terminal` command calls the
-  idempotent JSON `POST /tasks/:taskId/terminal/start` endpoint.
-- On a released Task, that command uses the same atomic admission primitive,
-  creates at most one Run, and returns the canonical Task presentation.
-- On a capacity rejection, the Web does not mount or reconnect the WebSocket.
-  It keeps the selectable Terminal peer view and static start surface, then
-  displays the same scope-correct recovery used by message Send. Retry is
-  another explicit start command and never starts automatically.
-- Only after the start command succeeds does the existing authenticated
-  AgentSmith Terminal WebSocket become a pure transport connection.
-- A later transport disconnect may use bounded reconnect; typed admission
-  failures never enter the generic `Workspace is starting` reconnect loop.
-- Terminal does not create a new Task or Botified session and does not queue a
-  shell while waiting for capacity.
+- Terminal is an optional peer view for every readable Task. The server does
+  not hide the view behind a start capability.
+- The single `openTerminal` capability authorizes only the explicit
+  start/connect command. Do not add `canViewTerminal`, `canStartTerminal`,
+  `canConnectTerminal`, or other parallel capability fields.
+- `sandboxState` and that one command authorization determine the peer surface:
+  `openTerminal: false` shows static Unavailable; otherwise `released` shows
+  static Start, `starting` (including a committed reservation) shows progress,
+  `active` shows Connect, and `failed`/`release_requested` shows static
+  Pending cleanup with no Retry command.
+- Selecting Terminal, restoring it through browser history or validated Files
+  `returnTo`, or refreshing that history entry never starts compute or mounts
+  a WebSocket.
+- Only `Start sandbox and open Terminal` calls idempotent JSON
+  `POST /tasks/:taskId/terminal/start` with an idempotency key.
+
+Terminal start is a two-phase fenced operation:
+
+1. the admission transaction reserves exactly one `starting` Run and commits;
+2. after commit, and with no database transaction open, the service starts the
+   Kubernetes/Botified Sandbox using the Run identity and persisted fence;
+3. only the holder of that fence may confirm the same Run `active`;
+4. the command reports success only after active confirmation and returns the
+   canonical active `TaskPresentation`;
+5. startup failure records the Run `failed`, requests cleanup through
+   `release_requested`, and stores the canonical `sandbox_start_failed`
+   envelope with the failed/pending-cleanup `TaskPresentation`;
+6. that Run remains capacity-holding until cleanup confirms that no
+   Kubernetes/Botified resource exists and release finalization changes it to
+   `released`.
+
+Concurrent calls with the same key never create or start a second Run. The
+owner request waits for startup's canonical final result. While it is still
+starting, another same-key request returns HTTP 202 with typed non-error
+`in_progress` for that same Run; after completion, the same key converges on
+that Run's HTTP 200 `active` result or stored canonical failure. Capacity
+rejection is also replayed exactly for that key. A user choosing `Retry` after
+capacity rejection sends a new key. After startup failure, Retry remains
+unavailable until cleanup confirms `released`; the failed key always replays
+the exact stored failed/pending-cleanup envelope and never substitutes a
+released presentation. Once a fresh Task presentation confirms `released`, an
+explicit Retry uses a new key.
+
+```ts
+type TerminalStartCommandResult =
+  | {
+      status: "in_progress";
+      runId: string;
+      presentation: TaskPresentation;
+    }
+  | {
+      status: "active";
+      runId: string;
+      presentation: TaskPresentation;
+    };
+```
+
+The WebSocket is mounted only after the command confirms `active`; it is a pure
+authenticated transport connection and never reserves or starts a Sandbox. A
+later transport disconnect may use bounded reconnect. Admission rejection,
+startup progress, and startup failure never enter a generic connection retry
+loop. Terminal never creates a new Task or Botified session and never queues a
+shell while waiting for capacity.
 
 ### 6.4 Task workbench continuity
 
@@ -457,8 +602,8 @@ Keep small recoverable state scoped by Task ID:
 
 - unsent composer draft: `sessionStorage`, partitioned by stable current-user
   ID and Task ID;
-- selected Conversation/Terminal/Artifacts peer view: URL state so
-  back/forward and direct return are predictable.
+- selected Conversation/Terminal/Artifacts peer view: URL state only, restored
+  only by browser history or validated Files return.
 
 Rules:
 
@@ -467,6 +612,16 @@ Rules:
 - clear or ignore stored state on logout, identity change, denied Task access,
   or Task deletion;
 - archived/read-only Tasks may show a retained draft but cannot submit it;
+- browser refresh/back/forward may restore the valid `view` already owned by
+  that history entry;
+- Task-to-Files navigation carries a canonical `returnTo` containing the
+  current Task URL and peer-view query. The Web accepts it only after resolving
+  it as an application-internal, same-origin relative URL and canonicalizing
+  it; absolute, protocol-relative, cross-origin, malformed, and non-application
+  values are discarded. Files returns through only that validated value;
+- every other Task entry, including Task lists, alerts, search, copied/direct
+  links, and cross-product navigation, constructs or normalizes a Task URL
+  without `view` and opens Conversation;
 - no browser state is treated as conversation truth or shared across users,
   devices, or Tasks;
 - do not persist follow/read mode, scroll anchors, streamed previews,
@@ -474,9 +629,14 @@ Rules:
   decisions.
 
 The storage key includes schema version, current user ID, Project ID, and Task
-ID. Draft length is bounded by the message contract. If browser storage is
-unavailable or full, the current mounted composer still works; persistence
-degrades quietly rather than blocking Task work.
+ID. `TASK_DRAFT_SNAPSHOT_MAX_UTF8_BYTES = 32768` applies only to the
+`sessionStorage` snapshot and is measured with `TextEncoder`. A larger draft
+remains editable and submittable, but the Web stops persisting it, deletes any
+older snapshot for that key, and shows a non-blocking inline persistence hint.
+When the draft returns within the ceiling, snapshot persistence resumes and
+the hint disappears. Peer view and `returnTo` are never stored. If browser
+storage is unavailable or full, the mounted composer still works and reports
+the same non-blocking persistence condition rather than blocking Task work.
 
 The Task displays one activity summary. Released state appears once with a
 neutral stopped/paused treatment; it is not a green success Banner. Routine
@@ -497,9 +657,23 @@ Canonical user-facing language:
 | recovery | Release another sandbox, then try again |
 
 Public application contracts and all visible copy use Sandbox names. Existing
-SQL column names do not need a migration solely for wording; adapters keep that
-storage detail out of the public contract. No compatibility alias, dual public
-field, or old visible term remains.
+public capacity fields are exactly `sandboxLimit` and `activeSandboxes`.
+Public Alert values are exactly type `sandbox_capacity` and metric
+`active_sandboxes`. No compatibility alias, dual public field, old route
+serializer, or old visible term remains.
+
+Slice 1 adds one narrow forward data migration for existing system-generated
+Alert/notification copy. It updates only rows whose system kind and complete
+legacy title/body exactly match the enumerated old generated strings, replacing
+those strings with canonical Sandbox terminology. It performs no substring or
+fuzzy replacement and never rewrites user-authored or non-matching content.
+
+That data migration does not rename private SQL columns or persisted enum
+values. Those may retain old storage names, but only the adapter may project
+them outward to canonical domain/public names. Application and Web code never
+accept, emit, branch on, or map back from a public legacy alias. The Slice 1
+copy migration and the Slice 3 File Library lifecycle migration are two
+separate, independently focused forward migrations.
 
 Audit behavior:
 
@@ -509,9 +683,14 @@ Audit behavior:
 - a rejected Terminal restart is `sandbox.started / rejected` with trigger
   `terminal`;
 - detail distinguishes `project_policy` from `substrate_namespace`;
+- Project rejection detail contains `activeSandboxes` and `sandboxLimit`;
+- substrate rejection detail contains neither count nor limit and never
+  triggers a Project `sandbox_capacity` Alert;
+- rejected Audit writes are deduplicated with request idempotency, including
+  initial Task create rejection;
 - no rejected message event is recorded when the message was never accepted;
-- detail contains IDs, trigger, active count, and limit only, never prompt,
-  message, credential, or file content.
+- detail may contain IDs and trigger, but never prompt, message, credential, or
+  file content.
 
 ### 6.6 Files selection and navigation
 
@@ -805,41 +984,86 @@ Keep the existing atomic Task mutation boundaries:
 - initial Task creation reserves one Run;
 - released-Task message creation reserves one Run and creates the message in
   the same transaction;
-- released-Task Terminal start reserves one Run before WebSocket transport.
+- released-Task Terminal start commits one Run reservation before fenced
+  Kubernetes/Botified startup and before WebSocket transport.
 
 Move namespace admission out of the current Task-create-only preflight. Pass
 the configured namespace limit into each atomic create/restart operation. The
-PostgreSQL adapter uses one internal admission implementation and one fixed
-lock order for every trigger:
+PostgreSQL adapter uses one internal admission implementation for every
+trigger.
+
+The namespace advisory lock is used only by admission and release
+finalization. Those two writers use this relative lock order:
 
 ```text
 namespace advisory lock
-  -> Project / policy / usage rows
-  -> existing Task row, when present
-  -> selected File Library row, when initial Task creation needs one
-  -> Run, message, Task, usage, and idempotency writes
+  -> Project
+  -> policy / usage
+  -> Task
+  -> Run
+  -> File Library
+  -> writes
 ```
 
-- count every Run whose release has not been confirmed, not only `active`
-  Runs;
+- A stage with no existing object is skipped; its relative position does not
+  move. Initial create therefore locks the selected Library only after the Run
+  counting/locking stage, while absent Task/Run rows are simply skipped before
+  inserts occur in `writes`.
+- A `sandboxLimit` policy update never takes the namespace advisory lock. It
+  locks Project -> policy -> usage -> writes. Admission already locks Project
+  after namespace, so both operations serialize on the Project row without
+  adding a reverse namespace dependency.
+- Other policy and Files/Library writers also take no unrelated namespace
+  lock. Whenever writers touch shared objects, they retain the applicable
+  Project -> policy/usage -> Task -> Run -> Library relative order and skip
+  untouched stages.
+- Active confirmation locks the applicable Project -> Task -> Run -> writes
+  without namespace because it does not allocate or release capacity.
+- Any startup failure moves the Run through `failed` and
+  `release_requested`; neither transition changes capacity or the absolute
+  usage projection, and neither takes the namespace advisory lock.
+- Cleanup must positively confirm that the fenced Kubernetes/Botified resource
+  is absent. Only then does release finalization take namespace -> Project ->
+  policy/usage -> Task -> Run -> Library -> writes, confirm that exact Run
+  `released`, recompute both authoritative counts, and write the absolute
+  Project usage projection in the same transaction. Failed or pending cleanup
+  cannot free capacity by changing a counter or presentation.
+- count every Run with `state != released`, not only `active` Runs;
+- evaluate Project policy before namespace saturation in the locked snapshot,
+  so simultaneous saturation deterministically returns Project rejection;
 - apply namespace and Project policy limits before any Task, message, Run,
-  usage, or accepted Audit write;
+  Library bind, usage, or accepted Audit write;
 - the in-memory store implements the same result contract;
 - results distinguish `project_capacity_rejected` and
   `substrate_capacity_rejected`;
-- only a successful transaction increments Project usage and creates a Run;
+- a successful admission inserts one unreleased Run and then sets
+  `project_resource_usage.active_tasks` to the absolute locked Run count;
+- rejected admission writes only the idempotency record and one deduplicated
+  rejected Audit record, with no admitted business state;
 - remove the old non-atomic namespace preflight.
 
-A message cold-start rejection returns a safe error envelope with the typed
-code, `retryable: true`, and the canonical presentation for the same released
-Task. It contains no queued message.
+No Store or service API exposes a raw unreleased-Run insert. Tests and seed
+helpers that exercise production behavior also enter through admission. The
+adapter keeps unreleased-Run insertion private to the admission transaction
+and rejects every call without that transaction's admission guard; the narrow
+Slice 1 copy data migration adds no Run schema path or bypass.
 
-Add an idempotent JSON Terminal-start command that performs the same atomic
-admission and returns either canonical Task presentation or the same typed
-error envelope. The Web opens the existing Terminal WebSocket only after this
-command succeeds. The WebSocket no longer owns Sandbox admission and remains a
-pure authenticated transport. Do not introduce a Terminal ticket unless the
-existing OIDC session and single-terminal ownership check prove insufficient.
+The idempotency row owns the canonical request result for all three entry
+points. Capacity rejection snapshots and serializes the section 6.1 envelope
+once; same-key replay cannot recalculate its count, limit, message, or
+presentation. Explicit Retry uses a new key.
+
+For Terminal, commit the reserved `starting` Run and operation fence first.
+Start Kubernetes/Botified outside every database transaction. A competing or
+stale caller cannot start or activate a Run without the matching fence.
+Confirmation of `active` uses the shared object order without namespace.
+Startup failure persists `failed`/`release_requested` and its
+failed/pending-cleanup presentation without changing usage. Same-key callers
+observe HTTP 202 `in_progress` until they converge on the stored HTTP 200
+active result or canonical failure. That failure replay remains the stored
+pending-cleanup presentation even if a later GET observes completed release.
+Only confirmed active returns command success. The existing Terminal WebSocket
+then connects as pure authenticated transport.
 
 ### 7.2 Recursive deletion engine
 
@@ -948,7 +1172,8 @@ entries are filtered server-side, not merely hidden in the Web.
 
 ### 7.3 Library lifecycle serialization
 
-Add one forward migration with a narrow File Library deletion fence:
+Add the separate Slice 3 forward migration with a narrow File Library deletion
+fence:
 
 ```text
 active -> deleting
@@ -1018,6 +1243,10 @@ API. Any post-bind preparation failure uses the existing deterministic Task
 creation recovery for that same Task identity; it never leaves an unbound
 filesystem preparation that can race Library deletion.
 
+The create-new-Library candidate directory in section 6.1 is not yet an
+existing or projected Library. It remains invisible and unbindable until
+admission succeeds; rejection compensation removes only that candidate.
+
 ### 7.4 One Library path boundary
 
 Task workspace preparation, Artifact storage, Files operations, and deletion
@@ -1044,16 +1273,33 @@ Files routes cannot list or mutate the internal projection directory.
 
 - Server presentation owns lifecycle, authorization, binding, and destructive
   capabilities; atomic mutation responses own Sandbox admission results.
+- Run rows with `state != released` own capacity truth; the Project usage row is
+  a server-only absolute projection and is never admission input.
 - URL owns selected Library and current folder.
 - Files browser state owns selected entry, local filter/sort, and presentation
   page.
-- Task URL owns the current peer view. User-and-Task-scoped `sessionStorage`
-  owns the unsent draft.
+- Task URL exclusively owns the current peer view. User-and-Task-scoped
+  `sessionStorage` owns only the unsent draft.
+- A validated canonical same-origin application-relative `returnTo` owns the
+  Task-to-Files return target; it is carried in the URL and never copied into a
+  capability or browser store.
+- Canonical `TaskPresentation.sandboxState` selects Terminal Start, progress,
+  Connect, pending cleanup, or Unavailable. The single `openTerminal`
+  capability authorizes the start/connect command only; Task readability makes
+  the peer view selectable.
 - Astryx owns primitive focus, overlay, input, button, and semantic styling.
 - AgentSmith domain components own Task workbench, Files browser, and modal
   composition only where product semantics require composition.
 
 ### 8.2 Error treatment
+
+All Slice 1 API clients parse only the section 6.1 envelope. Delete old
+capacity envelopes and route-specific serializers rather than accepting both.
+Project details are non-null; substrate and startup-failure details are null;
+create capacity presentation is null; released-message and Terminal capacity
+presentation is the original canonical released Task. Only Terminal may
+receive `sandbox_start_failed`, whose stored presentation is canonical
+failed/pending-cleanup and continues to show held capacity.
 
 Map typed API errors at the affected action:
 
@@ -1061,6 +1307,7 @@ Map typed API errors at the affected action:
 | --- | --- |
 | `project_sandbox_capacity_reached` | preserve draft/view; show Project count/limit and live Sandboxes |
 | `substrate_sandbox_capacity_reached` | preserve draft/view; show local capacity guidance without a policy link |
+| `sandbox_start_failed` | show failed/pending cleanup; do not offer Retry or a released surface until current Task state confirms release |
 | `file_library_bound` | keep Library; show owning Task |
 | `file_path_not_found` | clear stale entry and recover to selected Library root |
 | `file_library_not_found` | select the nearest remaining Library or empty state |
@@ -1074,7 +1321,18 @@ in ordinary Web copy.
 
 - Capacity failure preserves Task draft, focus, timeline, and Task identity.
 - Ordinary navigation away from and back to a Task restores its valid
-  user-scoped draft and peer view.
+  user-scoped draft, but not an implicit peer view.
+- Browser refresh/back/forward restores the valid peer view owned by that
+  history entry. Peer view is never restored from `sessionStorage`.
+- Task -> Files includes the validated canonical `returnTo`; Files returns to
+  that exact Task peer-view URL. Invalid or external input is discarded and
+  falls back to Conversation.
+- Task list, Alert, search, copied/direct, and other product navigation enters
+  the Task at Conversation even if an earlier local view existed.
+- Same-key capacity replay preserves the original canonical error. Same-key
+  Terminal startup failure preserves its failed/pending-cleanup presentation;
+  it never fabricates released state. Only an explicit capacity Retry creates
+  a new key and may observe changed capacity.
 - Folder deletion preserves the parent folder, Library, filter, and sort.
 - Library deletion selects the nearest remaining Library and resets folder and
   entry state once.
@@ -1092,25 +1350,63 @@ path before moving on.
 
 Deliver:
 
-- canonical scoped Sandbox admission contract and error codes;
+- canonical scoped Sandbox admission contract, Project-first precedence, and
+  the sole retryable error envelope;
 - one atomic Project/namespace admission path for all cold starts;
-- message and Terminal cold-start presentation;
-- typed Terminal startup failure;
-- user-and-Task-scoped draft plus URL peer-view continuity;
+- unreleased Run-row counting, absolute same-transaction Project usage
+  projection, and no bypass path for unreleased Run creation;
+- namespace -> Project object order only for admission/release finalization,
+  plus Project -> policy -> usage serialization for Sandbox-limit update with
+  no namespace lock;
+- exact same-key capacity rejection replay and explicit new-key Retry;
+- committed Terminal reservation, transaction-free fenced startup, active-only
+  success, same-Run in-progress/convergence, capacity-holding
+  failed/release-requested cleanup, canonical pending-cleanup failure replay,
+  and transport-only WebSocket;
+- accepted released-message behavior in which post-admission startup failure is
+  durable Run/interaction state and never a `sandbox_start_failed` request;
+- always-selectable Terminal peer view, one command-only `openTerminal`
+  capability, and `sandboxState`-driven static surfaces;
+- user-and-Task-scoped draft, history/validated-return URL peer view, and
+  Conversation for every other Task entry;
+- one 32,768 UTF-8-byte session draft-snapshot ceiling using `TextEncoder`,
+  with non-blocking over-limit behavior and no message submission limit;
 - one neutral, non-duplicated released-state presentation;
-- consistent Task create/detail, Usage, Policy, Alert, and Audit language;
-- correct Audit attribution for each reservation trigger;
-- deletion of old visible `active task` capacity copy and old error mapping.
+- public `sandboxLimit`/`activeSandboxes`, Alert
+  `sandbox_capacity`/`active_sandboxes`, and no public aliases;
+- adapter-only outward mapping for retained private SQL/Alert legacy values;
+- one narrow forward data migration for exact matching, system-generated
+  legacy Alert/notification title/body copy;
+- trigger-correct, idempotently deduplicated rejection Audit, with no
+  count/limit or Project Alert for substrate rejection;
+- create rejection with no admitted business state; pre-admission directory
+  failure keeps its own error, while post-rejection compensation failure cannot
+  hide the capacity envelope and leaves remnants invisible/unbindable;
+- deletion of old visible `active task` copy, capacity envelope, route
+  serializer, public alias, and WebSocket admission.
 
 Implementation/commit order:
 
-1. Store admission result, fixed lock order, namespace/Project counting, and
-   concurrency tests.
-2. Message and JSON Terminal-start application/API contracts, canonical error
-   envelopes, and removal of WebSocket-owned admission.
-3. Released Task message/Terminal UI and scope-correct recovery.
-4. User-scoped draft, URL peer view, released-state deduplication, terminology,
-   and Audit copy.
+1. Write the focused failing Store/contract tests for all three entry points,
+   Project-first simultaneous saturation, mixed races, replay, lock-sensitive
+   finalization/policy updates, and absolute projections.
+2. Implement one Store admission path, unreleased-Run guard, capacity-writer
+   lock orders, release finalization, namespace-free Sandbox-limit update,
+   canonical envelope, idempotency, and Audit/Alert rules until those tests
+   pass.
+3. Write failing Terminal service/API tests, then implement committed
+   reservation, fenced out-of-transaction startup, same-Run convergence,
+   active confirmation, failed/release-requested cleanup, exact
+   pending-cleanup failure replay, accepted-message failure state, and pure
+   WebSocket transport.
+4. Add the narrow Slice 1 forward copy migration for exact matching generated
+   Alert/notification rows; keep private enum/column mappings adapter-only.
+5. Write failing Web/client tests for envelope mapping, snapshot-only draft
+   ceiling, always-selectable Terminal surfaces, scoped URL view, `returnTo`,
+   and public names; then implement message/Terminal/create recovery and
+   continuity.
+6. Delete replaced serializers, old public aliases, WebSocket admission, and
+   duplicated released-state/capacity copy.
 
 Primary modules:
 
@@ -1132,28 +1428,70 @@ Primary modules:
 
 Focused checks:
 
-- released Task with room starts one new Run and keeps Task/session/Library;
-- released Task at Project or substrate capacity accepts no message and creates
-  no Run;
-- draft remains after capacity rejection;
-- active Task messaging does not require another slot;
-- released Terminal succeeds once or returns the same scoped capacity
-  rejection without mounting its WebSocket;
-- one last slot won concurrently has one winner;
-- namespace count and Project count remain within their limits across
-  concurrent create/message/Terminal starts;
-- Audit identifies create, message restart, and Terminal restart correctly;
-- releasing a Sandbox returns capacity and refreshes the blocked Task
-  presentation on explicit retry/refresh;
-- navigating Task -> Files -> Task as the same user restores draft and peer
-  view without persisting conversation content in browser storage.
+- each of create, released message, and released Terminal admits with room,
+  rejects at Project capacity, rejects at namespace-only capacity, and exactly
+  replays that rejection for the same key;
+- when both scopes are full, all three entry points return Project rejection
+  with non-null `activeSandboxes`/`sandboxLimit`;
+- mixed concurrent create/message/Terminal requests for one remaining Project
+  or namespace slot produce one winner, no limit breach, no orphan message,
+  and no duplicate/unadmitted unreleased Run;
+- admission racing release finalization and `sandboxLimit` update observes the
+  prescribed separate lock orders, has no namespace lock in policy update,
+  remains serialized by Project, observes authoritative `state != released`
+  rows, and has an absolute usage projection after every admission/release
+  commit;
+- active Task messaging consumes no new slot; no production path can insert an
+  unreleased Run outside admission;
+- create rejection persists only exact idempotency plus one deduplicated
+  rejected Audit; directory preparation failure before admission returns its
+  own error, while failed compensation after a decided capacity rejection
+  cannot change the envelope, expose a Library, or make a remnant bindable;
+- Project rejection Audit has canonical count/limit, while substrate Audit has
+  neither and emits no Project `sandbox_capacity` Alert;
+- Terminal reservation commits before one fenced out-of-transaction start;
+  same-key concurrency observes in-progress or the same Run, success waits for
+  active, failure enters failed/release_requested and returns exact
+  pending-cleanup replay, capacity remains held until confirmed resource
+  absence and release finalization, and no pre-success WebSocket mounts;
+- released-message admission persists the message before startup; later
+  startup failure appears only in Run/interaction state and never returns or
+  stores a message `sandbox_start_failed` envelope;
+- every retryable Slice 1 failure has exactly
+  `{error:{code,message,retryable:true,details,presentation}}`, with the
+  required nullability and no legacy envelope/serializer;
+- drafts at 32,768 UTF-8 bytes persist; above that ceiling they remain editable
+  and submittable while persistence stops, the old snapshot is removed, and a
+  non-blocking hint appears; returning within the ceiling resumes persistence
+  and removes the hint;
+- capacity rejection preserves the draft; browser history restores its URL
+  view; Task -> Files -> validated `returnTo` -> Task restores that view;
+  cross-origin or malformed `returnTo` is ignored; every other Task entry
+  opens Conversation; peer view is absent from storage;
+- readable Tasks always expose Terminal, `openTerminal` authorizes only the
+  command, and each `sandboxState` renders exactly one static
+  Start/progress/Connect/Pending-cleanup/Unavailable surface;
+- API/Web payload assertions contain only `sandboxLimit`, `activeSandboxes`,
+  `sandbox_capacity`, and `active_sandboxes`; old public names are rejected and
+  retained private storage names are adapter-confined;
+- the Slice 1 data migration rewrites only exact system-generated legacy
+  Alert/notification title/body pairs, leaves near matches and user-authored
+  rows untouched, and is distinct from the Slice 3 lifecycle migration.
 
 Slice completion:
 
-- no retained UI calls Sandbox allocation `active Task capacity`, and no
-  Project-policy link is shown for substrate saturation;
-- message and Terminal have one admission and recovery behavior;
-- atomic reservation remains authoritative.
+- all three entries share one admission authority and exact replay behavior;
+- Run rows, not usage projection, decide capacity; release and policy updates
+  use their specified separate lock orders;
+- Terminal start is fenced outside the transaction and the WebSocket is pure
+  transport; failed cleanup remains capacity-holding and is never presented as
+  released;
+- no retained public contract calls Sandbox allocation `active Task capacity`,
+  and substrate saturation has no count/limit, Project-policy link, or Project
+  Alert;
+- Slice 1 adds one narrow generated-copy data migration while private legacy
+  enum/column values remain adapter-confined; Slice 3 retains its separate
+  forward Library lifecycle migration.
 
 ### Slice 2: File and folder object behavior
 
@@ -1217,7 +1555,8 @@ Slice completion:
 Deliver:
 
 - shared lifecycle serialization for Task binding and Library mutation;
-- one forward `active | deleting` Library lifecycle migration;
+- the distinct Slice 3 forward `active | deleting` Library lifecycle
+  migration;
 - one recursive unbound-Library delete application path;
 - bound-Library rejection with owning Task;
 - complete point-in-time post-delete file usage;
@@ -1371,14 +1710,50 @@ Slice completion:
 
 ## 10. Focused Testing Discipline
 
-Tests scale with changed business risk:
+Use focused TDD for changed business risk: add the exact failing behavior test,
+make the owning implementation pass, and delete replaced-path assertions in
+the same Slice. Slice 1 coverage is mandatory and remains serial:
 
-- store tests for atomic capacity and Library-binding races;
+- Store tests cover create, released message, and released Terminal separately
+  at Project capacity, namespace capacity, and simultaneous saturation;
+- concurrency tests cover mixed create/message/Terminal contention, admission
+  versus release finalization, admission versus Sandbox-limit update, one-slot
+  winners, namespace locking only for admission/release finalize,
+  Project-serialized namespace-free policy update, authoritative
+  unreleased-Run counts, absolute usage projection, and rejection of every
+  unreleased-Run bypass;
+- idempotency tests cover exact same-key capacity/error replay, deduplicated
+  rejected Audit, explicit new-key Retry, Terminal in-progress/same-Run
+  convergence, failed/pending-cleanup startup replay, pre-admission directory
+  errors, and invisible/unbindable post-rejection cleanup remnants;
+- Terminal service/API tests prove reservation commit precedes one fenced K8s
+  start outside the transaction, success follows active confirmation, failure
+  remains capacity-holding through `failed`/`release_requested`, release waits
+  for confirmed resource absence, failure replay never claims released, and
+  WebSocket transport never admits or starts;
+- released-message tests prove admission accepts and persists the message, and
+  any later startup failure is durable Run/interaction state rather than
+  `sandbox_start_failed`;
+- API contract tests assert the sole error envelope and its exact Project,
+  substrate, create, message, and Terminal nullability, canonical message, and
+  presentation rules;
+- Web/client tests cover draft preservation, snapshot-only 32,768 UTF-8-byte
+  `TextEncoder` ceiling and non-blocking overflow recovery, history/return-only
+  URL peer view, Conversation default for other Task entries, canonical
+  same-origin relative `returnTo`, readable-Task Terminal surfaces, and no
+  multiple Terminal capabilities;
+- public-contract tests permit only `sandboxLimit`, `activeSandboxes`,
+  `sandbox_capacity`, and `active_sandboxes`, and prove private old
+  SQL/Alert values cannot escape the adapter;
+- Slice 1 migration tests update only exact system-generated legacy
+  Alert/notification title/body pairs and preserve near matches, user-authored
+  copy, private enums, and private column names;
+- Store tests also cover atomic capacity and Library-binding races;
 - service tests for Task cold-start, Project/namespace admission, recursive
   deletion, descriptor-anchored symlink/parent replacement resistance,
   reserved paths, accounting, and idempotency;
-- migration/store tests for `active | deleting`, bind-versus-delete, and
-  interrupted deletion retry;
+- separate Slice 3 migration/store tests cover `active | deleting`,
+  bind-versus-delete, and interrupted deletion retry;
 - API contract tests for typed errors and final response shape;
 - focused Web state/client behavior tests only where continuity or error
   mapping has non-trivial logic;
@@ -1401,10 +1776,26 @@ the local cluster needed for the current product path.
 
 The development team delivers:
 
-- final API contract and any single forward database migration;
+- final API contract and the narrow Slice 1 forward migration for exact
+  system-generated legacy Alert/notification title/body copy, while private
+  Alert/storage enum and column names remain adapter-mapped;
+- the distinct Slice 3 forward File Library `active | deleting` lifecycle
+  migration; these are two focused migrations, not one combined or
+  ambiguously named migration;
 - server-owned Project/substrate Sandbox admission and typed capacity failures;
-- coherent message, Terminal, Usage, Policy, Alert, and Audit behavior;
-- user-and-Task-scoped draft plus URL peer-view continuity;
+- Run-row capacity authority, absolute usage projection, capacity-writer lock
+  order for admission/release finalization, namespace-free Project-serialized
+  Sandbox-limit updates, exact rejection replay, and no unreleased-Run bypass;
+- fenced transaction-free Terminal startup with active-only success,
+  capacity-holding failed/pending cleanup, exact non-released failure replay,
+  and a pure transport WebSocket;
+- accepted released-message startup failure represented by durable
+  Run/interaction state rather than a Terminal error;
+- one error envelope plus coherent message, Terminal, Usage, Policy, Alert, and
+  Audit behavior using only canonical public Sandbox names;
+- user-and-Task-scoped draft with snapshot-only byte ceiling,
+  history/validated-return URL peer view, Conversation default elsewhere, and
+  validated Task-to-Files return continuity;
 - recursive file/folder and unbound-Library deletion;
 - descriptor-anchored deletion, protected Artifact storage, and corrected File
   Library lifecycle/binding behavior;
@@ -1432,11 +1823,63 @@ The milestone is complete only when all of the following are true:
   an orphan message nor an extra Run;
 - Project and substrate namespace limits are both enforced atomically for Task
   create, message restart, and Terminal restart, with scope-correct recovery;
+- simultaneous Project/namespace saturation returns Project rejection for all
+  three entry points;
+- every Run with `state != released` is counted as authoritative capacity, no
+  unreleased Run can bypass admission, and
+  `project_resource_usage.active_tasks` is an absolute same-transaction
+  projection rather than an increment/decrement authority;
+- admission and release finalization obey namespace -> Project ->
+  policy/usage -> Task -> Run -> Library -> writes, skipping absent objects;
+  Sandbox-limit updates obey Project -> policy -> usage -> writes, serialize
+  with admission on Project, and never take namespace; unrelated policy/File
+  writers also take no namespace lock and retain applicable shared object
+  order;
+- same-key capacity rejection exactly replays its original canonical envelope;
+  explicit Retry uses a new key;
+- Terminal commits one reservation before fenced Kubernetes/Botified startup
+  outside the transaction, same-key concurrency stays on that Run, only active
+  confirmation succeeds, startup failure enters
+  `failed`/`release_requested`, remains capacity-holding until resource absence
+  is confirmed, replays the canonical failed/pending-cleanup presentation
+  without pretending released, and the WebSocket is pure transport;
+- after released-message admission succeeds, its message is accepted; later
+  startup failure is persisted Run/interaction state and
+  `sandbox_start_failed` is never used for that message request;
+- every readable Task can select Terminal; `openTerminal` authorizes only
+  start/connect, and `sandboxState` alone selects
+  Start/progress/Connect/Pending-cleanup/Unavailable without extra capability
+  fields;
+- Slice 1 has one error shape,
+  `{error:{code,message,retryable:true,details,presentation}}`: Project details
+  are non-null, substrate details are null, create presentation is null, and
+  released-message/Terminal capacity presentation is the original released
+  Task; `sandbox_start_failed` is Terminal-only and carries canonical
+  failed/pending-cleanup presentation;
+- rejected create leaves no admitted business state; idempotency and one
+  deduplicated rejected Audit are allowed; directory preparation failure before
+  admission returns its own error, while compensation failure after capacity
+  rejection neither obscures the canonical capacity envelope nor exposes/binds
+  a remnant;
 - Task creation, Task detail, Usage, Policy, Alerts, and Audit use coherent
   Sandbox-capacity semantics;
+- public contracts expose only `sandboxLimit`, `activeSandboxes`,
+  `sandbox_capacity`, and `active_sandboxes`; retained old SQL/Alert values are
+  private adapter inputs with no public aliases; the narrow Slice 1 migration
+  rewrites only exact system-generated legacy Alert/notification title/body
+  pairs, and remains separate from the Slice 3 lifecycle migration;
+- substrate rejection Audit has no count/limit and triggers no Project
+  capacity Alert;
 - Audit no longer records an existing-Task restart rejection as Task creation;
+- Task messages have no 32 KiB server or Web submission limit. Only
+  `sessionStorage` snapshots stop at 32,768 UTF-8 bytes by `TextEncoder`;
+  over-limit drafts stay editable/submittable, discard the old snapshot, and
+  show a non-blocking hint until persistence resumes within the ceiling;
 - leaving and returning to a Task as the same user in the same browser session
-  restores its valid draft and peer view; another user never receives it;
+  restores its valid draft; history and Task -> Files -> Task through validated
+  canonical same-origin relative `returnTo` may restore the URL peer view,
+  every other Task entry defaults Conversation, and another user never
+  receives the draft;
 - file and folder entries share one selection model and separate Open action;
 - recursive folder deletion is safe, accounted, audited once, and repairs the
   browser state;
@@ -1469,5 +1912,6 @@ The milestone is complete only when all of the following are true:
   system;
 - the serial local K8s product path in Slice 5 works with the real
   OpenAI-compatible endpoint;
-- no automatic reclamation, force-mode fork, compatibility adapter, removed
-  feature, report, evidence artifact, or default release gate has been added.
+- no automatic reclamation, force-mode fork, public compatibility alias,
+  removed feature, report, evidence artifact, or default release gate has been
+  added.
