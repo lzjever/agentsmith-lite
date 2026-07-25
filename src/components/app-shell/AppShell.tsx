@@ -7,7 +7,7 @@ import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, o
 import { DocumentTitle } from "../layout/DocumentTitle";
 import { ThemeToggle } from "../theme/ThemeToggle";
 import { ShellNavigation } from "./Sidebar";
-import { Topbar } from "./Topbar";
+import { ProjectSwitcher, Topbar } from "./Topbar";
 
 type ShellProps={children:ReactNode;workspaceId?:string;projectId?:string};
 type ShellState="loading"|"ready"|"login"|"error";
@@ -123,7 +123,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     height="fill"
     topNav={<Topbar user={user!} workspaces={quickWorkspaces} projects={quickProjects} workspace={workspaceRecord} project={navigationProject} profileReturnTo={profileReturnTo} onOpenNavigation={()=>setMobileNavigationOpen(true)}/>}
     sideNav={<ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed}/>}
-    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full flex-col"><div className="min-h-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>}
+    mobileNav={<MobileNav isOpen={mobileNavigationOpen} onOpenChange={setMobileNavigationOpen} side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord&&navigationProject?<div className="shrink-0 min-w-0 border-b border-border p-3"><ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/></div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>}
   ><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState==="error"?<DirectoryNotice onRetry={()=>loadNavigation(true)}/>:null}{contextError??children}</div></AstryxAppShell>;
 }
 

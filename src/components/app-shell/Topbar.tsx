@@ -57,10 +57,7 @@ export function Topbar({
           <ProjectSwitcher
             projects={projects}
             project={project}
-            onSelect={(id) =>
-              router.push(`/workspaces/${workspace.id}/projects/${id}/overview`)
-            }
-            onViewAll={() => router.push(`/workspaces/${workspace.id}/projects`)}
+            workspaceId={workspace.id}
           />
         ) : null}
       </div>
@@ -111,17 +108,19 @@ function WorkspaceSwitcher({
 export function ProjectSwitcher({
   projects,
   project,
+  workspaceId,
   mobile = false,
-  onSelect,
-  onViewAll,
+  onNavigate,
 }: {
   projects: ProjectDirectoryItem[];
   project: Project;
+  workspaceId: string;
   mobile?: boolean;
-  onSelect: (projectId: string) => void;
-  onViewAll?: (() => void) | undefined;
+  onNavigate?: (() => void) | undefined;
 }) {
+  const router=useRouter();
   const options=dedupeOptions([{value:project.id,label:project.name},...projects.map((item)=>({value:item.id,label:item.name}))]);
+  function navigate(href:string){router.push(href);onNavigate?.();}
   return (
     <div className={mobile ? "flex w-full min-w-0 items-center gap-1" : "hidden min-w-0 items-center gap-1 md:flex"}>
       <div className={mobile ? "min-w-0 flex-1" : "min-w-0 w-64"}>
@@ -131,12 +130,12 @@ export function ProjectSwitcher({
           startIcon={<FolderKanban size={15} />}
           options={options}
           value={project.id}
-          onChange={onSelect}
+          onChange={(projectId)=>navigate(`/workspaces/${workspaceId}/projects/${projectId}/overview`)}
           size="lg"
           width="100%"
         />
       </div>
-      {onViewAll ? <IconButton label="View all projects" tooltip="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={onViewAll} /> : null}
+      <IconButton label="View all projects" tooltip="View all projects" icon={<List size={15} />} variant="ghost" size="lg" onClick={()=>navigate(`/workspaces/${workspaceId}/projects`)} />
     </div>
   );
 }
