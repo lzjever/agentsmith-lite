@@ -306,8 +306,8 @@ export class TaskService {
       requireTaskEndpointCapabilities(endpoint);
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
       const timestamp=nowIso();
-      const selection=input.fileLibrary.mode==="create_new"?{prepare:true,library:{
-        id:`library_${id.slice("task_".length)}`,workspaceId:project.workspaceId,projectId,name:requireNonEmptyString(input.fileLibrary.name,"task.fileLibrary.name",160),rootSubPath:`libraries/library_${id.slice("task_".length)}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp
+      const selection:{prepare:boolean;library:FileLibrary}=input.fileLibrary.mode==="create_new"?{prepare:true,library:{
+        id:`library_${id.slice("task_".length)}`,workspaceId:project.workspaceId,projectId,name:requireNonEmptyString(input.fileLibrary.name,"task.fileLibrary.name",160),rootSubPath:`libraries/library_${id.slice("task_".length)}/home`,lifecycleStatus:"active",createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp
       }}:await this.taskLibraryCandidate(project.workspaceId,projectId,input.fileLibrary.id,userId,timestamp);
       const library=selection.library;
       const create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library,agentContext,createdByUserId:userId});
@@ -353,6 +353,7 @@ export class TaskService {
         if(created.kind==="replay")return replayTaskOperationResponse<TaskPresentation>(created.responseStatus,created.responseBody);
         if(created.kind==="project_unavailable")throw new ProductError("Project is not active",409,"project_not_active");
         if(created.kind==="library_not_found")throw new ProductError("File Library not found",404,"file_library_not_found");
+        if(created.kind==="library_deleting")throw new ProductError("File Library deletion is in progress",409,"file_library_deleting");
         if(created.kind==="already_bound")throw new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
         if(created.kind==="library_name_conflict")throw new ProductError("File Library name already exists",409,"file_library_name_conflict");
         await this.bestEffortRemoveTaskStaging(project.rootPath,id);
@@ -372,8 +373,11 @@ export class TaskService {
   private async taskLibraryCandidate(workspaceId:string,projectId:string,idValue:unknown,userId:string,timestamp:string):Promise<{library:FileLibrary;prepare:boolean}>{
     const id=requireNonEmptyString(idValue,"task.fileLibrary.id");
     const library=await this.store.findFileLibrary(id);
-    if(library&&library.workspaceId===workspaceId&&library.projectId===projectId)return{library,prepare:true};
-    return{prepare:false,library:{id,workspaceId,projectId,name:"Selected Library",rootSubPath:`libraries/${id}/home`,createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp}};
+    if(library&&library.workspaceId===workspaceId&&library.projectId===projectId){
+      if(library.lifecycleStatus==="deleting")throw new ProductError("File Library deletion is in progress",409,"file_library_deleting");
+      return{library,prepare:true};
+    }
+    return{prepare:false,library:{id,workspaceId,projectId,name:"Selected Library",rootSubPath:`libraries/${id}/home`,lifecycleStatus:"active",createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp}};
   }
 
   private async prepareTaskStaging(projectRootPath:string,taskId:string,marker:TaskPreparationMarker):Promise<void>{

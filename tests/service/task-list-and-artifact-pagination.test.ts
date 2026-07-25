@@ -333,6 +333,7 @@ async function createSetup(botifiedClient?: DryRunBotifiedRuntimeHttpClient) {
           projectId: project.id,
           name: `Library ${value.id}`,
           rootSubPath: `libraries/${libraryId}/home`,
+          lifecycleStatus:"active" as const,
           createdByUserId: session.user.id,
           createdAt: value.createdAt,
           updatedAt: value.updatedAt

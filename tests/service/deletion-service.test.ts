@@ -471,7 +471,7 @@ async function createLiveTask(
     task,
     newFileLibrary: {
       id: task.fileLibraryId!, workspaceId: task.workspaceId, projectId: task.projectId, name: `Library ${task.id}`,
-      rootSubPath: `libraries/${task.fileLibraryId}/home`, createdByUserId: "owner", createdAt: task.createdAt, updatedAt: task.updatedAt
+      rootSubPath: `libraries/${task.fileLibraryId}/home`,lifecycleStatus:"active" as const,createdByUserId: "owner", createdAt: task.createdAt, updatedAt: task.updatedAt
     },
     reserveActive: run.state !== "released", admission:{namespace:"agentsmith",namespaceLimit:100},
     ...(run.state!=="released"?{
@@ -500,7 +500,7 @@ async function seedProjectDeletionBusinessData(
     reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
     newFileLibrary:{
       id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${task.id}`,
-      rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:"owner",createdAt:task.createdAt,updatedAt:task.updatedAt
+      rootSubPath:`libraries/${task.fileLibraryId}/home`,lifecycleStatus:"active" as const,createdByUserId:"owner",createdAt:task.createdAt,updatedAt:task.updatedAt
     },
     initialMessage:message,
     runtimeState:{prompt:task.prompt,message:message.content}

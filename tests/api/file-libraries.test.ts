@@ -79,12 +79,13 @@ describe("file library API", () => {
       store.appendProjectAuditEvent=originalAudit;
     }
 
-    assert.equal((await raw("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}`, {})).status, 409);
     await store.patchProjectResourcePolicy(projectId,{projectFileBytesLimit:1},new Date().toISOString());
-    await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}/files`, { path: "payload.bin" });
-    await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}/files`, { path: "readme.md" });
-    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,6);
     assert.deepEqual(await json("DELETE", `/api/v1/projects/${projectId}/file-libraries/${first.id}`, {}), { deleted: true });
+    assert.equal((await store.findProjectResourceUsage(projectId))?.projectFileBytes,6);
+    const libraryDeleteAudits=(await store.queryProjectAuditEvents(projectId,{limit:100})).items
+      .filter((item)=>item.action==="file_library.delete"&&item.resourceId===first.id);
+    assert.equal(libraryDeleteAudits.length,1);
+    assert.deepEqual(libraryDeleteAudits[0]?.detail,{bytes:10});
   });
 
   it("enforces reserved paths and performs one idempotent recursive entry deletion", async () => {
@@ -173,6 +174,70 @@ describe("file library API", () => {
     assert.equal(await readFile(path.join(libraryRoot, "workspace", ".artifacts", "task-owned.txt"), "utf8"), "owned");
   });
 
+  it("returns the owning Task for a bound Library and Task purge retains ordinary files",async()=>{
+    const library=await json("POST",`/api/v1/projects/${projectId}/file-libraries`,{name:"Bound delete"});
+    const upload=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=retained.txt`,{
+      method:"PUT",
+      headers:{cookie,"x-csrf-token":csrf,"content-type":"application/octet-stream","idempotency-key":crypto.randomUUID()},
+      body:"retained"
+    });
+    assert.equal(upload.status,200,await upload.text());
+    const timestamp=new Date().toISOString();
+    const task={
+      id:"task_bound_library_delete",
+      workspaceId,
+      projectId,
+      endpointId:"endpoint_bound_library_delete",
+      fileLibraryId:library.id,
+      createdByUserId:"user_admin",
+      title:"Owning Task",
+      prompt:"bound",
+      agentContext:"",
+      currentRunId:null,
+      archivedAt:null,
+      deletedAt:null,
+      createdAt:timestamp,
+      updatedAt:timestamp
+    };
+    assert.equal((await store.createTaskAtomically({
+      task,
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100}
+    })).kind,"created");
+
+    const boundKey=crypto.randomUUID();
+    const deleteBound=()=>fetch(
+      `${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}`,
+      {
+        method:"DELETE",
+        headers:{
+          cookie,
+          "x-csrf-token":csrf,
+          "content-type":"application/json",
+          "idempotency-key":boundKey
+        },
+        body:"{}"
+      }
+    );
+    const blocked=await deleteBound();
+    const blockedBody=await blocked.json();
+    const blockedReplay=await deleteBound();
+    assert.equal(blocked.status,409);
+    assert.equal(blockedReplay.status,409);
+    assert.deepEqual(blockedBody,{
+      error:"File Library is bound to a Task",
+      code:"file_library_bound",
+      task:{id:task.id,title:task.title}
+    });
+    assert.deepEqual(await blockedReplay.json(),blockedBody);
+    assert.equal(await readFile(path.join(dataRoot,(await store.findProject(projectId))!.rootPath,library.rootSubPath,"retained.txt"),"utf8"),"retained");
+
+    assert.equal((await store.beginTaskDeletion(task.id,new Date().toISOString())).kind,"ready");
+    assert.equal(await store.purgeDeletedTaskData(task.id),true);
+    assert.deepEqual((await json("GET",`/api/v1/projects/${projectId}/file-libraries/${library.id}/files`)).entries.map((entry:{path:string})=>entry.path),["retained.txt"]);
+    assert.deepEqual(await json("DELETE",`/api/v1/projects/${projectId}/file-libraries/${library.id}`,{}),{deleted:true});
+  });
+
   it("projects read-only delete capability and structurally replays a typed DELETE error", async () => {
     const library = await json("POST", `/api/v1/projects/${projectId}/file-libraries`, { name: "Read only files" });
     const upload = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}/files?path=retained.txt`, {
@@ -252,6 +317,102 @@ describe("file library API", () => {
       code: "file_path_not_found"
     });
     assert.deepEqual(await replay.json(), firstBody);
+  });
+
+  it("returns the same typed missing-Library DELETE on first receipt and replay",async()=>{
+    const key=crypto.randomUUID();
+    const removeMissing=()=>fetch(
+      `${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/library_missing`,
+      {
+        method:"DELETE",
+        headers:{
+          cookie,
+          "x-csrf-token":csrf,
+          "content-type":"application/json",
+          "idempotency-key":key
+        },
+        body:"{}"
+      }
+    );
+
+    const first=await removeMissing();
+    const firstBody=await first.json();
+    const replay=await removeMissing();
+    assert.equal(first.status,404);
+    assert.equal(replay.status,404);
+    assert.deepEqual(firstBody,{
+      error:"File Library not found",
+      code:"file_library_not_found"
+    });
+    assert.deepEqual(await replay.json(),firstBody);
+  });
+
+  it("does not expose unexpected store errors from Library DELETE",async()=>{
+    const library=await json("POST",`/api/v1/projects/${projectId}/file-libraries`,{
+      name:"Safe server error"
+    });
+    const begin=store.beginFileLibraryDeletion.bind(store);
+    const consoleError=console.error;
+    let logged=false;
+    store.beginFileLibraryDeletion=async()=>{
+      throw new Error("sensitive database connection detail");
+    };
+    console.error=()=>{logged=true;};
+    try{
+      const response=await raw(
+        "DELETE",
+        `/api/v1/projects/${projectId}/file-libraries/${library.id}`,
+        {}
+      );
+      assert.equal(response.status,500);
+      assert.deepEqual(await response.json(),{error:"Internal server error"});
+      assert.equal(logged,true);
+    }finally{
+      store.beginFileLibraryDeletion=begin;
+      console.error=consoleError;
+    }
+  });
+
+  it("maps post-transition physical claim failures and replay to File Library deleting",async()=>{
+    const library=await json("POST",`/api/v1/projects/${projectId}/file-libraries`,{
+      name:"Safe physical claim error"
+    });
+    const claim=store.claimFileLibraryDeletionOperation.bind(store);
+    const consoleError=console.error;
+    const key=crypto.randomUUID();
+    store.claimFileLibraryDeletionOperation=async()=>{
+      throw new Error("sensitive physical claim detail");
+    };
+    console.error=()=>undefined;
+    const remove=()=>fetch(
+      `${api.baseUrl}/api/v1/projects/${projectId}/file-libraries/${library.id}`,
+      {
+        method:"DELETE",
+        headers:{
+          cookie,
+          "x-csrf-token":csrf,
+          "content-type":"application/json",
+          "idempotency-key":key
+        },
+        body:"{}"
+      }
+    );
+    try{
+      const first=await remove();
+      const firstBody=await first.json();
+      const replay=await remove();
+      assert.equal(first.status,409);
+      assert.equal(replay.status,409);
+      assert.deepEqual(firstBody,{
+        error:"File Library deletion is in progress",
+        code:"file_library_deleting"
+      });
+      assert.deepEqual(await replay.json(),firstBody);
+      assert.equal((await store.findFileLibrary(library.id))?.lifecycleStatus,"deleting");
+    }finally{
+      store.claimFileLibraryDeletionOperation=claim;
+      console.error=consoleError;
+    }
   });
 
   async function json(method: string, pathname: string, body?: unknown, authenticated = true): Promise<any> {

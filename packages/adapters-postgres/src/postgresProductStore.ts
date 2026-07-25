@@ -75,6 +75,12 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
+  BeginFileLibraryDeletionInput,
+  BeginFileLibraryDeletionResult,
+  ClaimFileLibraryDeletionOperationInput,
+  ClaimFileLibraryDeletionOperationResult,
+  FileLibraryDeletionOperationOwner,
+  FinalizeFileLibraryDeletionInput,
   FileDeletionOperationOwner,
   FileDeletionOperationState,
   TaskIdempotencyLookupInput,
@@ -516,15 +522,123 @@ export class PostgresProductStore implements ProductStore {
   async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const scope=v.scope??{kind:'project' as const};const values:unknown[]=[v.id,toPersistedAlertType(v.alertType),v.name??v.alertType.replaceAll('_',' '),toPersistedAlertMetric(v.metric??'failure_count'),v.condition??'greater_than_or_equal',v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==='endpoint'?scope.endpointId:null,v.enabled,v.updatedAt,v.projectId];const expected=expectedUpdatedAt===undefined?'':` and updated_at=$13`;if(expectedUpdatedAt!==undefined)values.push(expectedUpdatedAt);const r=await this.queryRows<AlertRuleRow>(`update project_alert_rules set alert_type=$2,name=$3,metric=$4,condition=$5,threshold=$6,window_seconds=$7,scope_kind=$8,endpoint_id=$9,enabled=$10,updated_at=$11 where id=$1 and project_id=$12${expected} returning *`,values);return r[0]?mapAlertRule(r[0]):null} async deleteProjectAlertRule(projectId:string,id:string){return (await this.pool.query('delete from project_alert_rules where id=$1 and project_id=$2',[id,projectId])).rowCount===1}
 
   async createFileLibrary(value:FileLibrary):Promise<FileLibrary|null>{
-    const rows=await this.queryRows<FileLibraryRow>(`insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing returning *`,[value.id,value.workspaceId,value.projectId,value.name,value.rootSubPath,value.createdByUserId,value.createdAt,value.updatedAt]);
+    if(value.lifecycleStatus!=="active")return null;
+    const rows=await this.queryRows<FileLibraryRow>(`insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,lifecycle_status,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing returning *`,[value.id,value.workspaceId,value.projectId,value.name,value.rootSubPath,value.lifecycleStatus,value.createdByUserId,value.createdAt,value.updatedAt]);
     return rows[0]?mapFileLibrary(rows[0]):null;
   }
   async findFileLibrary(id:string):Promise<FileLibrary|null>{const rows=await this.queryRows<FileLibraryRow>("select * from file_libraries where id=$1",[id]);return rows[0]?mapFileLibrary(rows[0]):null}
   async listFileLibrariesForProject(projectId:string):Promise<FileLibrary[]>{return (await this.queryRows<FileLibraryRow>("select * from file_libraries where project_id=$1 order by created_at,id",[projectId])).map(mapFileLibrary)}
   async renameFileLibrary(projectId:string,id:string,name:string,expectedUpdatedAt:string,updatedAt:string):Promise<FileLibrary|null>{
-    try{const rows=await this.queryRows<FileLibraryRow>("update file_libraries set name=$3,updated_at=$5 where project_id=$1 and id=$2 and updated_at=$4 returning *",[projectId,id,name,expectedUpdatedAt,updatedAt]);return rows[0]?mapFileLibrary(rows[0]):null}catch(error){if(isUniqueConstraintError(error))return null;throw error}
+    try{const rows=await this.queryRows<FileLibraryRow>("update file_libraries set name=$3,updated_at=$5 where project_id=$1 and id=$2 and lifecycle_status='active' and updated_at=$4 returning *",[projectId,id,name,expectedUpdatedAt,updatedAt]);return rows[0]?mapFileLibrary(rows[0]):null}catch(error){if(isUniqueConstraintError(error))return null;throw error}
   }
-  async deleteFileLibraryIfUnbound(projectId:string,id:string){return transaction(this.pool,async(client)=>{const current=await client.query("select id from file_libraries where project_id=$1 and id=$2 for update",[projectId,id]);if(!current.rows[0])return"not_found" as const;const deleted=await client.query("delete from file_libraries library where library.project_id=$1 and library.id=$2 and not exists (select 1 from agent_tasks task where task.file_library_id=library.id)",[projectId,id]);return deleted.rowCount===1?"deleted" as const:"bound" as const;})}
+  async beginFileLibraryDeletion(input:BeginFileLibraryDeletionInput):Promise<BeginFileLibraryDeletionResult>{
+    return transaction(this.pool,async(client)=>{
+      await client.query("select id from projects where id=$1 for update",[input.idempotency.projectId]);
+      const operationId=fileLibraryDeletionOperationId(input.libraryId);
+      if(input.idempotency.resourceId!==operationId)return{kind:"hash_mismatch" as const};
+      const receipt=await claimTaskIdempotencyWithClient(client,input.idempotency);
+      if(receipt.kind==="hash_mismatch")return receipt;
+      if(receipt.kind==="in_progress")return{kind:"in_progress" as const,resourceId:operationId};
+      if(receipt.kind==="replay")return{kind:"replay" as const,resourceId:operationId,responseStatus:receipt.responseStatus,responseBody:receipt.responseBody};
+      if(receipt.row.resource_id!==operationId)return{kind:"hash_mismatch" as const};
+      let row=(await client.query<FileLibraryRow>("select * from file_libraries where project_id=$1 and id=$2 for update",[input.idempotency.projectId,input.libraryId])).rows[0];
+      if(!row){
+        const tombstone=(await client.query<TaskIdempotencyRow>(
+          "select * from task_idempotency_records where project_id=$1 and operation='project.file-library.delete' and resource_id=$2 and request_hash=$3 and status='completed' and response_status=200 order by updated_at desc limit 1",
+          [input.idempotency.projectId,operationId,input.idempotency.requestHash]
+        )).rows[0];
+        if(tombstone){
+          await completeTaskIdempotencyWithClient(client,input.idempotency,200,tombstone.response_body,input.idempotency.now);
+          return{kind:"replay" as const,resourceId:operationId,responseStatus:200,responseBody:mapTaskIdempotencyResponseBody(tombstone.operation,tombstone.response_body)};
+        }
+        return{kind:"not_found" as const,receiptClaimToken:input.idempotency.claimToken};
+      }
+      const bound=(await client.query<{id:string;title:string|null}>("select id,title from agent_tasks where file_library_id=$1 limit 1",[input.libraryId])).rows[0];
+      if(bound)return{kind:"bound" as const,task:{id:bound.id,title:bound.title},receiptClaimToken:input.idempotency.claimToken};
+      if(row.lifecycle_status==="active"){
+        row=(await client.query<FileLibraryRow>(
+          "update file_libraries set lifecycle_status='deleting',deletion_operation_id=$3,updated_at=$4 where project_id=$1 and id=$2 and lifecycle_status='active' returning *",
+          [input.idempotency.projectId,input.libraryId,operationId,input.idempotency.now]
+        )).rows[0]!;
+      }
+      if(row.deletion_operation_id!==operationId)return{kind:"hash_mismatch" as const};
+      return{kind:"claimed" as const,library:mapFileLibrary(row),operationId,receiptClaimToken:input.idempotency.claimToken};
+    });
+  }
+  async claimFileLibraryDeletionOperation(input:ClaimFileLibraryDeletionOperationInput):Promise<ClaimFileLibraryDeletionOperationResult>{
+    return transaction(this.pool,async(client)=>{
+      await client.query("select id from projects where id=$1 for update",[input.projectId]);
+      const row=(await client.query<FileLibraryRow>("select *,deletion_claim_expires_at>clock_timestamp() as deletion_claim_live from file_libraries where project_id=$1 and id=$2 for update",[input.projectId,input.libraryId])).rows[0];
+      if(!fileLibraryDeletionRowMatches(row,input))return{kind:"conflict" as const};
+      if(row.deletion_claim_token&&row.deletion_claim_token!==input.claimToken&&row.deletion_claim_live===true)return{kind:"in_progress" as const};
+      const claimed=(await client.query<FileLibraryRow>(
+        "update file_libraries set deletion_claim_token=$3,deletion_claim_expires_at=clock_timestamp()+($4::double precision*interval '1 millisecond') where project_id=$1 and id=$2 returning *",
+        [input.projectId,input.libraryId,input.claimToken,input.leaseMs]
+      )).rows[0]!;
+      return{kind:"claimed" as const,state:mapFileLibraryDeletionOperation(claimed)};
+    });
+  }
+  async findFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner):Promise<FileDeletionOperationState|null>{
+    const row=(await this.queryRows<FileLibraryRow>(
+      "select * from file_libraries where project_id=$1 and id=$2 and lifecycle_status='deleting' and deletion_operation_id=$3 and deletion_claim_token=$4",
+      [owner.projectId,owner.libraryId,owner.operationId,owner.claimToken]
+    ))[0];
+    return row?mapFileLibraryDeletionOperation(row):null;
+  }
+  async persistFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner,state:FileDeletionOperationState,now:string):Promise<boolean>{
+    if(!isValidFileDeletionOperationState(state))return false;
+    return transaction(this.pool,async(client)=>{
+      await client.query("select id from projects where id=$1 for update",[owner.projectId]);
+      const row=(await client.query<FileLibraryRow>(
+        "select * from file_libraries where project_id=$1 and id=$2 and lifecycle_status='deleting' and deletion_operation_id=$3 and deletion_claim_token=$4 and deletion_claim_expires_at>clock_timestamp() for update",
+        [owner.projectId,owner.libraryId,owner.operationId,owner.claimToken]
+      )).rows[0];
+      if(!row||!isFileDeletionOperationTransition(mapFileLibraryDeletionOperation(row),state))return false;
+      return(await client.query(
+        "update file_libraries set deletion_phase=$5,deletion_quarantine_device=$6,deletion_quarantine_inode=$7,deletion_entry_type=$8,deletion_bytes=$9 where project_id=$1 and id=$2 and deletion_operation_id=$3 and deletion_claim_token=$4",
+        [owner.projectId,owner.libraryId,owner.operationId,owner.claimToken,state.phase,state.quarantineDevice,state.quarantineInode,state.entryType,state.bytes]
+      )).rowCount===1;
+    });
+  }
+  async renewFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner,leaseMs:number):Promise<boolean>{
+    return(await this.pool.query(
+      "update file_libraries set deletion_claim_expires_at=clock_timestamp()+($5::double precision*interval '1 millisecond') where project_id=$1 and id=$2 and lifecycle_status='deleting' and deletion_operation_id=$3 and deletion_claim_token=$4 and deletion_claim_expires_at>clock_timestamp()",
+      [owner.projectId,owner.libraryId,owner.operationId,owner.claimToken,leaseMs]
+    )).rowCount===1;
+  }
+  async releaseFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner):Promise<boolean>{
+    return(await this.pool.query(
+      "update file_libraries set deletion_claim_token=null,deletion_claim_expires_at=null where project_id=$1 and id=$2 and lifecycle_status='deleting' and deletion_operation_id=$3 and deletion_claim_token=$4",
+      [owner.projectId,owner.libraryId,owner.operationId,owner.claimToken]
+    )).rowCount===1;
+  }
+  async finalizeFileLibraryDeletion(input:FinalizeFileLibraryDeletionInput):Promise<"finalized"|"conflict">{
+    return transaction(this.pool,async(client)=>{
+      const project=await client.query("select id from projects where id=$1 for update",[input.projectId]);
+      if(!project.rowCount)return"conflict" as const;
+      const row=(await client.query<FileLibraryRow>(
+        "select *,deletion_claim_expires_at>clock_timestamp() as deletion_claim_live from file_libraries where project_id=$1 and id=$2 for update",
+        [input.projectId,input.libraryId]
+      )).rows[0];
+      if(!fileLibraryDeletionRowMatches(row,input)||row.deletion_claim_token!==input.claimToken||
+        row.deletion_claim_live!==true||row.deletion_phase!=="removed"||row.deletion_bytes===null)return"conflict" as const;
+      const deleted=await client.query(
+        "delete from file_libraries library where library.project_id=$1 and library.id=$2 and library.deletion_operation_id=$3 and library.deletion_claim_token=$4 and not exists (select 1 from agent_tasks task where task.file_library_id=library.id)",
+        [input.projectId,input.libraryId,input.operationId,input.claimToken]
+      );
+      if(deleted.rowCount!==1)return"conflict" as const;
+      await insertAuditEventWithClient(client,{
+        id:`audit:${input.operationId}`,projectId:input.projectId,actorId:input.actorId,
+        action:"file_library.delete",status:"accepted",resourceKind:"file",resourceId:input.libraryId,
+        detail:{bytes:Number(row.deletion_bytes)},createdAt:input.updatedAt
+      });
+      await client.query(
+        "update task_idempotency_records set status='completed',response_status=$4,response_body=$5::jsonb,updated_at=$6 where project_id=$1 and operation='project.file-library.delete' and resource_id=$2 and request_hash=$3 and status='in_progress'",
+        [input.projectId,input.operationId,input.requestHash,input.responseStatus,JSON.stringify(input.responseBody),input.updatedAt]
+      );
+      return"finalized" as const;
+    });
+  }
   async findTaskBoundToFileLibrary(fileLibraryId:string){const rows=await this.queryRows<{id:string;title:string|null}>("select id,title from agent_tasks where file_library_id=$1",[fileLibraryId]);return rows[0]?{kind:"bound" as const,task:{id:rows[0].id,title:rows[0].title}}:{kind:"unbound" as const}}
 
   async findProjectMembership(projectId: string, userId: string): Promise<ProjectMembership | null> {
@@ -1166,9 +1280,10 @@ export class PostgresProductStore implements ProductStore {
     validateTaskRunReservation(input);
     try{return await transaction(this.pool, async (client) => {
       const write=async(insertRun:()=>Promise<void>)=>{
-        if(input.newFileLibrary){const library=input.newFileLibrary;await client.query("insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8)",[library.id,library.workspaceId,library.projectId,library.name,library.rootSubPath,library.createdByUserId,library.createdAt,library.updatedAt]);}
-        const library=await client.query("select id from file_libraries where id=$1 and workspace_id=$2 and project_id=$3 for update",[input.task.fileLibraryId,input.task.workspaceId,input.task.projectId]);
+        if(input.newFileLibrary){const library=input.newFileLibrary;await client.query("insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,lifecycle_status,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",[library.id,library.workspaceId,library.projectId,library.name,library.rootSubPath,library.lifecycleStatus,library.createdByUserId,library.createdAt,library.updatedAt]);}
+        const library=await client.query<{id:string;lifecycle_status:FileLibrary["lifecycleStatus"]}>("select id,lifecycle_status from file_libraries where id=$1 and workspace_id=$2 and project_id=$3 for update",[input.task.fileLibraryId,input.task.workspaceId,input.task.projectId]);
         if(!library.rows[0])return{kind:"library_not_found" as const};
+        if(library.rows[0].lifecycle_status==="deleting")return{kind:"library_deleting" as const};
         const bound=await client.query("select id from agent_tasks where file_library_id=$1",[input.task.fileLibraryId]);
         if(bound.rows[0])return{kind:"already_bound" as const};
         const row=await insertTaskWithClient(client,{...input.task,currentRunId:null});
@@ -2423,7 +2538,26 @@ interface ProjectRow {
   created_at: unknown;
   updated_at: unknown;
 }
-interface FileLibraryRow { id:string;workspace_id:string;project_id:string;name:string;root_sub_path:string;created_by_user_id:string;created_at:unknown;updated_at:unknown; }
+interface FileLibraryRow {
+  id:string;
+  workspace_id:string;
+  project_id:string;
+  name:string;
+  root_sub_path:string;
+  lifecycle_status:FileLibrary["lifecycleStatus"];
+  deletion_operation_id:string|null;
+  deletion_phase:import("../../ports/src/store.js").FileDeletionOperationPhase|null;
+  deletion_quarantine_device:string|null;
+  deletion_quarantine_inode:string|null;
+  deletion_entry_type:import("../../ports/src/store.js").FileDeletionOperationEntryType|null;
+  deletion_bytes:string|number|null;
+  deletion_claim_token:string|null;
+  deletion_claim_expires_at:unknown|null;
+  deletion_claim_live?:boolean;
+  created_by_user_id:string;
+  created_at:unknown;
+  updated_at:unknown;
+}
 interface ContextRow { id:string; workspace_id:string; project_id:string|null; owner_user_id:string|null; scope:ProjectContextEntry["scope"]; context_key:string; content:string; content_type:import("../../contracts/src/api.js").ProjectContextContentType; version:number; created_at:unknown; updated_at:unknown; }
 type ContextMetadataRow = Omit<ContextRow,"content">;
 
@@ -2589,7 +2723,27 @@ function mapProject(row: ProjectRow): Project {
     updatedAt: toIso(row.updated_at)
   };
 }
-function mapFileLibrary(row:FileLibraryRow):FileLibrary{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,name:row.name,rootSubPath:row.root_sub_path,createdByUserId:row.created_by_user_id,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
+function fileLibraryDeletionOperationId(libraryId:string):string{return`file-library-delete:${libraryId}`}
+function fileLibraryDeletionRowMatches(
+  row:FileLibraryRow|undefined,
+  owner:Pick<FileLibraryDeletionOperationOwner,"projectId"|"libraryId"|"operationId">
+):row is FileLibraryRow{
+  return Boolean(row&&row.project_id===owner.projectId&&row.id===owner.libraryId&&row.lifecycle_status==="deleting"&&
+    row.deletion_operation_id===owner.operationId);
+}
+function mapFileLibraryDeletionOperation(row:FileLibraryRow):FileDeletionOperationState|null{
+  if(row.deletion_phase===null)return null;
+  const state:FileDeletionOperationState={
+    phase:row.deletion_phase,
+    quarantineDevice:row.deletion_quarantine_device??"",
+    quarantineInode:row.deletion_quarantine_inode??"",
+    entryType:row.deletion_entry_type??"unsupported",
+    bytes:Number(row.deletion_bytes)
+  };
+  if(!isValidFileDeletionOperationState(state))throw new Error("File Library deletion operation state is invalid");
+  return state;
+}
+function mapFileLibrary(row:FileLibraryRow):FileLibrary{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,name:row.name,rootSubPath:row.root_sub_path,lifecycleStatus:row.lifecycle_status,createdByUserId:row.created_by_user_id,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 function mapContext(row: ContextRow): ProjectContextEntry { return { id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,ownerUserId:row.owner_user_id,scope:row.scope,contextKey:row.context_key,content:row.content,contentType:row.content_type,version:row.version,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at) }; }
 function mapContextMetadata(row:ContextMetadataRow):import("../../contracts/src/api.js").ProjectContextEntryMetadata{return{id:row.id,workspaceId:row.workspace_id,projectId:row.project_id,ownerUserId:row.owner_user_id,scope:row.scope,contextKey:row.context_key,contentType:row.content_type,version:row.version,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 

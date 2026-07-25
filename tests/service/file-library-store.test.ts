@@ -33,16 +33,19 @@ describe("file library store", () => {
     assert.equal(created.kind,"created");
     assert.equal(created.kind==="created"?created.task.fileLibraryId:null,first.id);
     assert.deepEqual(await store.findTaskBoundToFileLibrary(first.id), { kind: "bound", task: { id: "task_one", title: "Task" } });
+    assert.equal((await store.beginFileLibraryDeletion({libraryId:first.id,idempotency:deletionReceipt("bound-active","bound-request",`file-library-delete:${first.id}`,"bound-active-claim")})).kind,"bound");
     assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_two", fileLibraryId: first.id }), reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100} }),{kind:"already_bound"});
     assert.deepEqual(await store.createTaskAtomically({ task: task({ id: "task_cross", fileLibraryId: otherProject.id }), reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100} }),{kind:"library_not_found"});
 
     const archived = await store.archiveTask("task_one", "2026-07-19T01:00:00.000Z");
     assert.equal(archived.kind==="ready"?archived.value.fileLibraryId:null, first.id);
     assert.equal((await store.findTaskBoundToFileLibrary(first.id)).kind, "bound");
+    assert.equal((await store.beginFileLibraryDeletion({libraryId:first.id,idempotency:deletionReceipt("bound-archived","bound-request",`file-library-delete:${first.id}`,"bound-archived-claim")})).kind,"bound");
     const deleted = await store.beginTaskDeletion("task_one", "2026-07-19T02:00:00.000Z");
     assert.equal(deleted.kind==="ready"?deleted.value.fileLibraryId:"unexpected", first.id);
     assert.equal(deleted.kind==="ready"?deleted.value.currentRunId:"unexpected", "run_one");
     assert.equal((await store.findTaskBoundToFileLibrary(first.id)).kind,"bound");
+    assert.equal((await store.beginFileLibraryDeletion({libraryId:first.id,idempotency:deletionReceipt("bound-tombstone","bound-request",`file-library-delete:${first.id}`,"bound-tombstone-claim")})).kind,"bound");
     assert.equal((await store.createTaskAtomically({task:task({id:"task_reused",fileLibraryId:first.id}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"already_bound");
     assert.equal(await store.purgeDeletedTaskData("task_one"),true);
     assert.equal(await store.findTask("task_one"),null);
@@ -60,6 +63,114 @@ describe("file library store", () => {
       store.createTaskAtomically({task:task({id:"task_race_two",fileLibraryId:"library_race"}),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})
     ]);
     assert.deepEqual(results.map((result)=>result.kind).sort(),["already_bound","created"]);
+  });
+
+  it("serializes Task binding against deletion and fences the physical operation claim", async () => {
+    const store = createLocalInMemoryProductStore();
+    await store.createProject(project());
+    const target = library({ id: "library_delete" });
+    await store.createFileLibrary(target);
+    const requestHash = "canonical-delete-request";
+    const operationId = `file-library-delete:${target.id}`;
+    const first = await store.beginFileLibraryDeletion({
+      libraryId: target.id,
+      idempotency: deletionReceipt("delete-one", requestHash, operationId, "receipt-one")
+    });
+    assert.equal(first.kind, "claimed");
+    assert.equal((await store.findFileLibrary(target.id))?.lifecycleStatus, "deleting");
+    assert.equal(
+      (await store.createTaskAtomically({
+        task: task({ id: "task_lost_race", fileLibraryId: target.id }),
+        reserveActive: false,
+        admission: { namespace: "agentsmith", namespaceLimit: 100 }
+      })).kind,
+      "library_deleting"
+    );
+
+    assert.equal((await store.claimFileLibraryDeletionOperation({
+      projectId: target.projectId,
+      libraryId: target.id,
+      operationId,
+      claimToken: "physical-one",
+      now: "2026-07-19T00:01:00.000Z",
+      leaseMs:60_000
+    })).kind, "claimed");
+    assert.equal((await store.claimFileLibraryDeletionOperation({
+      projectId: target.projectId,
+      libraryId: target.id,
+      operationId,
+      claimToken: "physical-two",
+      now: "2026-07-19T00:01:30.000Z",
+      leaseMs:60_000
+    })).kind, "in_progress");
+    const isolated={phase:"isolated" as const,quarantineDevice:"1",quarantineInode:"2",entryType:"directory" as const,bytes:3};
+    const firstOwner={
+      projectId:target.projectId,
+      libraryId:target.id,
+      operationId,
+      claimToken:"physical-one"
+    };
+    assert.equal(await store.persistFileLibraryDeletionOperation(
+      firstOwner,
+      isolated,
+      "2026-07-19T00:01:40.000Z"
+    ),true);
+    const isolatedTakeover=await store.claimFileLibraryDeletionOperation({
+      projectId: target.projectId,
+      libraryId: target.id,
+      operationId,
+      claimToken: "physical-two",
+      now: "2026-07-19T00:02:01.000Z",
+      leaseMs:60_000
+    });
+    assert.deepEqual(isolatedTakeover,{kind:"claimed",state:isolated});
+    assert.equal(await store.persistFileLibraryDeletionOperation(
+      firstOwner,
+      {...isolated,phase:"removed"},
+      "2026-07-19T00:02:02.000Z"
+    ),false);
+    const secondOwner={
+      projectId:target.projectId,
+      libraryId:target.id,
+      operationId,
+      claimToken:"physical-two"
+    };
+    assert.equal(await store.persistFileLibraryDeletionOperation(secondOwner,{...isolated,phase:"removed"},"2026-07-19T00:02:03.000Z"),true);
+    const removedOwner={
+      projectId:target.projectId,
+      libraryId:target.id,
+      operationId,
+      claimToken:"physical-three"
+    };
+    assert.deepEqual(await store.claimFileLibraryDeletionOperation({
+      ...removedOwner,
+      now:"2026-07-19T00:03:02.000Z",
+      leaseMs:60_000
+    }),{kind:"claimed",state:{...isolated,phase:"removed"}});
+    assert.equal(await store.finalizeFileLibraryDeletion({
+      ...secondOwner,
+      requestHash,
+      actorId:"user_one",
+      responseStatus:200,
+      responseBody:{deleted:true},
+      updatedAt:"2026-07-19T00:02:04.000Z"
+    }),"conflict");
+    assert.equal(await store.finalizeFileLibraryDeletion({
+      ...removedOwner,
+      requestHash,
+      actorId:"user_one",
+      responseStatus:200,
+      responseBody:{deleted:true},
+      updatedAt:"2026-07-19T00:02:04.000Z"
+    }),"finalized");
+    assert.equal((await store.beginFileLibraryDeletion({
+      libraryId:target.id,
+      idempotency:deletionReceipt("delete-after-response-loss",requestHash,operationId,"receipt-after-loss")
+    })).kind,"replay");
+    const audits=(await store.queryProjectAuditEvents(target.projectId,{limit:100})).items
+      .filter((event)=>event.action==="file_library.delete"&&event.resourceId===target.id);
+    assert.equal(audits.length,1);
+    assert.deepEqual(audits[0]?.detail,{bytes:3});
   });
 
   it("returns exact new-library name and capacity outcomes without leaving a Library",async()=>{
@@ -89,10 +200,25 @@ function library(overrides: Partial<FileLibrary>): FileLibrary {
     projectId: "project_one",
     name: "Library",
     rootSubPath: "libraries/library_one/home",
+    lifecycleStatus: "active",
     createdByUserId: "user_one",
     createdAt: "2026-07-19T00:00:00.000Z",
     updatedAt: "2026-07-19T00:00:00.000Z",
     ...overrides
+  };
+}
+
+function deletionReceipt(key: string, requestHash: string, resourceId: string, claimToken: string) {
+  return {
+    actorId: "user_one",
+    projectId: "project_one",
+    operation: "project.file-library.delete" as const,
+    key,
+    requestHash,
+    resourceId,
+    claimToken,
+    now: "2026-07-19T00:00:00.000Z",
+    leaseExpiresAt: "2026-07-19T00:05:00.000Z"
   };
 }
 

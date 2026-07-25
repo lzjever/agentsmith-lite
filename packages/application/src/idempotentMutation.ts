@@ -110,7 +110,7 @@ export async function runIdempotentMutation<T, Operation extends ProductMutation
   }
 }
 
-function canonicalRequestHash(value: unknown): string {
+export function canonicalRequestHash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("base64url");
 }
 

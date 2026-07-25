@@ -6,6 +6,7 @@ import type { FileDeletionOperationEntryType } from "../../ports/src/store.js";
 const O_PATH = 0x200000;
 
 export type DescriptorTreePurpose = "measure" | "remove";
+export type DescriptorTreeCheckpoint = () => Promise<void>;
 
 export interface DescriptorFileTreeObserver {
   beforeOpenEntry?(event: {
@@ -50,17 +51,20 @@ export class DescriptorFileTreeWalker {
   async measureEntry(
     parent: FileHandle,
     name: string,
-    expected?: Awaited<ReturnType<DescriptorFileTreeWalker["requiredStat"]>>
+    expected?: Awaited<ReturnType<DescriptorFileTreeWalker["requiredStat"]>>,
+    checkpoint?:DescriptorTreeCheckpoint
   ): Promise<number> {
-    return this.measureEntryAttempt(parent, name, expected, true, 0);
+    return this.measureEntryAttempt(parent, name, expected, true, 0,checkpoint);
   }
 
-  async measureDirectory(directory: FileHandle): Promise<number> {
+  async measureDirectory(directory: FileHandle,checkpoint?:DescriptorTreeCheckpoint): Promise<number> {
     let bytes = 0;
+    await checkpoint?.();
     for (const name of await readdir(descriptorPath(directory))) {
+      await checkpoint?.();
       const stat = await this.optionalStat(directory, name);
       if (!stat) continue;
-      bytes += await this.measureEntryAttempt(directory, name, undefined, true, 0);
+      bytes += await this.measureEntryAttempt(directory, name, undefined, true, 0,checkpoint);
       if (!Number.isSafeInteger(bytes)) throw fileUsageTooLarge();
     }
     return bytes;
@@ -69,8 +73,10 @@ export class DescriptorFileTreeWalker {
   async removeEntry(
     parent: FileHandle,
     name: string,
-    expected?: Awaited<ReturnType<DescriptorFileTreeWalker["requiredStat"]>>
+    expected?: Awaited<ReturnType<DescriptorFileTreeWalker["requiredStat"]>>,
+    checkpoint?:DescriptorTreeCheckpoint
   ): Promise<void> {
+    await checkpoint?.();
     const observed = await this.requiredStat(parent, name);
     if (expected) assertDescriptorIdentity(expected, observed);
     await this.observer?.beforeOpenEntry?.({
@@ -78,6 +84,7 @@ export class DescriptorFileTreeWalker {
       name,
       observedType: descriptorEntryType(observed)
     });
+    await checkpoint?.();
 
     const entry = await this.openEntry(parent, name);
     let actual: Awaited<ReturnType<FileHandle["stat"]>>;
@@ -86,6 +93,7 @@ export class DescriptorFileTreeWalker {
       if (expected) assertDescriptorIdentity(expected, actual);
       if (!actual.isDirectory() || actual.isSymbolicLink()) {
         assertDescriptorIdentity(actual, await this.requiredStat(parent, name));
+        await checkpoint?.();
         await unlink(descriptorPath(parent, name));
         await parent.sync();
         return;
@@ -97,10 +105,12 @@ export class DescriptorFileTreeWalker {
     const directory = await this.openDirectory(parent, name);
     try {
       assertDescriptorIdentity(actual!, await directory.stat({ bigint: true }));
+      await checkpoint?.();
       for (const childName of await readdir(descriptorPath(directory))) {
-        await this.removeEntry(directory, childName);
+        await this.removeEntry(directory, childName,undefined,checkpoint);
       }
       assertDescriptorIdentity(actual!, await this.requiredStat(parent, name));
+      await checkpoint?.();
       await rmdir(descriptorPath(parent, name));
       await parent.sync();
     } finally {
@@ -113,8 +123,10 @@ export class DescriptorFileTreeWalker {
     name: string,
     expected: Awaited<ReturnType<DescriptorFileTreeWalker["requiredStat"]>> | undefined,
     notify: boolean,
-    attempt: number
+    attempt: number,
+    checkpoint?:DescriptorTreeCheckpoint
   ): Promise<number> {
+    await checkpoint?.();
     const observed = await this.requiredStat(parent, name);
     if (expected) assertDescriptorIdentity(expected, observed);
     if (notify) {
@@ -123,6 +135,7 @@ export class DescriptorFileTreeWalker {
         name,
         observedType: descriptorEntryType(observed)
       });
+      await checkpoint?.();
     }
 
     const entry = await this.openEntry(parent, name);
@@ -140,7 +153,7 @@ export class DescriptorFileTreeWalker {
       const directory = await this.openDirectory(parent, name);
       try {
         assertDescriptorIdentity(actual!, await directory.stat({ bigint: true }));
-        return await this.measureDirectory(directory);
+        return await this.measureDirectory(directory,checkpoint);
       } finally {
         await directory.close();
       }
@@ -150,7 +163,7 @@ export class DescriptorFileTreeWalker {
       if (!replacement || replacement.isSymbolicLink() || (!replacement.isFile() && !replacement.isDirectory())) {
         return 0;
       }
-      return this.measureEntryAttempt(parent, name, expected, false, attempt + 1);
+      return this.measureEntryAttempt(parent, name, expected, false, attempt + 1,checkpoint);
     }
   }
 }

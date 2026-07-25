@@ -300,6 +300,23 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("does not recreate a missing active Library root from a stale accounting snapshot",async()=>{
+    const root=await mkdtemp(path.join(tmpdir(),"asl-files-missing-active-root-"));
+    const missingRoot=path.join(root,LIBRARY_ROOT);
+    try{
+      await assert.rejects(
+        ()=>new FileService().measureFileRootsBytes(root,[LIBRARY_ROOT]),
+        (error:unknown)=>error instanceof ProductError&&
+          error.statusCode===409&&
+          error.code==="file_library_storage_missing"&&
+          error.message==="File Library storage is unavailable"
+      );
+      await assert.rejects(()=>readdir(missingRoot),{code:"ENOENT"});
+    }finally{
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+
   it("resumes the same isolated operation after accounting fails", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-delete-resume-"));
     const service = new FileService();
@@ -330,7 +347,12 @@ describe("file CRUD service", () => {
 
       await assert.rejects(
         () => service.deleteLibraryFileWithAccounting(root, LIBRARY_ROOT, "selected", accounting, context),
-        /accounting unavailable/
+        (error:unknown)=>productError(
+          error,
+          500,
+          /File deletion could not be completed/,
+          "file_deletion_incomplete"
+        )
       );
       assert.equal(
         await readFile(path.join(root, ".deletions", owner.resourceId, "entry", "value.txt"), "utf8"),
@@ -390,7 +412,12 @@ describe("file CRUD service", () => {
       const deletion = new RecursiveDeletionService();
       await assert.rejects(
         () => deletion.isolateEntry(target, operations),
-        /database unavailable after rename/
+        (error:unknown)=>productError(
+          error,
+          500,
+          /File deletion could not be completed/,
+          "file_deletion_incomplete"
+        )
       );
       const operationRoot = path.join(root, ".deletions", owner.resourceId);
       assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "original");
@@ -437,7 +464,12 @@ describe("file CRUD service", () => {
       await writeFile(path.join(operationRoot, "entry"), "unowned");
       await assert.rejects(
         () => new RecursiveDeletionService().isolateEntry(deletionTarget(root, owner), operations),
-        (error: unknown) => productError(error, 500, /marker is missing/, "file_deletion_incomplete")
+        (error: unknown) => productError(
+          error,
+          500,
+          /File deletion could not be completed/,
+          "file_deletion_incomplete"
+        )
       );
       assert.equal(persistenceCalls, 0);
       assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "unowned");
@@ -464,7 +496,12 @@ describe("file CRUD service", () => {
             async findFileDeletionOperation() { return null; },
             async persistFileDeletionOperation() { return true; }
           }),
-          (error: unknown) => productError(error, 500, /marker/, "file_deletion_incomplete")
+          (error: unknown) => productError(
+            error,
+            500,
+            /File deletion could not be completed/,
+            "file_deletion_incomplete"
+          )
         );
         assert.equal(await readFile(path.join(operationRoot, "entry"), "utf8"), "contained");
         assert.equal(await readFile(path.join(operationRoot, marker.name), "utf8"), marker.content);

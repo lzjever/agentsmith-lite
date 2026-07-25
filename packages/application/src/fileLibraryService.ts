@@ -1,4 +1,4 @@
-import type { CreateFileLibraryInput, FileLibrary, FileLibraryProjection, RenameFileLibraryInput } from "../../contracts/src/api.js";
+import type { CreateFileLibraryInput, FileLibrary, FileLibraryProjection, FileLibraryTaskLink, RenameFileLibraryInput } from "../../contracts/src/api.js";
 import { NotFoundError, ProductError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src/validation.js";
@@ -6,12 +6,28 @@ import type { FileLibraryBindingLookup, ProductStore } from "../../ports/src/sto
 import type { AuthorizationService } from "./authorizationService.js";
 import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
 import type { FileService } from "./fileService.js";
-import { runIdempotentMutation } from "./idempotentMutation.js";
+import { canonicalRequestHash, runIdempotentMutation } from "./idempotentMutation.js";
+
+const REQUEST_LEASE_MS=30_000;
+const PHYSICAL_LEASE_MS=30_000;
+const PHYSICAL_HEARTBEAT_MS=10_000;
+
+interface FileLibraryDeletionHeartbeatOptions{
+  leaseMs?:number;
+  intervalMs?:number;
+}
+
+export class FileLibraryBoundError extends ProductError{
+  constructor(readonly task:FileLibraryTaskLink){
+    super("File Library is bound to a Task",409,"file_library_bound");
+  }
+}
 
 interface LibraryFileScope {
   library: FileLibrary;
   projectRoot:string;
   rootSubPaths:string[];
+  canWriteFiles:boolean;
 }
 
 export class FileLibraryService {
@@ -19,7 +35,8 @@ export class FileLibraryService {
     private readonly store: ProductStore,
     private readonly authorization: AuthorizationService,
     private readonly files: FileService,
-    private readonly projectAbsoluteRoot: (rootPath: string) => string
+    private readonly projectAbsoluteRoot: (rootPath: string) => string,
+    private readonly heartbeatOptions:FileLibraryDeletionHeartbeatOptions={}
   ) {}
 
   async list(userId: string, projectId: string): Promise<FileLibraryProjection[]> {
@@ -38,6 +55,7 @@ export class FileLibraryService {
         if (existing.projectId !== projectId || existing.workspaceId !== currentProject.workspaceId || existing.name !== name) {
           throw new ProductError("File Library create identity conflict", 409);
         }
+        this.requireActive(existing);
         await this.files.ensureLibraryRoot(this.projectAbsoluteRoot(currentProject.rootPath), existing.rootSubPath);
         return this.project(existing, true);
       }
@@ -48,6 +66,7 @@ export class FileLibraryService {
         projectId,
         name,
         rootSubPath: `libraries/${id}/home`,
+        lifecycleStatus:"active",
         createdByUserId: userId,
         createdAt: timestamp,
         updatedAt: timestamp
@@ -76,10 +95,12 @@ export class FileLibraryService {
     return withFileLibraryLifecycleLock(projectId, async () => {
       await this.authorization.requireProject(userId, projectId, "write");
       const current = await this.requireInProject(projectId, libraryId);
+      this.requireActive(current);
       const updated = await this.store.renameFileLibrary(projectId, libraryId, this.name(input.name), input.expectedUpdatedAt, nowIso());
       if (!updated) {
         const latest = await this.store.findFileLibrary(libraryId);
         if (!latest || latest.projectId !== projectId) throw new NotFoundError("File Library not found");
+        this.requireActive(latest);
         if (latest.updatedAt !== input.expectedUpdatedAt) throw new ProductError("File Library changed elsewhere. Reload and try again.", 409);
         throw new ProductError("File Library name already exists", 409);
       }
@@ -88,18 +109,108 @@ export class FileLibraryService {
     });
   }
 
-  async remove(userId: string, projectId: string, libraryId: string): Promise<{ deleted: true }> {
+  async remove(
+    userId:string,
+    projectId:string,
+    libraryId:string,
+    idempotencyKey:string,
+    reconcile:(bytes:number)=>Promise<void>
+  ):Promise<{deleted:true}>{
     return withFileLibraryLifecycleLock(projectId, async () => {
       const project = await this.authorization.requireProject(userId, projectId, "write");
-      const library = await this.requireInProject(projectId, libraryId);
-      await this.files.removeEmptyLibraryRoot(this.projectAbsoluteRoot(project.rootPath), library.rootSubPath);
-      const deleted=await this.store.deleteFileLibraryIfUnbound(projectId,libraryId);
-      if(deleted!=="deleted"){
-        await this.files.ensureLibraryRoot(this.projectAbsoluteRoot(project.rootPath), library.rootSubPath);
-        if(deleted==="bound")throw new ProductError("File Library is bound to a Task",409);
-        throw new NotFoundError("File Library not found");
+      const heartbeatTiming=this.fileLibraryDeletionHeartbeatTiming();
+      const timestamp=nowIso();
+      const requestHash=canonicalRequestHash({projectId,libraryId});
+      const operationId=`file-library-delete:${libraryId}`;
+      const receiptClaimToken=newId("idempotency_claim");
+      const receipt={
+        actorId:userId,
+        projectId,
+        operation:"project.file-library.delete" as const,
+        key:idempotencyKey,
+        requestHash,
+        resourceId:operationId,
+        claimToken:receiptClaimToken,
+        now:timestamp,
+        leaseExpiresAt:new Date(Date.parse(timestamp)+REQUEST_LEASE_MS).toISOString()
+      };
+      const begun=await this.store.beginFileLibraryDeletion({libraryId,idempotency:receipt});
+      if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+      if(begun.kind==="in_progress")throw fileLibraryDeleting();
+      if(begun.kind==="replay")return replayFileLibraryDeletion(begun.responseStatus,begun.responseBody);
+      if(begun.kind==="bound"){
+        const body=fileLibraryBoundBody(begun.task);
+        await this.completeDeletionReceipt(receipt,409,body);
+        throw new FileLibraryBoundError(begun.task);
       }
-      return { deleted: true };
+      if(begun.kind==="not_found"){
+        const body={error:"File Library not found",code:"file_library_not_found"};
+        await this.completeDeletionReceipt(receipt,404,body);
+        throw new ProductError("File Library not found",404,"file_library_not_found");
+      }
+      const physicalClaimToken=newId("file_library_delete_claim");
+      const physicalOwner={
+        projectId,
+        libraryId,
+        operationId:begun.operationId,
+        claimToken:physicalClaimToken
+      };
+      let physical;
+      try{
+        physical=await this.store.claimFileLibraryDeletionOperation({
+          ...physicalOwner,
+          now:timestamp,
+          leaseMs:heartbeatTiming.leaseMs
+        });
+      }catch(error){
+        console.error("File Library deletion claim failed",error);
+        throw fileLibraryDeleting();
+      }
+      if(physical.kind!=="claimed")throw fileLibraryDeleting();
+      const heartbeat=new FileLibraryDeletionHeartbeat(
+        this.store,
+        physicalOwner,
+        heartbeatTiming.leaseMs,
+        heartbeatTiming.intervalMs
+      );
+      heartbeat.start();
+      let finalized=false;
+      try{
+        await this.files.deleteLibraryRootWithAccounting(
+          this.projectAbsoluteRoot(project.rootPath),
+          libraryId,
+          begun.library.rootSubPath,
+          await this.rootSubPaths(projectId),
+          reconcile,
+          {owner:physicalOwner,operations:this.store,checkpoint:()=>heartbeat.checkpoint()}
+        );
+        const response={deleted:true as const};
+        const result=await heartbeat.finalize(()=>this.store.finalizeFileLibraryDeletion({
+            ...physicalOwner,
+            requestHash,
+            actorId:userId,
+            responseStatus:200,
+            responseBody:response,
+            updatedAt:nowIso()
+          }));
+        if(result!=="finalized")throw fileLibraryDeleting();
+        finalized=true;
+        return response;
+      }catch(error){
+        if(!(error instanceof ProductError&&error.code==="file_library_deleting")){
+          console.error("File Library deletion operation failed",error);
+        }
+        throw fileLibraryDeleting();
+      }finally{
+        await heartbeat.stop();
+        if(!finalized){
+          try{
+            await this.store.releaseFileLibraryDeletionOperation(physicalOwner);
+          }catch(error){
+            console.error("File Library deletion claim release failed",error);
+          }
+        }
+      }
     });
   }
 
@@ -107,6 +218,7 @@ export class FileLibraryService {
     const access = await this.authorization.projectAccess(userId, projectId);
     if (write) await this.authorization.requireProject(userId, projectId, "write");
     const library = await this.requireInProject(projectId, libraryId);
+    this.requireActive(library);
     return {
       library,
       projectRoot: this.projectAbsoluteRoot(access.project.rootPath),
@@ -175,7 +287,14 @@ export class FileLibraryService {
   async withLibraryMutation<T>(userId: string, projectId: string, libraryId: string, action: (scope: LibraryFileScope) => Promise<T>): Promise<T> {
     return withFileLibraryLifecycleLock(
       projectId,
-      async () => action(await this.requireLibraryFileScopeUnlocked(userId, projectId, libraryId))
+      async () => action(await this.requireLibraryFileScopeUnlocked(userId, projectId, libraryId,true))
+    );
+  }
+
+  async withLibraryFileAccess<T>(userId:string,projectId:string,libraryId:string,action:(scope:LibraryFileScope)=>Promise<T>):Promise<T>{
+    return withFileLibraryLifecycleLock(
+      projectId,
+      async()=>action(await this.requireLibraryFileScopeUnlocked(userId,projectId,libraryId,false))
     );
   }
 
@@ -196,20 +315,36 @@ export class FileLibraryService {
   }
 
   private async rootSubPaths(projectId: string): Promise<string[]> {
-    return (await this.store.listFileLibrariesForProject(projectId)).map((library) => library.rootSubPath);
+    return (await this.store.listFileLibrariesForProject(projectId))
+      .filter((library)=>library.lifecycleStatus==="active")
+      .map((library) => library.rootSubPath);
+  }
+
+  private fileLibraryDeletionHeartbeatTiming():{leaseMs:number;intervalMs:number}{
+    const leaseMs=this.heartbeatOptions.leaseMs??PHYSICAL_LEASE_MS;
+    const intervalMs=this.heartbeatOptions.intervalMs??PHYSICAL_HEARTBEAT_MS;
+    if(!Number.isSafeInteger(leaseMs)||leaseMs<=0||
+      !Number.isSafeInteger(intervalMs)||intervalMs<=0||intervalMs>=leaseMs){
+      throw new Error("File Library deletion heartbeat timing is invalid");
+    }
+    return{leaseMs,intervalMs};
   }
 
   private async requireLibraryFileScopeUnlocked(
     userId: string,
     projectId: string,
-    libraryId: string
+    libraryId: string,
+    write=true
   ): Promise<LibraryFileScope> {
-    const project = await this.authorization.requireProject(userId, projectId, "write");
+    const access=await this.authorization.projectAccess(userId,projectId);
+    if(write)await this.authorization.requireProject(userId,projectId,"write");
     const library = await this.requireInProject(projectId, libraryId);
+    this.requireActive(library);
     return {
       library,
-      projectRoot: this.projectAbsoluteRoot(project.rootPath),
-      rootSubPaths: await this.rootSubPaths(projectId)
+      projectRoot: this.projectAbsoluteRoot(access.project.rootPath),
+      rootSubPaths: await this.rootSubPaths(projectId),
+      canWriteFiles:access.canWrite&&access.writableLifecycle
     };
   }
 
@@ -223,6 +358,22 @@ export class FileLibraryService {
     return requireNonEmptyString(value, "fileLibrary.name", PRODUCT_NAME_MAX_LENGTH);
   }
 
+  private requireActive(library:FileLibrary):void{
+    if(library.lifecycleStatus==="deleting"){
+      throw new ProductError("File Library deletion is in progress",409,"file_library_deleting");
+    }
+  }
+
+  private async completeDeletionReceipt(
+    receipt:Parameters<ProductStore["beginTaskIdempotency"]>[0],
+    responseStatus:number,
+    responseBody:unknown
+  ):Promise<void>{
+    if(!await this.store.completeTaskIdempotency({...receipt,responseStatus,responseBody,updatedAt:nowIso()})){
+      throw new ProductError("File Library deletion receipt lost its claim",409);
+    }
+  }
+
   private async project(library: FileLibrary, canWrite: boolean): Promise<FileLibraryProjection> {
     const binding: FileLibraryBindingLookup = await this.store.findTaskBoundToFileLibrary(library.id);
     const boundTask = binding.kind === "bound" ? binding.task : null;
@@ -230,10 +381,133 @@ export class FileLibraryService {
       ...library,
       boundTask,
       capabilities: {
-        canRename: canWrite,
-        canDelete: canWrite && binding.kind === "unbound",
-        canWriteFiles: canWrite
+        canRename: canWrite&&library.lifecycleStatus==="active",
+        canDelete: canWrite&&(library.lifecycleStatus==="deleting"||binding.kind==="unbound"),
+        canWriteFiles: canWrite&&library.lifecycleStatus==="active"
       }
     };
+  }
+}
+
+function fileLibraryBoundBody(task:FileLibraryTaskLink){
+  return{error:"File Library is bound to a Task",code:"file_library_bound",task};
+}
+
+function replayFileLibraryDeletion(status:number,body:unknown):{deleted:true}{
+  if(status<400&&isRecord(body)&&body.deleted===true)return{deleted:true};
+  if(isRecord(body)&&body.code==="file_library_bound"&&isTaskLink(body.task))throw new FileLibraryBoundError(body.task);
+  throw new ProductError(
+    isRecord(body)&&typeof body.error==="string"?body.error:"File Library could not be deleted",
+    status,
+    isRecord(body)&&typeof body.code==="string"?body.code:undefined
+  );
+}
+
+function isRecord(value:unknown):value is Record<string,unknown>{
+  return Boolean(value&&typeof value==="object"&&!Array.isArray(value));
+}
+
+function isTaskLink(value:unknown):value is FileLibraryTaskLink{
+  return isRecord(value)&&typeof value.id==="string"&&(typeof value.title==="string"||value.title===null);
+}
+
+function fileLibraryDeleting():ProductError{
+  return new ProductError(
+    "File Library deletion is in progress",
+    409,
+    "file_library_deleting"
+  );
+}
+
+class FileLibraryDeletionHeartbeat{
+  private stopped=false;
+  private finishing=false;
+  private lost=false;
+  private loopPromise:Promise<void>|null=null;
+  private renewal:Promise<void>|null=null;
+  private timer:ReturnType<typeof setTimeout>|null=null;
+  private wake:(()=>void)|null=null;
+
+  constructor(
+    private readonly store:Pick<ProductStore,"renewFileLibraryDeletionOperation">,
+    private readonly owner:Parameters<ProductStore["renewFileLibraryDeletionOperation"]>[0],
+    private readonly leaseMs:number,
+    private readonly intervalMs:number
+  ){}
+
+  start():void{
+    if(this.loopPromise)return;
+    this.loopPromise=this.run();
+  }
+
+  async checkpoint():Promise<void>{
+    await this.renewal;
+    if(this.lost)throw fileLibraryDeleting();
+  }
+
+  async finalize<T>(action:()=>Promise<T>):Promise<T>{
+    this.finishing=true;
+    this.wakeTimer();
+    await this.loopPromise;
+    await this.runRenewal();
+    await this.checkpoint();
+    return action();
+  }
+
+  async stop():Promise<void>{
+    this.stopped=true;
+    this.wakeTimer();
+    await this.loopPromise;
+    await this.renewal;
+  }
+
+  private async run():Promise<void>{
+    while(!this.stopped&&!this.finishing){
+      await this.wait();
+      if(this.stopped||this.finishing)break;
+      await this.runRenewal();
+    }
+  }
+
+  private async runRenewal():Promise<void>{
+    if(this.renewal){
+      await this.renewal;
+      return;
+    }
+    const renewal=this.renewOnce();
+    this.renewal=renewal;
+    try{
+      await renewal;
+    }finally{
+      if(this.renewal===renewal)this.renewal=null;
+    }
+  }
+
+  private async renewOnce():Promise<void>{
+    try{
+      if(!await this.store.renewFileLibraryDeletionOperation(this.owner,this.leaseMs)){
+        this.lost=true;
+      }
+    }catch(error){
+      this.lost=true;
+      console.error("File Library deletion heartbeat failed",error);
+    }
+  }
+
+  private wait():Promise<void>{
+    return new Promise((resolve)=>{
+      const finish=()=>{
+        if(this.timer)clearTimeout(this.timer);
+        this.timer=null;
+        this.wake=null;
+        resolve();
+      };
+      this.wake=finish;
+      this.timer=setTimeout(finish,this.intervalMs);
+    });
+  }
+
+  private wakeTimer():void{
+    this.wake?.();
   }
 }

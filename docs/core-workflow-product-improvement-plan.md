@@ -1458,8 +1458,9 @@ The engine then:
 4. reject statically observed symlink or unsupported final targets, then
    enforce the selected root/Artifact policy;
 5. create and durably validate one exact versioned operation marker containing
-   kind, Project ID, canonical Library root, normalized relative path,
-   operation ID, and request hash;
+   kind, Project ID, canonical Library root, normalized relative path, and
+   operation ID; entry deletion also includes its request hash, while the
+   deterministic Library operation does not depend on one request receipt;
 6. atomically rename the final entry through descriptor-anchored paths to
    `<projectRoot>/.deletions/<operationId>/entry`; a concurrent final-entry
    substitution is contained by quarantine, is never followed, and becomes the
@@ -1525,13 +1526,22 @@ fence:
 active -> deleting
 ```
 
-Successful removal means the row no longer exists; `removed` is not a stored
-state. The migration adds only:
+Successful removal means the row no longer exists; `removed` is not a public
+Library lifecycle state. The migration adds only this public domain
+lifecycle/identity state:
 
 ```text
 lifecycle_status = active | deleting
 deletion_operation_id = nullable stable string
 ```
+
+The same Library row also carries the minimum private physical-operation state
+needed for crash recovery and fencing: `isolated | removed` phase, quarantined
+device/inode/entry type, aggregate bytes, and a claim token with lease expiry.
+Those fields are Store-owned coordination state, are not part of
+`FileLibrary`, and never appear in API projections. Request hashes remain only
+on actor/key-scoped HTTP idempotency receipts; deterministic Project, Library,
+and operation identity is sufficient for the one shared physical operation.
 
 `deleting` is internal destructive-operation state, not a general workflow.
 The row retains its immutable ID, Project, root path, and stable operation

@@ -69,6 +69,12 @@ import type {
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
+  BeginFileLibraryDeletionInput,
+  BeginFileLibraryDeletionResult,
+  ClaimFileLibraryDeletionOperationInput,
+  ClaimFileLibraryDeletionOperationResult,
+  FileLibraryDeletionOperationOwner,
+  FinalizeFileLibraryDeletionInput,
   FileDeletionOperationOwner,
   FileDeletionOperationState,
   TaskIdempotencyLookupInput,
@@ -137,6 +143,7 @@ export class InMemoryProductStore implements ProductStore {
   private readonly workspaces = new Map<string, Workspace>();
   private readonly projects = new Map<string, Project>();
   private readonly fileLibraries = new Map<string, FileLibrary>();
+  private readonly fileLibraryDeletions = new Map<string, InMemoryFileLibraryDeletion>();
   private readonly memberships = new Map<string, ProjectMembership>();
   private readonly projectPins = new Map<string, { projectId: string; userId: string; pinnedAt: string }>();
   private readonly workspaceMemberships = new Map<string, WorkspaceMembership>();
@@ -361,6 +368,7 @@ export class InMemoryProductStore implements ProductStore {
     return clone(this.projects.get(id) ?? null);
   }
   async createFileLibrary(value:FileLibrary){
+    if(value.lifecycleStatus!=="active")return null;
     const duplicate=[...this.fileLibraries.values()].some((item)=>item.projectId===value.projectId&&(item.name.trim().toLowerCase()===value.name.trim().toLowerCase()||item.rootSubPath===value.rootSubPath));
     if(duplicate||this.fileLibraries.has(value.id))return null;
     this.fileLibraries.set(value.id,clone(value));
@@ -370,14 +378,119 @@ export class InMemoryProductStore implements ProductStore {
   async listFileLibrariesForProject(projectId:string){return [...this.fileLibraries.values()].filter((item)=>item.projectId===projectId).sort((left,right)=>left.createdAt.localeCompare(right.createdAt)||left.id.localeCompare(right.id)).map(clone)}
   async renameFileLibrary(projectId:string,id:string,name:string,expectedUpdatedAt:string,updatedAt:string){
     const current=this.fileLibraries.get(id);
-    if(!current||current.projectId!==projectId||current.updatedAt!==expectedUpdatedAt||[...this.fileLibraries.values()].some((item)=>item.id!==id&&item.projectId===projectId&&item.name.trim().toLowerCase()===name.trim().toLowerCase()))return null;
+    if(!current||current.lifecycleStatus!=="active"||current.projectId!==projectId||current.updatedAt!==expectedUpdatedAt||[...this.fileLibraries.values()].some((item)=>item.id!==id&&item.projectId===projectId&&item.name.trim().toLowerCase()===name.trim().toLowerCase()))return null;
     const updated={...current,name,updatedAt};this.fileLibraries.set(id,clone(updated));return clone(updated);
   }
-  async deleteFileLibraryIfUnbound(projectId:string,id:string){
-    const current=this.fileLibraries.get(id);
-    if(!current||current.projectId!==projectId)return"not_found" as const;
-    if([...this.tasks.values()].some((task)=>task.fileLibraryId===id))return"bound" as const;
-    this.fileLibraries.delete(id);return"deleted" as const;
+  async beginFileLibraryDeletion(input:BeginFileLibraryDeletionInput):Promise<BeginFileLibraryDeletionResult>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const operationId=fileLibraryDeletionOperationId(input.libraryId);
+      if(input.idempotency.resourceId!==operationId)return{kind:"hash_mismatch" as const};
+      const receipt=this.claimAtomicTaskMessageMutation(input.idempotency);
+      if(receipt.kind!=="claimed"){
+        if(receipt.kind==="in_progress"){
+          const current=this.taskIdempotency.get(taskIdempotencyKey(input.idempotency));
+          return{kind:"in_progress" as const,resourceId:current?.resourceId??operationId};
+        }
+        if(receipt.kind==="replay")return{...receipt,resourceId:operationId};
+        return receipt;
+      }
+      if(receipt.resourceId!==operationId)return{kind:"hash_mismatch" as const};
+      const current=this.fileLibraries.get(input.libraryId);
+      if(!current||current.projectId!==input.idempotency.projectId){
+        const tombstone=[...this.taskIdempotency.values()].find((record)=>
+          record.projectId===input.idempotency.projectId&&
+          record.operation==="project.file-library.delete"&&
+          record.resourceId===operationId&&
+          record.requestHash===input.idempotency.requestHash&&
+          record.status==="completed"&&record.responseStatus===200
+        );
+        if(tombstone){
+          this.completeAtomicTaskMessageMutation(input.idempotency,200,tombstone.responseBody,input.idempotency.now);
+          return{kind:"replay" as const,resourceId:operationId,responseStatus:200,responseBody:clone(tombstone.responseBody)};
+        }
+        return{kind:"not_found" as const,receiptClaimToken:input.idempotency.claimToken};
+      }
+      const bound=[...this.tasks.values()].find((task)=>task.fileLibraryId===current.id);
+      if(bound)return{kind:"bound" as const,task:{id:bound.id,title:bound.title??null},receiptClaimToken:input.idempotency.claimToken};
+      if(current.lifecycleStatus==="active"){
+        this.fileLibraries.set(current.id,clone({...current,lifecycleStatus:"deleting" as const,updatedAt:input.idempotency.now}));
+        this.fileLibraryDeletions.set(current.id,{operationId,state:null,claimToken:null,claimExpiresAt:null});
+      }
+      const operation=this.fileLibraryDeletions.get(current.id);
+      if(!operation||operation.operationId!==operationId)return{kind:"hash_mismatch" as const};
+      return{
+        kind:"claimed" as const,
+        library:clone(this.fileLibraries.get(current.id)!),
+        operationId,
+        receiptClaimToken:input.idempotency.claimToken
+      };
+    });
+  }
+  async claimFileLibraryDeletionOperation(input:ClaimFileLibraryDeletionOperationInput):Promise<ClaimFileLibraryDeletionOperationResult>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const library=this.fileLibraries.get(input.libraryId),operation=this.fileLibraryDeletions.get(input.libraryId);
+      if(!library||library.projectId!==input.projectId||library.lifecycleStatus!=="deleting"||
+        !operation||operation.operationId!==input.operationId)return{kind:"conflict" as const};
+      if(operation.claimToken&&operation.claimToken!==input.claimToken&&(operation.claimExpiresAt??"")>input.now)return{kind:"in_progress" as const};
+      operation.claimToken=input.claimToken;
+      operation.claimExpiresAt=new Date(Date.parse(input.now)+input.leaseMs).toISOString();
+      return{kind:"claimed" as const,state:operation.state?clone(operation.state):null};
+    });
+  }
+  async findFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner):Promise<FileDeletionOperationState|null>{
+    const operation=this.fileLibraryDeletions.get(owner.libraryId);
+    return fileLibraryDeletionClaimMatches(operation,owner)&&operation.state?clone(operation.state):null;
+  }
+  async persistFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner,state:FileDeletionOperationState,now:string):Promise<boolean>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const operation=this.fileLibraryDeletions.get(owner.libraryId);
+      if(!fileLibraryDeletionClaimMatches(operation,owner)||(operation.claimExpiresAt??"")<=now||
+        !isFileDeletionOperationTransition(operation.state,state))return false;
+      operation.state=clone(state);
+      return true;
+    });
+  }
+  async renewFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner,leaseMs:number):Promise<boolean>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const operation=this.fileLibraryDeletions.get(owner.libraryId);
+      const now=new Date().toISOString();
+      if(!fileLibraryDeletionClaimMatches(operation,owner)||(operation.claimExpiresAt??"")<=now)return false;
+      operation.claimExpiresAt=new Date(Date.parse(now)+leaseMs).toISOString();
+      return true;
+    });
+  }
+  async releaseFileLibraryDeletionOperation(owner:FileLibraryDeletionOperationOwner):Promise<boolean>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const operation=this.fileLibraryDeletions.get(owner.libraryId);
+      if(!fileLibraryDeletionClaimMatches(operation,owner))return false;
+      operation.claimToken=null;
+      operation.claimExpiresAt=null;
+      return true;
+    });
+  }
+  async finalizeFileLibraryDeletion(input:FinalizeFileLibraryDeletionInput):Promise<"finalized"|"conflict">{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const project=this.projects.get(input.projectId);
+      const library=this.fileLibraries.get(input.libraryId);
+      const operation=this.fileLibraryDeletions.get(input.libraryId);
+      if(!project||!library||library.projectId!==input.projectId||library.lifecycleStatus!=="deleting"||
+        !fileLibraryDeletionClaimMatches(operation,input)||(operation.claimExpiresAt??"")<=input.updatedAt||
+        operation.state?.phase!=="removed"||[...this.tasks.values()].some((task)=>task.fileLibraryId===input.libraryId))return"conflict" as const;
+      const auditId=`audit:${input.operationId}`;
+      if(!this.auditEvents.some((event)=>event.id===auditId))this.auditEvents.push({
+        id:auditId,projectId:input.projectId,actorId:input.actorId,action:"file_library.delete",
+        status:"accepted",resourceKind:"file",resourceId:input.libraryId,
+        detail:{bytes:operation.state.bytes},createdAt:input.updatedAt
+      });
+      this.fileLibraries.delete(input.libraryId);
+      this.fileLibraryDeletions.delete(input.libraryId);
+      for(const [key,record] of this.taskIdempotency){
+        if(record.projectId!==input.projectId||record.operation!=="project.file-library.delete"||
+          record.resourceId!==input.operationId||record.requestHash!==input.requestHash||record.status!=="in_progress")continue;
+        this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.responseStatus,responseBody:clone(input.responseBody),updatedAt:input.updatedAt});
+      }
+      return"finalized" as const;
+    });
   }
   async findTaskBoundToFileLibrary(fileLibraryId:string){const task=[...this.tasks.values()].find((candidate)=>candidate.fileLibraryId===fileLibraryId);return task?{kind:"bound" as const,task:{id:task.id,title:task.title??null}}:{kind:"unbound" as const}}
   async updateProjectName(projectId:string,name:string,updatedAt:string,expectedName:string){const current=this.projects.get(projectId);if(!current||(current.lifecycleStatus??"active")!=="active"||current.name!==expectedName)return null;const updated={...current,name,updatedAt};this.projects.set(projectId,clone(updated));return clone(updated)}
@@ -959,6 +1072,7 @@ export class InMemoryProductStore implements ProductStore {
     let library=input.task.fileLibraryId?this.fileLibraries.get(input.task.fileLibraryId):undefined;
     if(input.newFileLibrary){if(library||await this.createFileLibrary(input.newFileLibrary)===null)return{kind:"library_name_conflict" as const};library=input.newFileLibrary;}
     if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_not_found" as const};}
+    if(library.lifecycleStatus==="deleting"){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_deleting" as const};}
     if([...this.tasks.values()].some((task)=>task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
     const task = normalizeStoredTask(input.task);
     if (input.reserveActive) {
@@ -1539,6 +1653,7 @@ export class InMemoryProductStore implements ProductStore {
     const previousMessages = this.messages.map(clone);
     const previousUsage = [...this.usage.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousLibraries = [...this.fileLibraries.entries()].map(([id,value]) => [id,clone(value)] as const);
+    const previousLibraryDeletions = [...this.fileLibraryDeletions.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousIdempotency = [...this.taskIdempotency.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousAudits = this.auditEvents.map(clone);
     const documents = await Promise.all(runtimeWrites.map((write) =>
@@ -1558,6 +1673,8 @@ export class InMemoryProductStore implements ProductStore {
       for (const [id,value] of previousUsage) this.usage.set(id,value);
       this.fileLibraries.clear();
       for (const [id,value] of previousLibraries) this.fileLibraries.set(id,value);
+      this.fileLibraryDeletions.clear();
+      for (const [id,value] of previousLibraryDeletions) this.fileLibraryDeletions.set(id,value);
       this.taskIdempotency.clear();
       for (const [id,value] of previousIdempotency) this.taskIdempotency.set(id,value);
       this.auditEvents.splice(0,this.auditEvents.length,...previousAudits);
@@ -2134,6 +2251,27 @@ interface InMemoryTaskIdempotencyRecord {
   now: string;
   updatedAt: string;
   fileDeletion?: FileDeletionOperationState;
+}
+
+interface InMemoryFileLibraryDeletion {
+  operationId: string;
+  state: FileDeletionOperationState | null;
+  claimToken: string | null;
+  claimExpiresAt: string | null;
+}
+
+function fileLibraryDeletionOperationId(libraryId:string):string{
+  return `file-library-delete:${libraryId}`;
+}
+
+function fileLibraryDeletionClaimMatches(
+  operation:InMemoryFileLibraryDeletion|undefined,
+  owner:FileLibraryDeletionOperationOwner
+):operation is InMemoryFileLibraryDeletion{
+  return Boolean(operation&&
+    operation.operationId===owner.operationId&&
+    operation.claimToken===owner.claimToken
+  );
 }
 
 function taskIdempotencyRecordOwnsFileDeletion(

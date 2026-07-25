@@ -685,7 +685,13 @@ export interface ProductStore {
   findFileLibrary(id: string): Promise<FileLibrary | null>;
   listFileLibrariesForProject(projectId: string): Promise<FileLibrary[]>;
   renameFileLibrary(projectId: string, id: string, name: string, expectedUpdatedAt: string, updatedAt: string): Promise<FileLibrary | null>;
-  deleteFileLibraryIfUnbound(projectId: string, id: string): Promise<"deleted" | "bound" | "not_found">;
+  beginFileLibraryDeletion(input: BeginFileLibraryDeletionInput): Promise<BeginFileLibraryDeletionResult>;
+  claimFileLibraryDeletionOperation(input: ClaimFileLibraryDeletionOperationInput): Promise<ClaimFileLibraryDeletionOperationResult>;
+  findFileLibraryDeletionOperation(owner: FileLibraryDeletionOperationOwner): Promise<FileDeletionOperationState | null>;
+  persistFileLibraryDeletionOperation(owner: FileLibraryDeletionOperationOwner, state: FileDeletionOperationState, now: string): Promise<boolean>;
+  renewFileLibraryDeletionOperation(owner: FileLibraryDeletionOperationOwner, leaseMs: number): Promise<boolean>;
+  releaseFileLibraryDeletionOperation(owner: FileLibraryDeletionOperationOwner): Promise<boolean>;
+  finalizeFileLibraryDeletion(input: FinalizeFileLibraryDeletionInput): Promise<"finalized" | "conflict">;
   findTaskBoundToFileLibrary(fileLibraryId: string): Promise<FileLibraryBindingLookup>;
   createProjectContextEntry(value: ProjectContextEntry): Promise<ProjectContextEntry | null>;
   updateProjectContextEntry(value: ProjectContextEntry, expectedVersion: number): Promise<ProjectContextEntry | null>;
@@ -867,6 +873,7 @@ export type AtomicTaskCreateResult=
   | {kind:"project_unavailable"}
   | {kind:"library_name_conflict"}
   | {kind:"library_not_found"}
+  | {kind:"library_deleting"}
   | {kind:"already_bound"}
   | SandboxCapacityRejected
   | AtomicAdmissionIdempotencyResult;
@@ -1118,6 +1125,46 @@ export interface TaskIdempotencyResourceLookupInput {
   key: string;
   requestHash: string;
   resourceId: string;
+}
+
+export interface BeginFileLibraryDeletionInput {
+  libraryId: string;
+  idempotency: BeginTaskIdempotencyInput & {
+    operation: "project.file-library.delete";
+  };
+}
+
+export type BeginFileLibraryDeletionResult =
+  | { kind: "claimed"; library: FileLibrary; operationId: string; receiptClaimToken: string }
+  | { kind: "bound"; task: FileLibraryTaskLink; receiptClaimToken: string }
+  | { kind: "not_found"; receiptClaimToken: string }
+  | { kind: "in_progress"; resourceId: string }
+  | { kind: "replay"; resourceId: string; responseStatus: number; responseBody: unknown }
+  | { kind: "hash_mismatch" };
+
+export interface FileLibraryDeletionOperationOwner {
+  projectId: string;
+  libraryId: string;
+  operationId: string;
+  claimToken: string;
+}
+
+export interface ClaimFileLibraryDeletionOperationInput extends FileLibraryDeletionOperationOwner {
+  now: string;
+  leaseMs: number;
+}
+
+export type ClaimFileLibraryDeletionOperationResult =
+  | { kind: "claimed"; state: FileDeletionOperationState | null }
+  | { kind: "in_progress" }
+  | { kind: "conflict" };
+
+export interface FinalizeFileLibraryDeletionInput extends FileLibraryDeletionOperationOwner {
+  actorId: string;
+  requestHash: string;
+  responseStatus: number;
+  responseBody: unknown;
+  updatedAt: string;
 }
 
 export type FileDeletionOperationOwner = ClaimedTaskIdempotencyOperation & {

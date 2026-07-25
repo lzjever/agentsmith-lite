@@ -173,6 +173,7 @@ async function sandboxSetup(secret: string) {
       projectId: task.projectId,
       name: "Sandbox alert",
       rootSubPath: run.fileLibraryRootSubPath,
+      lifecycleStatus:"active" as const,
       createdByUserId: setup.userId,
       createdAt: timestamp,
       updatedAt: timestamp

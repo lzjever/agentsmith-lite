@@ -41,7 +41,7 @@ describe("sandbox Run store", () => {
       idempotency,
       rejectionPresentation:null,
       rejectedAuditEvent:{id:"audit_task_create_replay_candidate",projectId:candidateRun.projectId,actorId:candidateRun.startedByUserId,action:"task.create" as const,status:"rejected" as const,resourceKind:"task" as const,resourceId:candidateRun.taskId,detail:{taskId:candidateRun.taskId,trigger:"task_create" as const},createdAt:now},
-      newFileLibrary:{id:candidateRun.fileLibraryId,workspaceId:candidateRun.workspaceId,projectId:candidateRun.projectId,name:"Replay",rootSubPath:candidateRun.fileLibraryRootSubPath,createdByUserId:candidateRun.startedByUserId,createdAt:now,updatedAt:now},
+      newFileLibrary:{id:candidateRun.fileLibraryId,workspaceId:candidateRun.workspaceId,projectId:candidateRun.projectId,name:"Replay",rootSubPath:candidateRun.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:candidateRun.startedByUserId,createdAt:now,updatedAt:now},
       sandboxRun:candidateRun
     };
     const first=await store.createTaskAtomically(input);
@@ -143,7 +143,7 @@ describe("sandbox Run store", () => {
       idempotency:admissionIdempotency(run,"create-confirm"),
       rejectionPresentation:null,
       rejectedAuditEvent:rejectedAdmissionAudit(run,"task_create","create-confirm"),
-      newFileLibrary:{id:"library_1",workspaceId:"workspace_1",projectId:"project_1",name:"Library",rootSubPath:"libraries/library_1/home",createdByUserId:"user_1",createdAt:timestamp,updatedAt:timestamp},
+      newFileLibrary:{id:"library_1",workspaceId:"workspace_1",projectId:"project_1",name:"Library",rootSubPath:"libraries/library_1/home",lifecycleStatus:"active" as const,createdByUserId:"user_1",createdAt:timestamp,updatedAt:timestamp},
       sandboxRun:run,
       initialMessage,
       initialInteractionChange:{
@@ -388,7 +388,7 @@ describe("sandbox Run store", () => {
     assert.equal((await firstStore.createTaskAtomically({
       task:capacityTask,
       reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},
-      newFileLibrary:{id:"library_capacity",workspaceId:capacityTask.workspaceId,projectId:capacityTask.projectId,name:"Capacity",rootSubPath:"libraries/library_capacity/home",createdByUserId:capacityTask.createdByUserId!,createdAt:capacityTask.createdAt,updatedAt:capacityTask.updatedAt}
+      newFileLibrary:{id:"library_capacity",workspaceId:capacityTask.workspaceId,projectId:capacityTask.projectId,name:"Capacity",rootSubPath:"libraries/library_capacity/home",lifecycleStatus:"active" as const,createdByUserId:capacityTask.createdByUserId!,createdAt:capacityTask.createdAt,updatedAt:capacityTask.updatedAt}
     })).kind,"created");
     const capacityRun={...firstRun,taskId:capacityTask.id,runId:"run_capacity",fileLibraryId:"library_capacity",fileLibraryRootSubPath:"libraries/library_capacity/home"};
     assert.equal((await firstStore.restartTaskSandboxAtomically({
@@ -750,7 +750,7 @@ async function createTaskWithRun(store:ReturnType<typeof createLocalInMemoryProd
       rejectionPresentation:null,
       rejectedAuditEvent:rejectedAdmissionAudit(run,"task_create",`fixture-${run.runId}`)
     }:{}),
-    newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
+    newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
     sandboxRun:run
   });
   assert.equal(created.kind,"created");
@@ -764,7 +764,7 @@ async function createTaskWithoutRun(store:ReturnType<typeof createLocalInMemoryP
   await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
   await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,sandboxLimit:1,createdAt:timestamp,updatedAt:timestamp});
   const task={id:run.taskId,workspaceId:run.workspaceId,projectId:run.projectId,endpointId:"endpoint_1",fileLibraryId:run.fileLibraryId,createdByUserId:run.startedByUserId,title:"Task",prompt:"Work",agentContext:"",currentRunId:null,archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
-  const created=await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp}});
+  const created=await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp}});
   assert.equal(created.kind,"created");
   return task;
 }
@@ -830,7 +830,7 @@ async function createScopedTask(
       rejectionPresentation:null,
       rejectedAuditEvent:rejectedAdmissionAudit(run,"task_create",`scoped-${run.runId}`)
     }:{}),
-    newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:run.fileLibraryId,rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
+    newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:run.fileLibraryId,rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp},
     ...(includeRun?{sandboxRun:run}:{})
   });
   assert.equal(created.kind,"created");
@@ -865,7 +865,7 @@ async function attemptAdmission(
       idempotency:admissionIdempotency(run,`attempt-${run.runId}`),
       rejectionPresentation:null,
       rejectedAuditEvent:rejectedAdmissionAudit(run,"task_create",`attempt-${run.runId}`),
-      newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:run.fileLibraryId,rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:run.createdAt,updatedAt:run.updatedAt},
+      newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:run.fileLibraryId,rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:run.startedByUserId,createdAt:run.createdAt,updatedAt:run.updatedAt},
       sandboxRun:run
     });
   }

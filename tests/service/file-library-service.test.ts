@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  rmdir,
+  symlink,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { DescriptorFileTreeWalker } from "../../packages/application/src/descriptorFileTreeWalker.js";
@@ -11,15 +24,15 @@ import { FilePathValidationService } from "../../packages/application/src/filePa
 import { FileService } from "../../packages/application/src/fileService.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from "../../packages/ports/src/botified.js";
-import type { ProductStore } from "../../packages/ports/src/store.js";
 
 const roots: string[] = [];
+const execFileAsync=promisify(execFile);
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("file library service", () => {
-  it("authorizes CRUD and rejects bound or non-empty deletion", async () => {
+  it("authorizes CRUD and recursively deletes an unbound non-empty Library", async () => {
     const { services, ownerId, viewerId, projectId } = await fixture();
 
     await assert.rejects(() => services.fileLibraries.create(viewerId, projectId, { name: "Viewer library" }), /Project access denied/);
@@ -31,21 +44,278 @@ describe("file library service", () => {
     assert.equal(renamed.name, "Renamed");
     assert.equal(renamed.rootSubPath, created.rootSubPath);
     await assert.rejects(() => services.fileLibraries.rename(viewerId, projectId, renamed.id, { name: "Denied", expectedUpdatedAt: renamed.updatedAt }), /Project access denied/);
-    await assert.rejects(() => services.fileLibraries.remove(viewerId, projectId, renamed.id), /Project access denied/);
+    await assert.rejects(() => services.fileLibraries.remove(viewerId, projectId, renamed.id, "viewer-delete", async () => undefined), /Project access denied/);
 
     const projectRoot = services.projectAbsoluteRoot((await services.authorization.requireProject(ownerId, projectId)).rootPath);
     await services.files.uploadLibraryFile(projectRoot, renamed.rootSubPath, { path: "notes/today.txt", bytes: Buffer.from("hello") });
-    await assert.rejects(() => services.fileLibraries.remove(ownerId, projectId, renamed.id), /File Library is not empty/);
-    await services.files.deleteLibraryFile(projectRoot, renamed.rootSubPath, "notes/today.txt");
-    await rmdir(path.join(projectRoot,renamed.rootSubPath,"notes"));
+    await services.files.uploadLibraryFile(projectRoot, renamed.rootSubPath, { path: "notes/nested/tomorrow.txt", bytes: Buffer.from("later") });
+    let measured = -1;
+    assert.deepEqual(
+      await services.fileLibraries.remove(ownerId, projectId, renamed.id, "recursive-delete", async (bytes) => { measured = bytes; }),
+      { deleted: true }
+    );
+    assert.equal(measured, 0);
+    assert.equal(await services.store.findFileLibrary(renamed.id), null);
+    await assert.rejects(() => readdir(path.join(projectRoot, renamed.rootSubPath)), { code: "ENOENT" });
+    const audits = (await services.store.queryProjectAuditEvents(projectId, { limit: 100 })).items
+      .filter((event) => event.action === "file_library.delete" && event.resourceId === renamed.id);
+    assert.equal(audits.length, 1);
+    assert.deepEqual(audits[0]?.detail, { bytes: 10 });
+  });
 
-    const store = services.store;
-    (store as ProductStore).findTaskBoundToFileLibrary = async () => ({ kind: "bound", task: { id: "task_one", title: "Bound task" } });
-    (store as ProductStore).deleteFileLibraryIfUnbound = async () => "bound";
-    const boundProjection = (await services.fileLibraries.list(ownerId, projectId))[0]!;
-    assert.equal(boundProjection.boundTask?.id, "task_one");
-    assert.equal(boundProjection.capabilities.canDelete, false);
-    await assert.rejects(() => services.fileLibraries.remove(ownerId, projectId, renamed.id), /File Library is bound to a Task/);
+  it("keeps a failed deletion visible and resumes it under a new request key", async () => {
+    const { services, ownerId, projectId } = await fixture();
+    const library = await services.fileLibraries.create(ownerId, projectId, { name: "Retry delete" });
+    const projectRoot = services.projectAbsoluteRoot((await services.authorization.requireProject(ownerId, projectId)).rootPath);
+    await services.files.uploadLibraryFile(projectRoot, library.rootSubPath, {
+      path: "nested/value.txt",
+      bytes: Buffer.from("value")
+    });
+
+    await assert.rejects(
+      () => services.fileLibraries.remove(ownerId, projectId, library.id, "failed-delete", async () => {
+        throw new Error("accounting unavailable");
+      }),
+      (error: unknown) => error instanceof ProductError &&
+        error.code === "file_library_deleting" &&
+        error.message === "File Library deletion is in progress"
+    );
+    const listed = (await services.fileLibraries.list(ownerId, projectId)).find((item) => item.id === library.id);
+    assert.equal(listed?.lifecycleStatus, "deleting");
+    assert.equal(listed?.capabilities.canRename, false);
+    assert.equal(listed?.capabilities.canWriteFiles, false);
+    await assert.rejects(
+      () => services.fileLibraries.require(ownerId, projectId, library.id),
+      (error: unknown) => error instanceof ProductError && error.code === "file_library_deleting"
+    );
+    await assert.rejects(
+      () => services.fileLibraries.rename(ownerId,projectId,library.id,{name:"No rename",expectedUpdatedAt:library.updatedAt}),
+      (error:unknown)=>error instanceof ProductError&&error.code==="file_library_deleting"
+    );
+    await assert.rejects(
+      () => services.fileLibraries.withLibraryMutation(ownerId,projectId,library.id,async()=>undefined),
+      (error:unknown)=>error instanceof ProductError&&error.code==="file_library_deleting"
+    );
+    await assert.rejects(
+      () => services.fileLibraries.deleteEntry(ownerId,projectId,library.id,"nested","deleting-entry",async()=>undefined),
+      (error:unknown)=>error instanceof ProductError&&error.code==="file_library_deleting"
+    );
+    await assert.rejects(()=>readdir(path.join(projectRoot,library.rootSubPath)),{code:"ENOENT"});
+
+    assert.deepEqual(
+      await services.fileLibraries.remove(ownerId, projectId, library.id, "retry-delete", async () => undefined),
+      { deleted: true }
+    );
+    assert.deepEqual(
+      await services.fileLibraries.remove(ownerId, projectId, library.id, "response-lost-delete", async () => undefined),
+      { deleted: true }
+    );
+  });
+
+  it("rejects a statically observed non-directory Library root without following it",async()=>{
+    const {services,ownerId,projectId}=await fixture();
+    const library=await services.fileLibraries.create(ownerId,projectId,{name:"Symlink root"});
+    const regular=await services.fileLibraries.create(ownerId,projectId,{name:"Regular root"});
+    const projectRoot=services.projectAbsoluteRoot((await services.authorization.requireProject(ownerId,projectId)).rootPath);
+    const outside=await mkdtemp(path.join(tmpdir(),"asl-library-delete-outside-"));
+    roots.push(outside);
+    await writeFile(path.join(outside,"retained.txt"),"retained");
+    await rmdir(path.join(projectRoot,library.rootSubPath));
+    await symlink(outside,path.join(projectRoot,library.rootSubPath));
+    await rmdir(path.join(projectRoot,regular.rootSubPath));
+    await writeFile(path.join(projectRoot,regular.rootSubPath),"not a directory");
+
+    for(const target of [library,regular]){
+      await assert.rejects(
+        ()=>services.fileLibraries.remove(ownerId,projectId,target.id,`static-root-${target.id}`,async()=>undefined),
+        (error:unknown)=>error instanceof ProductError&&
+          error.statusCode===409&&
+          error.code==="file_library_deleting"&&
+          error.message==="File Library deletion is in progress"
+      );
+      assert.equal((await services.store.findFileLibrary(target.id))?.lifecycleStatus,"deleting");
+    }
+    assert.equal(await readFile(path.join(outside,"retained.txt"),"utf8"),"retained");
+    await assert.rejects(()=>readdir(path.join(projectRoot,".deletions")),{code:"ENOENT"});
+  });
+
+  it("renews one serialized heartbeat during a slow accounting call",async()=>{
+    const {services,store,ownerId,projectId}=await fixture();
+    let renewals=0;
+    let activeRenewals=0;
+    let maxActiveRenewals=0;
+    const renew=store.renewFileLibraryDeletionOperation.bind(store);
+    store.renewFileLibraryDeletionOperation=async(owner,leaseMs)=>{
+      renewals+=1;
+      activeRenewals+=1;
+      maxActiveRenewals=Math.max(maxActiveRenewals,activeRenewals);
+      try{
+        await new Promise<void>((resolve)=>setTimeout(resolve,4));
+        return await renew(owner,leaseMs);
+      }finally{
+        activeRenewals-=1;
+      }
+    };
+    const libraries=new FileLibraryService(
+      store,
+      services.authorization,
+      services.files,
+      services.projectAbsoluteRoot,
+      {leaseMs:200,intervalMs:10}
+    );
+    const library=await libraries.create(ownerId,projectId,{name:"Heartbeat"});
+    const beforeAccounting=renewals;
+
+    assert.deepEqual(
+      await libraries.remove(ownerId,projectId,library.id,"heartbeat-delete",async()=>{
+        await new Promise<void>((resolve)=>setTimeout(resolve,55));
+        assert.ok(renewals>beforeAccounting);
+      }),
+      {deleted:true}
+    );
+    assert.ok(renewals>=3);
+    assert.equal(maxActiveRenewals,1);
+    assert.equal(activeRenewals,0);
+    const stoppedAt=renewals;
+    await new Promise<void>((resolve)=>setTimeout(resolve,25));
+    assert.equal(renewals,stoppedAt);
+  });
+
+  it("maps heartbeat claim loss to deleting and resumes with a new key",async()=>{
+    const {services,store,dataRoot,ownerId,projectId}=await fixture();
+    const project=await services.authorization.requireProject(ownerId,projectId);
+    const projectRoot=services.projectAbsoluteRoot(project.rootPath);
+    const files=new FileService(
+      new FilePathValidationService(dataRoot),
+      new DescriptorFileTreeWalker(),
+      {async beforeRename(event){
+        if(event.kind==="library")await new Promise<void>((resolve)=>setTimeout(resolve,25));
+      }}
+    );
+    const libraries=new FileLibraryService(
+      store,
+      services.authorization,
+      files,
+      services.projectAbsoluteRoot,
+      {leaseMs:100,intervalMs:5}
+    );
+    const library=await libraries.create(ownerId,projectId,{name:"Lost claim"});
+    await files.uploadLibraryFile(projectRoot,library.rootSubPath,{
+      path:"retained.txt",
+      bytes:Buffer.from("retained")
+    });
+    const renew=store.renewFileLibraryDeletionOperation.bind(store);
+    store.renewFileLibraryDeletionOperation=async()=>false;
+
+    await assert.rejects(
+      ()=>libraries.remove(ownerId,projectId,library.id,"lost-claim",async()=>undefined),
+      (error:unknown)=>error instanceof ProductError&&
+        error.statusCode===409&&
+        error.code==="file_library_deleting"&&
+        error.message==="File Library deletion is in progress"
+    );
+    assert.equal(await readFile(path.join(projectRoot,library.rootSubPath,"retained.txt"),"utf8"),"retained");
+    assert.equal((await store.findFileLibrary(library.id))?.lifecycleStatus,"deleting");
+
+    store.renewFileLibraryDeletionOperation=renew;
+    assert.deepEqual(
+      await libraries.remove(ownerId,projectId,library.id,"lost-claim-retry",async()=>undefined),
+      {deleted:true}
+    );
+  });
+
+  it("uses one Project-root descriptor when the pathname is replaced before quarantine rename",async()=>{
+    const {services,store,dataRoot,ownerId,projectId}=await fixture();
+    const project=await services.authorization.requireProject(ownerId,projectId);
+    const projectRoot=services.projectAbsoluteRoot(project.rootPath);
+    const displacedRoot=`${projectRoot}.displaced`;
+    let replaced=false;
+    const files=new FileService(
+      new FilePathValidationService(dataRoot),
+      new DescriptorFileTreeWalker(),
+      {
+        async beforeRename(event){
+          if(event.kind!=="library"||replaced)return;
+          replaced=true;
+          await rename(projectRoot,displacedRoot);
+          await mkdir(projectRoot,{recursive:true});
+          await writeFile(path.join(projectRoot,"replacement.txt"),"replacement");
+        }
+      }
+    );
+    const libraries=new FileLibraryService(store,services.authorization,files,services.projectAbsoluteRoot);
+    const library=await libraries.create(ownerId,projectId,{name:"Root replacement"});
+    await files.uploadLibraryFile(projectRoot,library.rootSubPath,{
+      path:"nested/value.txt",
+      bytes:Buffer.from("value")
+    });
+
+    assert.deepEqual(
+      await libraries.remove(ownerId,projectId,library.id,"root-replacement-delete",async()=>undefined),
+      {deleted:true}
+    );
+    assert.equal(replaced,true);
+    assert.equal(await readFile(path.join(projectRoot,"replacement.txt"),"utf8"),"replacement");
+    await assert.rejects(()=>readdir(path.join(displacedRoot,library.rootSubPath)),{code:"ENOENT"});
+  });
+
+  it("persists and removes rename-time Library symlink and unsupported substitutions",async()=>{
+    for(const entryType of ["symlink","unsupported"] as const){
+      const {services,store,dataRoot,ownerId,projectId}=await fixture();
+      const outside=await mkdtemp(path.join(tmpdir(),`asl-library-${entryType}-outside-`));
+      roots.push(outside);
+      const project=await services.authorization.requireProject(ownerId,projectId);
+      const projectRoot=services.projectAbsoluteRoot(project.rootPath);
+      let source="";
+      let substituted=false;
+      const files=new FileService(
+        new FilePathValidationService(dataRoot),
+        new DescriptorFileTreeWalker(),
+        {
+          async beforeRename(event){
+            if(event.kind!=="library"||substituted)return;
+            substituted=true;
+            await rm(source,{recursive:true});
+            if(entryType==="symlink")await symlink(path.join(outside,"retained.txt"),source);
+            else await execFileAsync("mkfifo",[source]);
+          }
+        }
+      );
+      const libraries=new FileLibraryService(store,services.authorization,files,services.projectAbsoluteRoot);
+      const library=await libraries.create(ownerId,projectId,{name:`Substituted ${entryType}`});
+      source=path.join(projectRoot,library.rootSubPath);
+      await files.uploadLibraryFile(projectRoot,library.rootSubPath,{
+        path:"original.txt",
+        bytes:Buffer.from("original")
+      });
+      await writeFile(path.join(outside,"retained.txt"),"retained");
+
+      assert.deepEqual(
+        await libraries.remove(ownerId,projectId,library.id,`substituted-${entryType}`,async()=>undefined),
+        {deleted:true}
+      );
+      assert.equal(substituted,true);
+      assert.equal(await readFile(path.join(outside,"retained.txt"),"utf8"),"retained");
+      const audits=(await store.queryProjectAuditEvents(projectId,{limit:100})).items
+        .filter((event)=>event.action==="file_library.delete"&&event.resourceId===library.id);
+      assert.deepEqual(audits.map((event)=>event.detail),[{bytes:0}]);
+    }
+  });
+
+  it("does not let a completed request key delete another Library",async()=>{
+    const {services,ownerId,projectId}=await fixture();
+    const first=await services.fileLibraries.create(ownerId,projectId,{name:"First key target"});
+    const second=await services.fileLibraries.create(ownerId,projectId,{name:"Second key target"});
+    const projectRoot=services.projectAbsoluteRoot((await services.authorization.requireProject(ownerId,projectId)).rootPath);
+    await services.files.uploadLibraryFile(projectRoot,second.rootSubPath,{path:"retained.txt",bytes:Buffer.from("retained")});
+
+    assert.deepEqual(await services.fileLibraries.remove(ownerId,projectId,first.id,"one-resource-key",async()=>undefined),{deleted:true});
+    await assert.rejects(
+      ()=>services.fileLibraries.remove(ownerId,projectId,second.id,"one-resource-key",async()=>undefined),
+      /different request/
+    );
+    assert.equal((await services.store.findFileLibrary(second.id))?.lifecycleStatus,"active");
+    assert.equal(await readFile(path.join(projectRoot,second.rootSubPath,"retained.txt"),"utf8"),"retained");
   });
 
   it("allocates and reuses the idempotency resource ID for create", async () => {
@@ -95,12 +365,12 @@ describe("file library service", () => {
     });
     await mutationEntered;
     let deletionSettled = false;
-    const deletion = services.fileLibraries.remove(ownerId, projectId, library.id).finally(() => { deletionSettled = true; });
+    const deletion = services.fileLibraries.remove(ownerId, projectId, library.id, "serialized-delete", async () => undefined).finally(() => { deletionSettled = true; });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(deletionSettled, false);
     release();
     await mutation;
-    await assert.rejects(deletion, /File Library is not empty/);
+    assert.deepEqual(await deletion, { deleted: true });
   });
 
   it("holds the lifecycle lock before an expired same-key delete can reclaim its lease", async () => {

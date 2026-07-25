@@ -122,7 +122,7 @@ describe("endpoint deletion", () => {
       assert.deepEqual(await services.tasks.deleteTask(userId,created.task.id,"delete-retry"),{deleted:true,taskId:created.task.id});
       assert.equal(await store.findTask(created.task.id),null);
       assert.equal(((await store.queryProjectAuditEvents(projectId,{limit:100})).items).filter((event)=>event.action==="task.delete"&&event.resourceId===created.task.id).length,1);
-      assert.equal(await store.deleteFileLibraryIfUnbound(projectId,library.id),"deleted");
+      assert.equal((await store.findFileLibrary(library.id))?.lifecycleStatus,"active");
       assert.equal(await store.deleteEndpoint(endpoint.id),"deleted");
     }finally{
       await rm(dataRoot,{recursive:true,force:true});

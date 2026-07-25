@@ -1394,11 +1394,11 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   }
 
   function projectLibrary(task:PersistedAgentTask,name:string){
-    return{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name,rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};
+    return{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name,rootSubPath:`libraries/${task.fileLibraryId}/home`,lifecycleStatus:"active" as const,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};
   }
 
   function taskRecord(id:string,fileLibraryId:string,currentRunId:string):PersistedAgentTask{return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",endpointId:"endpoint_atomic",fileLibraryId,createdByUserId:"user_atomic",title:"Task",prompt:"Work",agentContext:"",currentRunId,archivedAt:null,deletedAt:null,createdAt:at,updatedAt:at};}
-  function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
+  function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,lifecycleStatus:"active" as const,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function alertRule(id:string,projectId:string):ProjectAlertRule{return{id,projectId,name:id,alertType:"sandbox_failure",metric:"failure_count",condition:"greater_than_or_equal",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:false,createdAt:at,updatedAt:at};}

@@ -117,6 +117,7 @@ export interface FileLibrary {
   projectId: string;
   name: string;
   rootSubPath: string;
+  lifecycleStatus: "active" | "deleting";
   createdByUserId: string;
   createdAt: ISODateString;
   updatedAt: ISODateString;
@@ -306,7 +307,7 @@ export function projectAlertTypeLabel(type: ProjectAlertType, endpointScoped = f
 }
 export type ProjectAlertStatus = "active" | "resolved" | "dismissed";
 export type ProjectAlertDeliveryStatus = "not_configured" | "pending" | "delivered" | "failed";
-export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","artifact.project","sandbox.started","sandbox.failed","sandbox.released","file.upload","file.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
+export const PROJECT_AUDIT_ACTIONS = ["project.settings.update","project.archive","project.unarchive","project.owner.transfer","project.delete","policy.update","credential.create","credential.rotate","credential.delete","endpoint.create","endpoint.update","endpoint.delete","endpoint.health_check","endpoint.model_discover","membership.add","membership.change","membership.remove","provider.request","task.create","task.edit","task.archive","task.delete","task.message.create","task.message.edit","task.message.delete","artifact.project","sandbox.started","sandbox.failed","sandbox.released","file.upload","file.delete","file_library.delete","file.quota","alert.resolve","alert.dismiss","alert.rule.create","alert.rule.update","alert.rule.delete","alert.acknowledge","alert.silence"] as const;
 export type ProjectAuditAction = typeof PROJECT_AUDIT_ACTIONS[number];
 export const PROJECT_AUDIT_RESOURCE_KINDS = ["project","credential","endpoint","member","task","artifact","provider","file","file_quota","sandbox","alert"] as const;
 export type ProjectAuditResourceKind = typeof PROJECT_AUDIT_RESOURCE_KINDS[number];

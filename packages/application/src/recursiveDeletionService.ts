@@ -14,13 +14,16 @@ import {
   type FileDeletionOperationEntryType,
   type FileDeletionOperationOwner,
   type FileDeletionOperationState,
+  type FileLibraryDeletionOperationOwner,
   type ProductStore
 } from "../../ports/src/store.js";
 import { ProductError } from "../../domain/src/errors.js";
+import { nowIso } from "../../domain/src/ids.js";
 import {
   DescriptorFileTreeWalker,
   descriptorEntryType,
   descriptorPath,
+  type DescriptorTreeCheckpoint,
   validateDescriptorName
 } from "./descriptorFileTreeWalker.js";
 import { FilePathValidationService } from "./filePathValidationService.js";
@@ -34,6 +37,10 @@ export type FileDeletionOperationStore = Pick<
   ProductStore,
   "findFileDeletionOperation" | "persistFileDeletionOperation"
 >;
+export type FileLibraryDeletionOperationStore = Pick<
+  ProductStore,
+  "findFileLibraryDeletionOperation" | "persistFileLibraryDeletionOperation"
+>;
 
 export interface EntryDeletionTarget {
   owner: FileDeletionOperationOwner;
@@ -42,26 +49,45 @@ export interface EntryDeletionTarget {
   relativePath: string;
 }
 
+export interface LibraryDeletionTarget {
+  owner: FileLibraryDeletionOperationOwner;
+  projectRoot: string;
+  libraryId: string;
+  libraryRoot: string;
+}
+
 export interface IsolatedEntryDeletion {
   operationId: string;
   entryType: FileDeletionOperationEntryType;
   bytes: number;
 }
 
-interface NormalizedDeletionTarget extends EntryDeletionTarget {
+interface NormalizedDeletionTarget {
+  kind: "entry" | "library";
+  owner: FileDeletionOperationOwner | FileLibraryDeletionOperationOwner;
+  projectRoot: string;
   libraryRoot: string;
   relativePath: string;
+  operationId: string;
+  sourceParentSegments: string[];
+  sourceName: string;
 }
 
 interface OpenQuarantine {
-  project: FileHandle;
   deletions: FileHandle;
   operation: FileHandle;
   marker: "exact" | "repairable" | "removed_without_marker";
 }
 
+interface DeletionOperationAccess {
+  find(): Promise<FileDeletionOperationState | null>;
+  persist(state: FileDeletionOperationState): Promise<boolean>;
+  checkpoint?: DescriptorTreeCheckpoint;
+}
+
 export interface RecursiveDeletionObserver {
   beforeRename?(event: {
+    kind: "entry" | "library";
     projectId: string;
     operationId: string;
     relativePath: string;
@@ -79,16 +105,67 @@ export class RecursiveDeletionService {
     target: EntryDeletionTarget,
     operations: FileDeletionOperationStore
   ): Promise<IsolatedEntryDeletion> {
-    const normalized = this.normalizeTarget(target);
-    const existing = await operations.findFileDeletionOperation(normalized.owner);
-    if (existing) return completedIsolation(normalized.owner, existing);
+    const normalized = this.normalizeEntryTarget(target);
+    return this.isolate(normalized,{
+      find:()=>operations.findFileDeletionOperation(target.owner),
+      persist:(state)=>operations.persistFileDeletionOperation(target.owner,state)
+    });
+  }
+
+  async isolateLibrary(
+    target: LibraryDeletionTarget,
+    operations: FileLibraryDeletionOperationStore,
+    checkpoint?: DescriptorTreeCheckpoint
+  ): Promise<IsolatedEntryDeletion> {
+    const normalized = this.normalizeLibraryTarget(target);
+    return this.isolate(normalized, {
+      find: () => operations.findFileLibraryDeletionOperation(target.owner),
+      persist: (state) => operations.persistFileLibraryDeletionOperation(target.owner, state, nowIso()),
+      ...(checkpoint ? { checkpoint } : {})
+    });
+  }
+
+  async deleteLibrary(
+    target:LibraryDeletionTarget,
+    operations:FileLibraryDeletionOperationStore,
+    checkpoint:DescriptorTreeCheckpoint,
+    afterIsolation:(isolated:IsolatedEntryDeletion,project:FileHandle)=>Promise<void>
+  ):Promise<IsolatedEntryDeletion>{
+    const normalized=this.normalizeLibraryTarget(target);
+    const access:DeletionOperationAccess={
+      find:()=>operations.findFileLibraryDeletionOperation(target.owner),
+      persist:(state)=>operations.persistFileLibraryDeletionOperation(target.owner,state,nowIso()),
+      checkpoint
+    };
+    const project=await this.paths.openProjectRoot(normalized.projectRoot,false);
+    try{
+      const isolated=await this.isolate(normalized,access,project);
+      await afterIsolation(isolated,project);
+      await this.removeIsolated(normalized,access,project);
+      return isolated;
+    }finally{
+      await project.close();
+    }
+  }
+
+  private async isolate(
+    normalized:NormalizedDeletionTarget,
+    operations:DeletionOperationAccess,
+    projectDescriptor?:FileHandle
+  ):Promise<IsolatedEntryDeletion>{
+    const existing = await operations.find();
+    if (existing) return completedIsolation(normalized.operationId, existing);
 
     let linearized = false;
+    let project: FileHandle | null = projectDescriptor??null;
+    const ownsProject=!projectDescriptor;
     let sourceParent: FileHandle | null = null;
     let sourceHandle: FileHandle | null = null;
     let quarantine: OpenQuarantine | null = null;
     try {
-      quarantine = await this.openQuarantine(normalized, false);
+      await operations.checkpoint?.();
+      project ??= await this.paths.openProjectRoot(normalized.projectRoot, false);
+      quarantine = await this.openQuarantine(project, normalized, false);
       if (quarantine?.marker === "exact" && await this.tree.optionalStat(quarantine.operation, QUARANTINE_ENTRY)) {
         linearized = true;
         return await this.persistQuarantinedState(normalized, operations, quarantine.operation);
@@ -96,13 +173,15 @@ export class RecursiveDeletionService {
       await closeQuarantine(quarantine);
       quarantine = null;
 
-      const segments = normalized.relativePath.split("/");
-      const entryName = segments.pop()!;
-      sourceParent = await this.openSourceParent(normalized.projectRoot, normalized.libraryRoot, segments);
-      sourceHandle = await this.tree.openEntry(sourceParent, entryName);
-      observedStaticEntryType(await sourceHandle.stat({ bigint: true }));
+      sourceParent = await this.openSourceParent(project, normalized.sourceParentSegments);
+      sourceHandle = await this.tree.openEntry(sourceParent, normalized.sourceName);
+      const sourceStat=await sourceHandle.stat({bigint:true});
+      if(normalized.kind==="entry")observedStaticEntryType(sourceStat);
+      else if(sourceStat.isSymbolicLink()||!sourceStat.isDirectory()){
+        throw new ProductError("File Library root is not a directory",409);
+      }
 
-      quarantine = await this.openQuarantine(normalized, true);
+      quarantine = await this.openQuarantine(project, normalized, true);
       if (!quarantine) throw new ProductError("File deletion quarantine is unavailable", 500);
       if (await this.tree.optionalStat(quarantine.operation, QUARANTINE_ENTRY)) {
         linearized = true;
@@ -116,13 +195,16 @@ export class RecursiveDeletionService {
       }
 
       try {
+        await operations.checkpoint?.();
         await this.observer?.beforeRename?.({
           projectId: normalized.owner.projectId,
-          operationId: normalized.owner.resourceId,
+          kind: normalized.kind,
+          operationId: normalized.operationId,
           relativePath: normalized.relativePath
         });
+        await operations.checkpoint?.();
         await rename(
-          descriptorPath(sourceParent, entryName),
+          descriptorPath(sourceParent, normalized.sourceName),
           descriptorPath(quarantine.operation, QUARANTINE_ENTRY)
         );
       } catch (error) {
@@ -136,8 +218,11 @@ export class RecursiveDeletionService {
       return await this.persistQuarantinedState(normalized, operations, quarantine.operation);
     } catch (error) {
       if (error instanceof MarkerValidationError && error.quarantinedEntryExists) linearized = true;
-      if (linearized) throw deletionIncomplete(error);
-      if (isNotFound(error)) throw filePathNotFound();
+      if (linearized) throw deletionIncomplete(error, normalized.kind);
+      if (isNotFound(error)){
+        if(normalized.kind==="library")throw deletionIncomplete(error, normalized.kind);
+        throw filePathNotFound();
+      }
       if (isSymlinkOrNotDirectory(error)) {
         throw new ProductError("File path uses a symlink or non-directory component", 409);
       }
@@ -146,6 +231,7 @@ export class RecursiveDeletionService {
       await sourceHandle?.close();
       await sourceParent?.close();
       await closeQuarantine(quarantine);
+      if(ownsProject)await project?.close();
     }
   }
 
@@ -153,13 +239,39 @@ export class RecursiveDeletionService {
     target: EntryDeletionTarget,
     operations: FileDeletionOperationStore
   ): Promise<void> {
-    const normalized = this.normalizeTarget(target);
-    const state = await operations.findFileDeletionOperation(normalized.owner);
+    return this.removeIsolated(this.normalizeEntryTarget(target),{
+      find:()=>operations.findFileDeletionOperation(target.owner),
+      persist:(state)=>operations.persistFileDeletionOperation(target.owner,state)
+    });
+  }
+
+  async removeIsolatedLibrary(
+    target: LibraryDeletionTarget,
+    operations: FileLibraryDeletionOperationStore,
+    checkpoint?: DescriptorTreeCheckpoint
+  ): Promise<void> {
+    return this.removeIsolated(this.normalizeLibraryTarget(target), {
+      find: () => operations.findFileLibraryDeletionOperation(target.owner),
+      persist: (state) => operations.persistFileLibraryDeletionOperation(target.owner, state, nowIso()),
+      ...(checkpoint ? { checkpoint } : {})
+    });
+  }
+
+  private async removeIsolated(
+    normalized:NormalizedDeletionTarget,
+    operations:DeletionOperationAccess,
+    projectDescriptor?:FileHandle
+  ):Promise<void>{
+    const state = await operations.find();
     if (!state) throw new ProductError("File deletion operation is not isolated", 409);
 
+    let project: FileHandle | null = projectDescriptor??null;
+    const ownsProject=!projectDescriptor;
     let quarantine: OpenQuarantine | null = null;
     try {
-      quarantine = await this.openQuarantine(normalized, false, state.phase === "removed");
+      await operations.checkpoint?.();
+      project ??= await this.paths.openProjectRoot(normalized.projectRoot, false);
+      quarantine = await this.openQuarantine(project, normalized, false, state.phase === "removed");
       if (state.phase === "isolated") {
         if (!quarantine) {
           throw deletionIncomplete(new Error("File deletion quarantine is missing"));
@@ -170,28 +282,37 @@ export class RecursiveDeletionService {
         const isolatedStat = await this.tree.optionalStat(quarantine.operation, QUARANTINE_ENTRY);
         if (isolatedStat) {
           assertQuarantineIdentity(state, isolatedStat);
-          await this.tree.removeEntry(quarantine.operation, QUARANTINE_ENTRY, isolatedStat);
+          await this.tree.removeEntry(
+            quarantine.operation,
+            QUARANTINE_ENTRY,
+            isolatedStat,
+            operations.checkpoint
+          );
           await quarantine.operation.sync();
         }
-        if (!await operations.persistFileDeletionOperation(normalized.owner, { ...state, phase: "removed" })) {
+        await operations.checkpoint?.();
+        if (!await operations.persist({ ...state, phase: "removed" })) {
           throw deletionIncomplete(new Error("File deletion operation lost its claim"));
         }
       }
 
       if (quarantine) {
+        await operations.checkpoint?.();
         await removeMarker(quarantine.operation);
         await quarantine.operation.sync();
       }
+      await closeQuarantine(quarantine);
+      quarantine = null;
+      await this.removeEmptyOperationDirectory(project, normalized);
     } catch (error) {
-      throw deletionIncomplete(error);
+      throw deletionIncomplete(error, normalized.kind);
     } finally {
       await closeQuarantine(quarantine);
+      if(ownsProject)await project?.close();
     }
-
-    await this.removeEmptyOperationDirectory(normalized);
   }
 
-  private normalizeTarget(target: EntryDeletionTarget): NormalizedDeletionTarget {
+  private normalizeEntryTarget(target: EntryDeletionTarget): NormalizedDeletionTarget {
     validateOperationId(target.owner.resourceId);
     if (target.owner.operation !== "project.file.delete") {
       throw new ProductError("File deletion operation identity is invalid", 500);
@@ -199,12 +320,42 @@ export class RecursiveDeletionService {
     const libraryRoot = this.paths.normalizeRelativeProjectPath(target.libraryRoot);
     const relativePath = this.paths.normalizeRelativeProjectPath(target.relativePath);
     this.paths.assertEntryDeleteAllowed(relativePath);
-    return { ...target, libraryRoot, relativePath };
+    const segments=relativePath.split("/");
+    const sourceName=segments.pop()!;
+    return {
+      ...target,
+      kind:"entry",
+      libraryRoot,
+      relativePath,
+      operationId:target.owner.resourceId,
+      sourceParentSegments:[...libraryRoot.split("/"),...segments],
+      sourceName
+    };
+  }
+
+  private normalizeLibraryTarget(target:LibraryDeletionTarget):NormalizedDeletionTarget{
+    validateOperationId(target.owner.operationId);
+    if(target.owner.operationId!==`file-library-delete:${target.libraryId}`){
+      throw new ProductError("File Library deletion operation identity is invalid",500);
+    }
+    const libraryRoot=this.paths.normalizeRelativeProjectPath(target.libraryRoot);
+    if(libraryRoot!==`libraries/${target.libraryId}/home`){
+      throw new ProductError("File Library root path is invalid",409);
+    }
+    return{
+      ...target,
+      kind:"library",
+      libraryRoot,
+      relativePath:libraryRoot,
+      operationId:target.owner.operationId,
+      sourceParentSegments:["libraries",target.libraryId],
+      sourceName:"home"
+    };
   }
 
   private async persistQuarantinedState(
     target: NormalizedDeletionTarget,
-    operations: FileDeletionOperationStore,
+    operations: DeletionOperationAccess,
     operationDirectory: FileHandle
   ): Promise<IsolatedEntryDeletion> {
     const stat = await this.tree.requiredStat(operationDirectory, QUARANTINE_ENTRY);
@@ -213,18 +364,27 @@ export class RecursiveDeletionService {
       quarantineDevice: stat.dev.toString(),
       quarantineInode: stat.ino.toString(),
       entryType: descriptorEntryType(stat),
-      bytes: await this.tree.measureEntry(operationDirectory, QUARANTINE_ENTRY, stat)
+      bytes: await this.tree.measureEntry(
+        operationDirectory,
+        QUARANTINE_ENTRY,
+        stat,
+        operations.checkpoint
+      )
     };
-    if (!await operations.persistFileDeletionOperation(target.owner, state)) {
+    await operations.checkpoint?.();
+    if (!await operations.persist(state)) {
       throw new ProductError("File deletion operation phase conflict", 409);
     }
-    return completedIsolation(target.owner, state);
+    return completedIsolation(target.operationId, state);
   }
 
-  private async openSourceParent(projectRoot: string, libraryRoot: string, parentSegments: string[]): Promise<FileHandle> {
-    let current = await this.paths.openProjectRoot(projectRoot, false);
+  private async openSourceParent(project: FileHandle, segments: string[]): Promise<FileHandle> {
+    let current = await open(
+      descriptorPath(project),
+      constants.O_RDONLY | constants.O_DIRECTORY
+    );
     try {
-      for (const segment of [...libraryRoot.split("/"), ...parentSegments]) {
+      for (const segment of segments) {
         const next = await this.tree.openDirectory(current, segment);
         await current.close();
         current = next;
@@ -237,48 +397,47 @@ export class RecursiveDeletionService {
   }
 
   private async openQuarantine(
+    project: FileHandle,
     target: NormalizedDeletionTarget,
     create: boolean,
     allowMissingMarker = false
   ): Promise<OpenQuarantine | null> {
-    const project = await this.paths.openProjectRoot(target.projectRoot, create);
     let deletions: FileHandle | null = null;
     let operation: FileHandle | null = null;
     try {
       deletions = await openOrCreateAnchoredDirectory(this.tree, project, QUARANTINE_ROOT, create);
       if (!deletions) return null;
-      operation = await openOrCreateAnchoredDirectory(this.tree, deletions, target.owner.resourceId, create);
+      operation = await openOrCreateAnchoredDirectory(this.tree, deletions, target.operationId, create);
       if (!operation) return null;
       const marker = await operationMarkerState(operation, target, create, allowMissingMarker);
-      return { project, deletions, operation, marker };
+      return { deletions, operation, marker };
     } catch (error) {
       await operation?.close();
       await deletions?.close();
-      await project.close();
       throw error;
     } finally {
       if (!operation) {
         await deletions?.close();
-        await project.close();
       }
     }
   }
 
-  private async removeEmptyOperationDirectory(target: NormalizedDeletionTarget): Promise<void> {
-    const project = await this.paths.openProjectRoot(target.projectRoot, false);
+  private async removeEmptyOperationDirectory(
+    project: FileHandle,
+    target: NormalizedDeletionTarget
+  ): Promise<void> {
     let deletions: FileHandle | null = null;
     try {
       deletions = await openOrCreateAnchoredDirectory(this.tree, project, QUARANTINE_ROOT, false);
       if (!deletions) return;
       try {
-        await rmdir(descriptorPath(deletions, target.owner.resourceId));
+        await rmdir(descriptorPath(deletions, target.operationId));
         await deletions.sync();
       } catch (error) {
         if (!isNotFound(error)) throw error;
       }
     } finally {
       await deletions?.close();
-      await project.close();
     }
   }
 }
@@ -308,11 +467,11 @@ export class TransientFileDeletionOperationStore implements FileDeletionOperatio
 }
 
 function completedIsolation(
-  owner: FileDeletionOperationOwner,
+  operationId:string,
   state: FileDeletionOperationState
 ): IsolatedEntryDeletion {
   return {
-    operationId: owner.resourceId,
+    operationId,
     entryType: state.entryType,
     bytes: state.bytes
   };
@@ -440,15 +599,24 @@ async function readMarker(operationDirectory: FileHandle, name: string): Promise
 }
 
 function expectedOperationMarker(target: NormalizedDeletionTarget): string {
-  return JSON.stringify({
-    version: 1,
-    kind: "entry",
-    projectId: target.owner.projectId,
-    libraryRoot: target.libraryRoot,
-    relativePath: target.relativePath,
-    operationId: target.owner.resourceId,
-    requestHash: target.owner.requestHash
-  });
+  return target.kind==="entry"
+    ?JSON.stringify({
+      version:1,
+      kind:"entry",
+      projectId:target.owner.projectId,
+      libraryRoot:target.libraryRoot,
+      relativePath:target.relativePath,
+      operationId:target.operationId,
+      requestHash:(target.owner as FileDeletionOperationOwner).requestHash
+    })
+    :JSON.stringify({
+      version:1,
+      kind:"library",
+      projectId:target.owner.projectId,
+      libraryId:(target.owner as FileLibraryDeletionOperationOwner).libraryId,
+      libraryRoot:target.libraryRoot,
+      operationId:target.operationId
+    });
 }
 
 async function removeMarker(operationDirectory: FileHandle): Promise<void> {
@@ -471,7 +639,6 @@ async function closeQuarantine(quarantine: OpenQuarantine | null): Promise<void>
   if (!quarantine) return;
   await quarantine.operation.close();
   await quarantine.deletions.close();
-  await quarantine.project.close();
 }
 
 function transientOwnerKey(owner: FileDeletionOperationOwner): string {
@@ -488,9 +655,14 @@ function sameDeletionOwner(left: FileDeletionOperationOwner, right: FileDeletion
     left.claimToken === right.claimToken;
 }
 
-function deletionIncomplete(error: unknown): ProductError {
-  const message = error instanceof Error ? error.message : "File deletion could not be completed";
-  return new ProductError(message, 500, "file_deletion_incomplete");
+function deletionIncomplete(error: unknown, kind: "entry" | "library" = "entry"): ProductError {
+  return kind === "library"
+    ? new ProductError(
+      "File Library deletion is in progress",
+      409,
+      "file_library_deleting"
+    )
+    : new ProductError("File deletion could not be completed", 500, "file_deletion_incomplete");
 }
 
 function filePathNotFound(): ProductError {

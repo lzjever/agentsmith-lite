@@ -123,7 +123,7 @@ async function setup(label:string){
   await services.memberships.addMember(user.id,project.id,runnerId,"member");
   const task:PersistedAgentTask={id:`task_${label}`,workspaceId:workspace.id,projectId:project.id,endpointId:`endpoint_${label}`,fileLibraryId:`library_${label}`,createdByUserId:user.id,title:"Task",prompt:"Work",agentContext:"",currentRunId:`run_${label}`,archivedAt:null,deletedAt:null,createdAt,updatedAt:createdAt};
   const run=liveRun(task,createdAt,runnerId);
-  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,"setup"),newFileLibrary:{id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:user.id,createdAt,updatedAt:createdAt},sandboxRun:run});
+  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,"setup"),newFileLibrary:{id:task.fileLibraryId!,workspaceId:workspace.id,projectId:project.id,name:"Library",rootSubPath:`libraries/${task.fileLibraryId}/home`,lifecycleStatus:"active" as const,createdByUserId:user.id,createdAt,updatedAt:createdAt},sandboxRun:run});
   assert.equal(created.kind,"created");
   return{store,services,userId:user.id,runnerId,workspace,project,projectId:project.id,task,run};
 }
@@ -131,7 +131,7 @@ async function setup(label:string){
 async function createRun(fixture:Awaited<ReturnType<typeof setup>>,label:string,startedAt:string|null,state:"starting"|"active"|"release_requested"|"failed"){
   const task:PersistedAgentTask={...fixture.task,id:`task_${label}`,fileLibraryId:`library_${label}`,currentRunId:`run_${label}`,title:`Task ${label}`,createdAt:startedAt??fixture.project.createdAt,updatedAt:startedAt??fixture.project.createdAt};
   const run=liveRun(task,startedAt,fixture.runnerId,state);
-  const result=await fixture.store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,label),newFileLibrary:{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${label}`,rootSubPath:`libraries/${task.fileLibraryId}/home`,createdByUserId:fixture.userId,createdAt:task.createdAt,updatedAt:task.updatedAt},sandboxRun:run});
+  const result=await fixture.store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,label),newFileLibrary:{id:task.fileLibraryId!,workspaceId:task.workspaceId,projectId:task.projectId,name:`Library ${label}`,rootSubPath:`libraries/${task.fileLibraryId}/home`,lifecycleStatus:"active" as const,createdByUserId:fixture.userId,createdAt:task.createdAt,updatedAt:task.updatedAt},sandboxRun:run});
   assert.equal(result.kind,"created");
   return{task,run};
 }

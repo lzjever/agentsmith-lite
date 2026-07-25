@@ -13,6 +13,7 @@ import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandb
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
 import { SandboxRetryableProductError } from "../../application/src/taskService.js";
+import { FileLibraryBoundError } from "../../application/src/fileLibraryService.js";
 import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type ProjectMembershipRole, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput, type WorkspaceMembershipRole } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
 import { ProductError } from "../../domain/src/errors.js";
@@ -698,13 +699,13 @@ async function routeApi(
       }
       if(libraryId&&!segments[6]&&method==="DELETE"){
         assertOnlySearchParams(url,[]);const key=requireIdempotencyKey(req),body=await readJson(req);assertOnlyKeys(body,[]);
-        return sendJson(res,200,await services.settings.runIdempotentMutation(user.id,projectId,"project.file-library.delete",key,{projectId,libraryId},libraryId,()=>services.fileLibraries.remove(user.id,projectId,libraryId)));
+        return sendJson(res,200,await services.fileLibraries.remove(user.id,projectId,libraryId,key,(bytes)=>services.policies.reconcileFileLibraryBytes(projectId,bytes).then(()=>undefined)));
       }
       if(libraryId&&segments[6]==="files"){
         const action=segments[7];
         if(!action&&method==="GET"){
-          assertOnlySearchParams(url,["path"]);const {library,projectRoot,canWriteFiles}=await services.fileLibraries.require(user.id,projectId,libraryId);
-          return sendJson(res,200,await services.files.listLibraryFiles(projectRoot,library.rootSubPath,url.searchParams.get("path")??"",canWriteFiles));
+          assertOnlySearchParams(url,["path"]);
+          return sendJson(res,200,await services.fileLibraries.withLibraryFileAccess(user.id,projectId,libraryId,({library,projectRoot,canWriteFiles})=>services.files.listLibraryFiles(projectRoot,library.rootSubPath,url.searchParams.get("path")??"",canWriteFiles)));
         }
         if(!action&&method==="PUT"){
           assertOnlySearchParams(url,["path","overwrite"]);const key=requireIdempotencyKey(req);
@@ -718,8 +719,7 @@ async function routeApi(
           return sendJson(res,200,response);
         }
         if((action==="download"||action==="preview")&&!segments[8]&&method==="GET"){
-          assertOnlySearchParams(url,["path"]);const {library,projectRoot}=await services.fileLibraries.require(user.id,projectId,libraryId);
-          const download=await services.files.downloadLibraryFile(projectRoot,library.rootSubPath,requiredSearchParam(url,"path"));
+          assertOnlySearchParams(url,["path"]);const download=await services.fileLibraries.withLibraryFileAccess(user.id,projectId,libraryId,({library,projectRoot})=>services.files.downloadLibraryFile(projectRoot,library.rootSubPath,requiredSearchParam(url,"path")));
           return action==="preview"?sendProjectFilePreview(res,download):sendProjectFileDownload(res,download);
         }
       }
@@ -1369,8 +1369,13 @@ function handleError(res: ServerResponse, error: unknown): void {
     sendJson(res,error.statusCode,error.envelope);
     return;
   }
+  if(error instanceof FileLibraryBoundError){
+    sendJson(res,error.statusCode,{error:error.message,code:error.code,task:error.task});
+    return;
+  }
   const statusCode = error instanceof ProductError ? error.statusCode : 500;
-  const message = error instanceof Error ? error.message : "Internal server error";
+  if(statusCode>=500)console.error("Product API request failed",error);
+  const message = error instanceof ProductError ? error.message : "Internal server error";
   sendJson(res, statusCode, { error: message, ...(error instanceof ProductError && error.code ? { code:error.code } : {}) });
 }
 

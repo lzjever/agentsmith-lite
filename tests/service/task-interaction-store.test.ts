@@ -187,7 +187,7 @@ function task(): PersistedAgentTask {
 }
 
 async function createTask(store:ReturnType<typeof createLocalInMemoryProductStore>):Promise<void>{
-  await store.createFileLibrary({id:"library_interactions",workspaceId:"workspace",projectId:"project",name:"Library",rootSubPath:"libraries/library_interactions/home",createdByUserId:"user",createdAt:timestamp(0),updatedAt:timestamp(0)});
+  await store.createFileLibrary({id:"library_interactions",workspaceId:"workspace",projectId:"project",name:"Library",rootSubPath:"libraries/library_interactions/home",lifecycleStatus:"active" as const,createdByUserId:"user",createdAt:timestamp(0),updatedAt:timestamp(0)});
   assert.equal((await store.createTaskAtomically({task:task(),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"created");
 }
 
