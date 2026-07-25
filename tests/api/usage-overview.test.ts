@@ -63,7 +63,8 @@ test("usage overview returns project limits and authenticated-user provider aggr
     assert.deepEqual((await get(api.baseUrl,`/api/v1/projects/${project.id}/usage/endpoints?q=primary`,cookie)).items.map((endpoint:{endpointName:string})=>endpoint.endpointName),["Primary"]);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/endpoints?cursor=`,{headers:{cookie}})).status,400);
     assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/usage/endpoints?q=changed&cursor=${encodeURIComponent(endpointUsageFirst.nextCursor)}`,{headers:{cookie}})).status,400);
-    assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "activeTasks"), { metric: "activeTasks", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });
+    assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "activeSandboxes"), { metric: "activeSandboxes", current: 0, limit: 2, remaining: 2, window: { kind: "current_gauge", resetAt: null } });
+    assert.doesNotMatch(JSON.stringify(all), /activeTasks|taskConcurrencyLimit|active_tasks/);
     assert.deepEqual(all.limits.find((limit: { metric: string }) => limit.metric === "providerTokens"), { metric: "providerTokens", current: 110, limit: null, remaining: null, window: { kind: "project_lifetime", startedAt: project.createdAt, resetAt: null } });
     assert.equal(all.limits.some((limit: { metric: string }) => limit.metric === "projectFileBytes"),false);
     assert.deepEqual(all.fileStorage,{recordedBytes:0,measuredAt:null,limitBytes:1,remainingBytes:1});

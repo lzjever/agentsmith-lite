@@ -1145,7 +1145,7 @@ export interface ReserveProjectProviderSettlementInput {
 
 export interface ProjectResourceUsageAdjustment {
   projectId: string;
-  delta: Pick<ProjectResourceUsage, "activeTasks" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes">;
+  delta: Pick<ProjectResourceUsage, "activeSandboxes" | "providerRequests" | "providerTokens" | "providerCost" | "projectFileBytes">;
   limit?: ProjectAlertType;
   updatedAt: string;
 }

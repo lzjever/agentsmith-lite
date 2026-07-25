@@ -15,10 +15,10 @@ describe("policy write concurrency", () => {
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "Project" });
 
     const policy = await services.policies.getPolicy(user.id, project.id);
-    const changedPolicy = await services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 3, expectedUpdatedAt: policy.updatedAt });
-    assert.equal(changedPolicy.activeTasksLimit, 3);
+    const changedPolicy = await services.policies.updatePolicy(user.id, project.id, { sandboxLimit: 3, expectedUpdatedAt: policy.updatedAt });
+    assert.equal(changedPolicy.sandboxLimit, 3);
     await assert.rejects(
-      () => services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 4, expectedUpdatedAt: policy.updatedAt }),
+      () => services.policies.updatePolicy(user.id, project.id, { sandboxLimit: 4, expectedUpdatedAt: policy.updatedAt }),
       conflict,
     );
 

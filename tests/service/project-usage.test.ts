@@ -9,7 +9,7 @@ describe("project Sandbox Usage",()=>{
   it("keeps full totals in the overview while returning only capacity-holding live Runs",async()=>{
     const fixture=await setup("overview");
     await release(fixture.store,fixture.run,"2026-07-23T00:02:00.000Z",120);
-    await fixture.services.policies.updatePolicy(fixture.userId,fixture.projectId,{activeTasksLimit:4});
+    await fixture.services.policies.updatePolicy(fixture.userId,fixture.projectId,{sandboxLimit:4});
     const starting=await createRun(fixture,"starting",null,"starting");
     await createRun(fixture,"release-requested",null,"release_requested");
     await createRun(fixture,"failed",null,"failed");
@@ -60,7 +60,7 @@ describe("project Sandbox Usage",()=>{
     assert.equal(history.items[0]?.runId,fixture.run.runId);
     assert.equal(history.items[0]?.taskTitle,"Task");
     assert.equal(history.items[0]?.taskAvailable,true);
-    assert.equal((await fixture.store.findProjectResourceUsage(fixture.projectId))?.activeTasks,0);
+    assert.equal((await fixture.store.findProjectResourceUsage(fixture.projectId))?.activeSandboxes,0);
   });
 
   it("pages 55 tied settlements with a scope-bound snapshot cursor and deleted Task projection",async()=>{

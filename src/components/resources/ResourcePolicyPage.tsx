@@ -17,11 +17,11 @@ import { useMutationKeys } from "../../lib/api/use-mutation-keys";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 
 type EndpointWindow = NonNullable<ProjectPolicyInput["endpointWindows"]>[number];
-type PolicyDraft = Omit<Required<ProjectPolicyInput>, "activeTasksLimit"> & { activeTasksLimit: number | null };
+type PolicyDraft = Omit<Required<ProjectPolicyInput>, "sandboxLimit"> & { sandboxLimit: number | null };
 
 const MEBIBYTE = 1024 * 1024;
 const limits = [
-  { key: "activeTasksLimit", label: "Active tasks", step: 1, units: "tasks", isIntegerOnly: true, required: true },
+  { key: "sandboxLimit", label: "Sandbox limit", step: 1, units: "sandboxes", isIntegerOnly: true, required: true },
   { key: "providerRequestsLimit", label: "Provider requests", step: 1, units: "requests", isIntegerOnly: true, required: false },
   { key: "providerTokensLimit", label: "Provider tokens", step: 1, units: "tokens", isIntegerOnly: true, required: false },
   { key: "providerCostLimit", label: "Provider cost", step: 0.000001, units: "USD", isIntegerOnly: false, required: false },
@@ -95,7 +95,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
   const dirty = Boolean(policy && draft && !samePolicyDraft(draft, policyDraft(policy)));
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!policy || !draft || draft.activeTasksLimit === null || !dirty) return;
+    if (!policy || !draft || draft.sandboxLimit === null || !dirty) return;
     const input = { ...policyPatch(draft, policyDraft(policy)), expectedUpdatedAt: policy.updatedAt };
     loadRequest.current += 1;
     setSaving(true);
@@ -372,7 +372,7 @@ function ProjectResourcePolicyPage({ projectId }: { projectId: string }) {
                 variant="primary"
                 size="lg"
                 icon={<Save size={16} />}
-                isDisabled={saving || !dirty || draft.activeTasksLimit === null}
+                isDisabled={saving || !dirty || draft.sandboxLimit === null}
               />
             </div>
           ) : null}
@@ -393,7 +393,7 @@ function windowLabel(seconds: number) {
 
 function policyDraft(policy: ProjectResourcePolicy): PolicyDraft {
   return {
-    activeTasksLimit: policy.activeTasksLimit,
+    sandboxLimit: policy.sandboxLimit,
     providerRequestsLimit: policy.providerRequestsLimit,
     providerTokensLimit: policy.providerTokensLimit,
     providerCostLimit: policy.providerCostLimit,
@@ -404,7 +404,7 @@ function policyDraft(policy: ProjectResourcePolicy): PolicyDraft {
 
 function samePolicyDraft(left: PolicyDraft, right: PolicyDraft): boolean {
   if (
-    left.activeTasksLimit !== right.activeTasksLimit ||
+    left.sandboxLimit !== right.sandboxLimit ||
     left.providerRequestsLimit !== right.providerRequestsLimit ||
     left.providerTokensLimit !== right.providerTokensLimit ||
     left.providerCostLimit !== right.providerCostLimit ||
@@ -415,7 +415,7 @@ function samePolicyDraft(left: PolicyDraft, right: PolicyDraft): boolean {
 
 function policyPatch(draft: PolicyDraft, original: PolicyDraft): ProjectPolicyInput {
   const input: ProjectPolicyInput = {};
-  if (draft.activeTasksLimit !== original.activeTasksLimit && draft.activeTasksLimit !== null) input.activeTasksLimit = draft.activeTasksLimit;
+  if (draft.sandboxLimit !== original.sandboxLimit && draft.sandboxLimit !== null) input.sandboxLimit = draft.sandboxLimit;
   if (draft.providerRequestsLimit !== original.providerRequestsLimit) input.providerRequestsLimit = draft.providerRequestsLimit;
   if (draft.providerTokensLimit !== original.providerTokensLimit) input.providerTokensLimit = draft.providerTokensLimit;
   if (draft.providerCostLimit !== original.providerCostLimit) input.providerCostLimit = draft.providerCostLimit;

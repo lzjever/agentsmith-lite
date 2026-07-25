@@ -9,7 +9,7 @@ import { ConfirmationDialog } from "../ui/Dialog";
 import { AlertRuleFormDialog, alertRuleType, alertRuleTypes, type AlertRuleFormValue } from "./AlertRuleFormDialog";
 
 const initialType = alertRuleTypes[0]!;
-const initialValue: AlertRuleFormValue = { name: "Task capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
+const initialValue: AlertRuleFormValue = { name: "Sandbox capacity", alertType: initialType.value, metric: initialType.metric, threshold: 1, windowSeconds: initialType.defaultWindowSeconds, scope: { kind: "project" }, enabled: true };
 
 export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstancesChanged }: { projectId: string; canManage: boolean; onAccessDenied?: (reason: unknown) => void; onInstancesChanged?: () => Promise<void> }) {
   const mutationKeys = useMutationKeys();
@@ -167,7 +167,7 @@ export function AlertRulesPanel({ projectId, canManage, onAccessDenied, onInstan
       if (mounted.current) setBusyRuleId(null);
     }
   }
-  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null)return;setPanelError("");setPanelNotice("");setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric.replaceAll("_"," "); setPanelNotice(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
+  async function test(rule: ProjectAlertRule) { if(!canManage||busyRuleId!==null)return;setPanelError("");setPanelNotice("");setBusyRuleId(rule.id); try { const result=await apiClient.testAlertRule(projectId,rule.id); if(!mounted.current)return; const metric=result.metric==="active_sandboxes"?"Active sandboxes":result.metric.replaceAll("_"," "); setPanelNotice(result.matched?`Rule would trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`:`Rule would not trigger: ${metric} is ${result.value}, threshold ${result.threshold}.`); } catch(reason) { if(!mounted.current)return;if(forgetMissingRule(reason,rule.id))return; mutationFailed(reason,"Alert rule test could not be completed."); } finally { if(mounted.current)setBusyRuleId(null); } }
 
   async function remove() {
     if (!removing || !canManage || busyRuleId !== null) return;

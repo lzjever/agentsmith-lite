@@ -14,37 +14,40 @@ describe("project resource policy", () => {
       assert.equal(sanitizeProjectAuditDetail({filePath}).filePath,undefined);
     }
     assert.deepEqual(sanitizeProjectAuditDetail({taskId:"task_1",historicalAction:"task.failed"}),{taskId:"task_1"});
+    assert.deepEqual(sanitizeProjectAuditDetail({metric:"active_sandboxes",activeSandboxes:2,sandboxLimit:3}),{metric:"active_sandboxes",activeSandboxes:2,sandboxLimit:3});
+    assert.deepEqual(sanitizeProjectAuditDetail({metric:"active_tasks",activeTasks:2,activeTasksLimit:3}),{});
   });
 
   it("creates the owner membership, default policy, and zero usage with the project", async () => {
     const services = createApplicationServices({ store: createInMemoryProductStore(), dataRoot: "/tmp/agentsmith-policy-project", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 3 });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", sandboxLimit: 3 });
 
     assert.equal((await services.memberships.listMembers(user.id, project.id)).items.find((member) => member.userId === user.id)?.role, "owner");
-    assert.equal((await services.policies.getPolicy(user.id, project.id)).activeTasksLimit, 3);
+    assert.equal(project.sandboxLimit,3);
+    assert.equal((await services.policies.getPolicy(user.id, project.id)).sandboxLimit, 3);
     const overview = await services.policies.getUsageOverview(user.id, project.id);
     assert.deepEqual(
       overview.limits.map((limit) => [limit.metric, limit.current]),
-      [["activeTasks", 0], ["providerRequests", 0], ["providerTokens", 0], ["providerCost", 0]]
+      [["activeSandboxes", 0], ["providerRequests", 0], ["providerTokens", 0], ["providerCost", 0]]
     );
     assert.deepEqual(overview.fileStorage,{recordedBytes:0,measuredAt:null,limitBytes:null,remainingBytes:null});
     assert.equal("usage" in overview, false);
   });
 
-  it("uses resource policy as the only mutable active-task limit", async () => {
+  it("uses resource policy as the only mutable Sandbox limit", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-policy-canonical-limit", builtinAdminPassword: "admin-password" });
     const { user } = await services.auth.loginAfterBootstrap("admin-password");
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
-    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", taskConcurrencyLimit: 2 });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P", sandboxLimit: 2 });
 
-    const policy = await services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: 4 });
+    const policy = await services.policies.updatePolicy(user.id, project.id, { sandboxLimit: 4 });
 
-    assert.equal(policy.activeTasksLimit, 4);
-    assert.equal((await store.findProject(project.id))?.taskConcurrencyLimit, 4);
-    await assert.rejects(() => services.policies.updatePolicy(user.id, project.id, { activeTasksLimit: null } as never), /cannot be unlimited/);
+    assert.equal(policy.sandboxLimit, 4);
+    assert.equal((await store.findProject(project.id))?.sandboxLimit, 4);
+    await assert.rejects(() => services.policies.updatePolicy(user.id, project.id, { sandboxLimit: null } as never), /cannot be unlimited/);
   });
 
   it("keeps in-memory file quota adjustment semantics in parity with PostgreSQL", async () => {
@@ -54,7 +57,7 @@ describe("project resource policy", () => {
     const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
     const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
     const timestamp = "2026-07-12T00:00:00.000Z";
-    const adjust = (delta: number) => store.adjustProjectResourceUsage({ projectId: project.id, delta: { activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: delta }, limit: "project_file_bytes_limit", updatedAt: timestamp });
+    const adjust = (delta: number) => store.adjustProjectResourceUsage({ projectId: project.id, delta: { activeSandboxes: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: delta }, limit: "project_file_bytes_limit", updatedAt: timestamp });
 
     await store.patchProjectResourcePolicy(project.id, { projectFileBytesLimit: 0 }, timestamp);
     await assert.rejects(
@@ -92,7 +95,7 @@ describe("project resource policy", () => {
     assert.equal((await store.queryProjectAlerts(project.id,{view:"active",limit:50})).items.some((alert)=>alert.type==="project_file_bytes_limit"),true);
     await store.adjustProjectResourceUsage({
       projectId:project.id,
-      delta:{activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:-1},
+      delta:{activeSandboxes:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:-1},
       updatedAt:"2026-07-12T00:01:00.000Z"
     });
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytesMeasuredAt,over.measuredAt);

@@ -9,7 +9,7 @@ import { runIdempotentMutation } from "./idempotentMutation.js";
 import { emitProjectAlert, evaluateProjectAlertRules, recordProjectFailure, recoverProjectAlerts } from "./projectAlertEvaluator.js";
 
 type Limit = ProjectAlertType;
-const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, projectFileBytesMeasuredAt: null, updatedAt: nowIso() });
+const zeroUsage = (projectId: string): ProjectResourceUsage => ({ projectId, activeSandboxes: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: 0, projectFileBytesMeasuredAt: null, updatedAt: nowIso() });
 export const DEFAULT_PROVIDER_RESERVATION = { tokens: 4096, cost: 1 } as const;
 interface SandboxRunCursor { v:1;projectId:string;selectedUserId:string;scopeMeasuredAt:string;key:{releasedAt:string;runId:string}; }
 interface ProjectAlertCursor { v:1;projectId:string;view:ProjectAlertView;key:ProjectAlertCursorKey; }
@@ -220,11 +220,11 @@ export class ProjectPolicyService {
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.policy.update", key: idempotencyKey, request: input, resourceId: projectId, failureMessage: "Project policy could not be updated", run: update });
   }
   async recordProjectSandboxCapacityRejected(projectId: string): Promise<void> {
-    await this.openAlert(projectId, "active_tasks_limit");
+    await this.openAlert(projectId, "sandbox_capacity");
   }
-  async refreshActiveTaskAlerts(projectId:string):Promise<void>{
-    await evaluateProjectAlertRules(this.store,projectId,"active_tasks_limit");
-    await recoverProjectAlerts(this.store,projectId,"active_tasks_limit",{unconfiguredFallback:true});
+  async refreshSandboxCapacityAlerts(projectId:string):Promise<void>{
+    await evaluateProjectAlertRules(this.store,projectId,"sandbox_capacity");
+    await recoverProjectAlerts(this.store,projectId,"sandbox_capacity",{unconfiguredFallback:true});
   }
   async refreshSandboxFailureAlerts(projectId:string,endpointId?:string):Promise<void>{
     await emitProjectAlert(this.store,projectId,"sandbox_failure",endpointId?{endpointId}:{});
@@ -290,7 +290,7 @@ export class ProjectPolicyService {
   async recordFileBytes(projectId: string, actorId: string | null, resourceId: string, delta: number): Promise<void> {
     const adjusted = await this.store.adjustProjectResourceUsage({
       projectId,
-      delta: { activeTasks: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: delta },
+      delta: { activeSandboxes: 0, providerRequests: 0, providerTokens: 0, providerCost: 0, projectFileBytes: delta },
       ...(delta > 0 ? { limit: "project_file_bytes_limit" as const } : {}),
       updatedAt: nowIso()
     });
@@ -335,7 +335,7 @@ export class ProjectPolicyService {
   private async recoverChangedPolicyAlerts(previous: ProjectResourcePolicy, updated: ProjectResourcePolicy): Promise<void> {
     const usage = await this.usage(updated.projectId);
     const limits: Array<{ before: number | null; after: number | null; current: number; next: number; type: Limit }> = [
-      { before: previous.activeTasksLimit, after: updated.activeTasksLimit, current: usage.activeTasks, next: 1, type: "active_tasks_limit" },
+      { before: previous.sandboxLimit, after: updated.sandboxLimit, current: usage.activeSandboxes, next: 1, type: "sandbox_capacity" },
       { before: previous.providerRequestsLimit, after: updated.providerRequestsLimit, current: usage.providerRequests, next: 1, type: "provider_requests_limit" },
       { before: previous.providerTokensLimit, after: updated.providerTokensLimit, current: usage.providerTokens, next: DEFAULT_PROVIDER_RESERVATION.tokens, type: "provider_tokens_limit" },
       { before: previous.providerCostLimit, after: updated.providerCostLimit, current: usage.providerCost, next: DEFAULT_PROVIDER_RESERVATION.cost, type: "provider_cost_limit" },
@@ -372,7 +372,7 @@ export class ProjectPolicyService {
   private async change(projectId: string, actorId: string | null, action: ProjectAuditAction, resourceId: string, delta: Partial<ProjectResourceUsage>, limit: Limit | undefined) {
     const adjusted = await this.store.adjustProjectResourceUsage({
       projectId,
-      delta: { activeTasks: delta.activeTasks ?? 0, providerRequests: delta.providerRequests ?? 0, providerTokens: delta.providerTokens ?? 0, providerCost: delta.providerCost ?? 0, projectFileBytes: delta.projectFileBytes ?? 0 },
+      delta: { activeSandboxes: delta.activeSandboxes ?? 0, providerRequests: delta.providerRequests ?? 0, providerTokens: delta.providerTokens ?? 0, providerCost: delta.providerCost ?? 0, projectFileBytes: delta.projectFileBytes ?? 0 },
       ...(limit ? { limit } : {}),
       updatedAt: nowIso()
     });
@@ -399,7 +399,7 @@ export class ProjectPolicyService {
 
 function usageLimits(policy: ProjectResourcePolicy, usage: ProjectResourceUsage, projectCreatedAt: string): ProjectUsageLimit[] {
   return [
-    usageLimit("activeTasks", usage.activeTasks, policy.activeTasksLimit, projectCreatedAt),
+    usageLimit("activeSandboxes", usage.activeSandboxes, policy.sandboxLimit, projectCreatedAt),
     usageLimit("providerRequests", usage.providerRequests, policy.providerRequestsLimit, projectCreatedAt),
     usageLimit("providerTokens", usage.providerTokens, policy.providerTokensLimit, projectCreatedAt),
     usageLimit("providerCost", usage.providerCost, policy.providerCostLimit, projectCreatedAt)
@@ -411,7 +411,7 @@ function fileStorageUsage(policy:ProjectResourcePolicy,usage:ProjectResourceUsag
   return{recordedBytes:usage.projectFileBytes,measuredAt:usage.projectFileBytesMeasuredAt,limitBytes,remainingBytes:limitBytes===null?null:Math.max(0,limitBytes-usage.projectFileBytes)};
 }
 function usageLimit(metric: ProjectUsageLimit["metric"], current: number, limit: number | null, projectCreatedAt: string): ProjectUsageLimit {
-  const window = metric === "activeTasks"
+  const window = metric === "activeSandboxes"
     ? { kind: "current_gauge", resetAt: null } as const
     : { kind: "project_lifetime", startedAt: projectCreatedAt, resetAt: null } as const;
   return { metric, current, limit, remaining: limit === null ? null : Math.max(0, limit - current), window };
@@ -438,7 +438,7 @@ function auditResourceKind(action: ProjectAuditAction): ProjectAuditResourceKind
   return "project";
 }
 function validatePolicyInput(input: UpdateProjectResourcePolicyInput): UpdateProjectResourcePolicyInput {
-  if (input.activeTasksLimit === null) throw new ProductError("Project active tasks limit cannot be unlimited");
+  if (input.sandboxLimit === null) throw new ProductError("Project Sandbox limit cannot be unlimited");
   if (input.endpointWindows) {
     const seen = new Set<string>();
     for (const window of input.endpointWindows) {

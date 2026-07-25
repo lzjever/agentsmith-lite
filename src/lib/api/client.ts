@@ -121,14 +121,14 @@ export type ContextPage = ProjectContextPage;
 export type ProjectResourcePolicy=ApiProjectResourcePolicy;
 export interface ProjectResourceUsage {
   projectId: string;
-  activeTasks: number;
+  activeSandboxes: number;
   providerRequests: number;
   providerTokens: number;
   providerCost: number;
   projectFileBytes: number;
   updatedAt: string;
 }
-export type ProjectUsageMetric = "activeTasks" | "providerRequests" | "providerTokens" | "providerCost";
+export type ProjectUsageMetric = "activeSandboxes" | "providerRequests" | "providerTokens" | "providerCost";
 export type ProjectUsageWindow = { kind: "current_gauge"; resetAt: null; } | { kind: "project_lifetime"; startedAt: string; resetAt: null; } | { kind:"rolling";windowSeconds:number;startedAt:string;resetAt:string|null };
 export interface ProjectUsageLimit { metric: ProjectUsageMetric; current: number; limit: number | null; remaining: number | null; window: ProjectUsageWindow; }
 export interface ProjectUsageDay { date: string; requests: number; tokens: number; cost: number; }
@@ -141,7 +141,7 @@ export type ProjectAlertType = ApiProjectAlertType;
 export type ProjectAlertRule = ApiProjectAlertRule;
 export interface UserNotification { id: string; type: string; title: string; body: string | null; projectId: string | null; resourceKind: ProjectAuditEvent["resourceKind"] | null; resourceId: string | null; linkPath: string | null; readAt: string | null; createdAt: string; }
 export interface ProjectPolicyInput {
-  activeTasksLimit?: number;
+  sandboxLimit?: number;
   providerRequestsLimit?: number | null;
   providerTokensLimit?: number | null;
   providerCostLimit?: number | null;
@@ -244,7 +244,7 @@ export const apiClient = {
   updateWorkspaceSettings: (workspaceId: string, input: { name?: string; expectedName: string }, idempotencyKey: string) => jsonIdempotent<WorkspaceSettings>(`/workspaces/${encodeURIComponent(workspaceId)}/settings`, "PATCH", idempotencyKey, input),
   archiveWorkspace: (workspaceId:string,idempotencyKey:string) => jsonIdempotent<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}/settings/archive`,"POST",idempotencyKey),
   unarchiveWorkspace: (workspaceId:string,idempotencyKey:string) => jsonIdempotent<Workspace>(`/workspaces/${encodeURIComponent(workspaceId)}/settings/unarchive`,"POST",idempotencyKey),
-  createProject: (workspaceId: string, input: { name: string; taskConcurrencyLimit?: number }, idempotencyKey: string) =>
+  createProject: (workspaceId: string, input: { name: string; sandboxLimit?: number }, idempotencyKey: string) =>
     jsonIdempotent<Project>(`/workspaces/${encodeURIComponent(workspaceId)}/projects`, "POST", idempotencyKey, input),
   workspaceProjects: (workspaceId:string,query:{q?:string;cursor?:string;limit?:number}={}) => request<ProjectDirectoryPage>(`/workspaces/${encodeURIComponent(workspaceId)}/projects${directoryQuery(query)}`),
   project: (projectId:string) => request<ProjectDetail>(`/projects/${encodeURIComponent(projectId)}`),

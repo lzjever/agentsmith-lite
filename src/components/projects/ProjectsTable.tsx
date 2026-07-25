@@ -40,7 +40,7 @@ export function ProjectsTable({
           <TableHeader>
             <TableRow isHeaderRow>
               <TableHeaderCell>Project</TableHeaderCell>
-              <TableHeaderCell>Task concurrency</TableHeaderCell>
+              <TableHeaderCell>Sandbox limit</TableHeaderCell>
               <TableHeaderCell>Status</TableHeaderCell>
               <TableHeaderCell>Created</TableHeaderCell>
               {onTogglePin ? <TableHeaderCell /> : null}
@@ -65,7 +65,7 @@ export function ProjectsTable({
                     <Text weight="medium">{project.name}</Text>
                   </Link>
                 </TableCell>
-                <TableCell>{project.taskConcurrencyLimit}</TableCell>
+                <TableCell>{project.sandboxLimit}</TableCell>
                 <TableCell>
                   <ProjectLifecycleStatus project={project} />
                 </TableCell>
@@ -135,7 +135,7 @@ export function ProjectCard({
           </span>
           <span className="min-w-0">
             <Text weight="medium" display="block" maxLines={1}>{project.name}</Text>
-            <Text type="supporting" color="secondary" display="block" className="mt-1">Task concurrency: {project.taskConcurrencyLimit}</Text>
+            <Text type="supporting" color="secondary" display="block" className="mt-1">Sandbox limit: {project.sandboxLimit}</Text>
             <span className="mt-2 block"><ProjectLifecycleStatus project={project} /></span>
           </span>
         </span>

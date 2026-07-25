@@ -18,7 +18,7 @@ postgresDescribe("postgres Task File Library binding",()=>{
     try{await client.query("truncate table sandbox_usage_settlements,sandbox_runs,task_interaction_changes,task_messages,agent_tasks,file_libraries,model_endpoints,project_credentials,projects,workspaces,users cascade");}finally{await client.end();}
     await store.createUser({id:"user_binding",email:"binding@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
     await store.createWorkspace({id:"workspace_binding",name:"Workspace",ownerUserId:"user_binding",createdAt:at,updatedAt:at});
-    await store.createProject({id:"project_binding",workspaceId:"workspace_binding",name:"Project",ownerUserId:"user_binding",rootPath:"workspaces/workspace_binding/projects/project_binding",taskConcurrencyLimit:2,createdAt:at,updatedAt:at});
+    await store.createProject({id:"project_binding",workspaceId:"workspace_binding",name:"Project",ownerUserId:"user_binding",rootPath:"workspaces/workspace_binding/projects/project_binding",sandboxLimit:2,createdAt:at,updatedAt:at});
     await store.createProjectCredential({id:"credential_binding",projectId:"project_binding",name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:"binding",version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
     await store.createEndpoint({id:"endpoint_binding",projectId:"project_binding",name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId:"credential_binding",capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
     await store.createFileLibrary(library());

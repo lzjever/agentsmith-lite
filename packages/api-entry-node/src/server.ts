@@ -506,11 +506,11 @@ async function routeApi(
     if (!segments[5] && method === "POST") {
       assertOnlySearchParams(url, []);
       const body = await readJson(req);
-      assertOnlyKeys(body, ["name", "taskConcurrencyLimit"]);
-      if (body.taskConcurrencyLimit !== undefined && typeof body.taskConcurrencyLimit !== "number") throw new ProductError("taskConcurrencyLimit must be a number");
+      assertOnlyKeys(body, ["name", "sandboxLimit"]);
+      if (body.sandboxLimit !== undefined && typeof body.sandboxLimit !== "number") throw new ProductError("sandboxLimit must be a number");
       return sendJson(res, 200, await services.workspaces.createProject(user.id, workspaceId, {
         name: asString(body.name),
-        ...(typeof body.taskConcurrencyLimit === "number" ? { taskConcurrencyLimit: body.taskConcurrencyLimit } : {})
+        ...(typeof body.sandboxLimit === "number" ? { sandboxLimit: body.sandboxLimit } : {})
       }, requireIdempotencyKey(req)));
     }
   }
@@ -1748,15 +1748,15 @@ function asEndpointModelDiscoveryInput(body: Record<string, unknown>): DiscoverE
 }
 
 function asPolicyInput(body: Record<string, unknown>): import("../../contracts/src/api.js").UpdateProjectResourcePolicyRequest {
-  const fields = ["activeTasksLimit", "providerRequestsLimit", "providerTokensLimit", "providerCostLimit", "projectFileBytesLimit"] as const;
+  const fields = ["sandboxLimit", "providerRequestsLimit", "providerTokensLimit", "providerCostLimit", "projectFileBytesLimit"] as const;
   assertOnlyKeys(body, [...fields, "endpointWindows", "expectedUpdatedAt"]);
   const input: import("../../contracts/src/api.js").UpdateProjectResourcePolicyRequest = { expectedUpdatedAt: asRequiredIsoTimestamp(body.expectedUpdatedAt, "expectedUpdatedAt") };
   for (const field of fields) {
     const value = body[field];
     if (value === undefined) continue;
-    if (field === "activeTasksLimit") {
-      if (typeof value !== "number") throw new ProductError("activeTasksLimit must be a number");
-      input.activeTasksLimit = value;
+    if (field === "sandboxLimit") {
+      if (typeof value !== "number") throw new ProductError("sandboxLimit must be a number");
+      input.sandboxLimit = value;
       continue;
     }
     if (value !== null && typeof value !== "number") throw new ProductError(`${field} must be a number or null`);

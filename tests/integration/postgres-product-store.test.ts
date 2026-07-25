@@ -21,7 +21,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     try{await client.query("truncate table sandbox_usage_settlements,sandbox_runs,task_interaction_changes,task_messages,task_idempotency_records,agent_tasks,file_libraries,model_endpoints,project_credentials,projects,workspaces,users,postgres_json_docs cascade");}finally{await client.end();}
     await store.createUser({id:"user_atomic",email:"atomic@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
     await store.createWorkspace({id:"workspace_atomic",name:"Workspace",ownerUserId:"user_atomic",createdAt:at,updatedAt:at});
-    await store.createProject({id:"project_atomic",workspaceId:"workspace_atomic",name:"Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_atomic",taskConcurrencyLimit:1,createdAt:at,updatedAt:at});
+    await store.createProject({id:"project_atomic",workspaceId:"workspace_atomic",name:"Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_atomic",sandboxLimit:1,createdAt:at,updatedAt:at});
     await store.createProjectCredential({id:"credential_atomic",projectId:"project_atomic",name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:"atomic",version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
     await store.createEndpoint({id:"endpoint_atomic",projectId:"project_atomic",name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId:"credential_atomic",capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
   });
@@ -58,8 +58,8 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   });
 
   it("pages workspace and project directories with exact pin projections",async()=>{
-    await store.createProject({id:"project_alpha",workspaceId:"workspace_atomic",name:"Alpha",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_alpha",taskConcurrencyLimit:1,createdAt:"2026-07-23T00:00:01.000Z",updatedAt:at});
-    await store.createProject({id:"project_beta",workspaceId:"workspace_atomic",name:"beta",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_beta",taskConcurrencyLimit:1,createdAt:"2026-07-23T00:00:02.000Z",updatedAt:at});
+    await store.createProject({id:"project_alpha",workspaceId:"workspace_atomic",name:"Alpha",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_alpha",sandboxLimit:1,createdAt:"2026-07-23T00:00:01.000Z",updatedAt:at});
+    await store.createProject({id:"project_beta",workspaceId:"workspace_atomic",name:"beta",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_beta",sandboxLimit:1,createdAt:"2026-07-23T00:00:02.000Z",updatedAt:at});
     assert.equal(await store.setProjectPin("user_atomic","project_beta",at),true);
 
     const workspaces=await store.listWorkspaceDirectoryPage({userId:"user_atomic",limit:2});
@@ -227,7 +227,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       await store.upsertActiveProjectAlert({id,projectId:"project_atomic",type,status:"active",deliveryStatus:"delivered",createdAt:tiedAt,updatedAt:tiedAt,resolvedAt:null,dismissedAt:null});
     }
     for(const [id,type,status] of [
-      ["alert_resolved","active_tasks_limit","resolved"],
+      ["alert_resolved","sandbox_capacity","resolved"],
       ["alert_dismissed","project_file_bytes_limit","dismissed"],
     ] as const){
       await store.upsertActiveProjectAlert({id,projectId:"project_atomic",type,status:"active",deliveryStatus:"delivered",createdAt:tiedAt,updatedAt:tiedAt,resolvedAt:null,dismissedAt:null});
@@ -250,6 +250,260 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.deepEqual(new Set(history.items.map((alert)=>alert.status)),new Set(["resolved","dismissed"]));
     assert.equal(history.activeCount,activeIds.length);
     assert.equal(history.hasMore,false);
+  });
+
+  it("maps public Sandbox capacity alert vocabulary at the PostgreSQL persistence boundary",async()=>{
+    const rule:ProjectAlertRule={
+      id:"rule_sandbox_capacity",
+      projectId:"project_atomic",
+      name:"Sandbox capacity",
+      alertType:"sandbox_capacity",
+      metric:"active_sandboxes",
+      condition:"greater_than_or_equal",
+      threshold:1,
+      windowSeconds:null,
+      scope:{kind:"project"},
+      enabled:true,
+      createdAt:at,
+      updatedAt:at
+    };
+    assert.deepEqual(await store.createProjectAlertRule(rule),rule);
+    const alert=await store.upsertActiveProjectAlert({
+      id:"alert_sandbox_capacity",
+      projectId:"project_atomic",
+      type:"sandbox_capacity",
+      status:"active",
+      deliveryStatus:"not_configured",
+      ruleId:rule.id,
+      metric:"active_sandboxes",
+      metricValue:1,
+      threshold:1,
+      createdAt:at,
+      updatedAt:at,
+      resolvedAt:null,
+      dismissedAt:null
+    });
+    assert.deepEqual({type:alert.type,metric:alert.metric},{type:"sandbox_capacity",metric:"active_sandboxes"});
+
+    const client=new pg.Client({connectionString:postgresUrl});
+    await client.connect();
+    try{
+      assert.deepEqual((await client.query("select alert_type,metric from project_alert_rules where id=$1",[rule.id])).rows,[{alert_type:"active_tasks_limit",metric:"active_tasks"}]);
+      assert.deepEqual((await client.query("select type,metric from project_alerts where id=$1",[alert.id])).rows,[{type:"active_tasks_limit",metric:"active_tasks"}]);
+      await client.query("insert into project_audit_events(id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",[
+        "audit_persisted_sandbox_capacity","project_atomic","user_atomic","sandbox.started","rejected","sandbox","alert_sandbox_capacity",
+        {metric:"active_tasks",activeTasks:1,activeTasksLimit:2},at
+      ]);
+    }finally{await client.end();}
+    assert.deepEqual(
+      await store.findProjectAlert("project_atomic",alert.id),
+      {...alert,endpointId:null,endpointName:null,subjectActorId:null,acknowledgedAt:null,acknowledgedBy:null,silencedUntil:null}
+    );
+    assert.deepEqual(
+      (await store.queryProjectAuditEvents("project_atomic",{resourceId:"alert_sandbox_capacity",limit:20})).items[0]?.detail,
+      {metric:"active_sandboxes",activeSandboxes:1,sandboxLimit:2}
+    );
+  });
+
+  it("normalizes historical completed mutation receipts before service replay",async()=>{
+    const services=createApplicationServices({
+      store,
+      dataRoot:"/tmp/agentsmith-lite-postgres-receipts",
+      builtinAdminPassword:"admin-password"
+    });
+    const client=new pg.Client({connectionString:postgresUrl});
+    await client.connect();
+    const overwriteReceipt=async(operation:string,key:string,responseBody:unknown)=>{
+      const before=await client.query<{request_hash:string}>(
+        "select request_hash from task_idempotency_records where actor_id='user_atomic' and project_id='project_atomic' and operation=$1 and idempotency_key=$2 and status='completed'",
+        [operation,key]
+      );
+      assert.equal(before.rowCount,1);
+      const updated=await client.query<{request_hash:string}>(
+        "update task_idempotency_records set response_body=$3::jsonb where actor_id='user_atomic' and project_id='project_atomic' and operation=$1 and idempotency_key=$2 and status='completed' returning request_hash",
+        [operation,key,JSON.stringify(responseBody)]
+      );
+      assert.equal(updated.rowCount,1);
+      assert.equal(updated.rows[0]?.request_hash,before.rows[0]?.request_hash);
+    };
+    const activeAlert=async(id:string)=>{
+      return store.upsertActiveProjectAlert({
+        id,
+        projectId:"project_atomic",
+        type:"sandbox_capacity",
+        status:"active",
+        deliveryStatus:"delivered",
+        metric:"active_sandboxes",
+        metricValue:1,
+        threshold:1,
+        createdAt:at,
+        updatedAt:at,
+        resolvedAt:null,
+        dismissedAt:null
+      });
+    };
+
+    try{
+      const transitionAlert=await activeAlert("alert_receipt_transition");
+      await services.policies.transitionAlert("user_atomic","project_atomic",transitionAlert.id,"resolved","transition-receipt-key");
+      await overwriteReceipt("project.alert.transition","transition-receipt-key",{
+        id:transitionAlert.id,
+        limits:{activeTasksLimit:1},
+        type:"active_tasks_limit",
+        title:"active_tasks"
+      });
+      assert.deepEqual(
+        await services.policies.transitionAlert("user_atomic","project_atomic",transitionAlert.id,"resolved","transition-receipt-key"),
+        {id:transitionAlert.id,limits:{activeTasksLimit:1},type:"sandbox_capacity",title:"active_tasks"}
+      );
+
+      const acknowledgedAlert=await activeAlert("alert_receipt_acknowledge");
+      await services.alertRules.acknowledge("user_atomic","project_atomic",acknowledgedAlert.id,"acknowledge-receipt-key");
+      await overwriteReceipt("project.alert.acknowledge","acknowledge-receipt-key",{
+        id:acknowledgedAlert.id,
+        usage:{activeTasks:1},
+        metric:"active_tasks"
+      });
+      assert.deepEqual(
+        await services.alertRules.acknowledge("user_atomic","project_atomic",acknowledgedAlert.id,"acknowledge-receipt-key"),
+        {id:acknowledgedAlert.id,usage:{activeTasks:1},metric:"active_sandboxes"}
+      );
+
+      const silencedAlert=await activeAlert("alert_receipt_silence");
+      const silencedUntil=new Date(Date.now()+86400000).toISOString();
+      await services.alertRules.silence("user_atomic","project_atomic",silencedAlert.id,silencedUntil,"silence-receipt-key");
+      await overwriteReceipt("project.alert.silence","silence-receipt-key",{
+        id:silencedAlert.id,
+        nested:[{taskConcurrencyLimit:2},"active_tasks_limit","active_tasks"],
+        sentence:"active_tasks and active_tasks_limit remain ordinary copy",
+        substring:"prefix_active_tasks_suffix",
+        similar:{activeTask:1,taskConcurrencyLimits:2}
+      });
+      assert.deepEqual(
+        await services.alertRules.silence("user_atomic","project_atomic",silencedAlert.id,silencedUntil,"silence-receipt-key"),
+        {
+          id:silencedAlert.id,
+          nested:[{taskConcurrencyLimit:2},"active_tasks_limit","active_tasks"],
+          sentence:"active_tasks and active_tasks_limit remain ordinary copy",
+          substring:"prefix_active_tasks_suffix",
+          similar:{activeTask:1,taskConcurrencyLimits:2}
+        }
+      );
+
+      const ruleInput={name:"Sandbox capacity",alertType:"sandbox_capacity" as const,enabled:false};
+      const rule=await services.alertRules.create("user_atomic","project_atomic",ruleInput,"rule-receipt-key");
+      await overwriteReceipt("project.alert-rule.create","rule-receipt-key",{
+        id:rule.id,
+        alertType:"active_tasks_limit",
+        metric:"active_tasks",
+        name:"active_tasks",
+        context:{alertType:"active_tasks_limit",metric:"active_tasks"},
+        content:["active_tasks","active_tasks_limit"]
+      });
+      assert.deepEqual(
+        await services.alertRules.create("user_atomic","project_atomic",ruleInput,"rule-receipt-key"),
+        {
+          id:rule.id,
+          alertType:"sandbox_capacity",
+          metric:"active_sandboxes",
+          name:"active_tasks",
+          context:{alertType:"active_tasks_limit",metric:"active_tasks"},
+          content:["active_tasks","active_tasks_limit"]
+        }
+      );
+
+      const policyInput={sandboxLimit:2};
+      await services.policies.updatePolicy("user_atomic","project_atomic",policyInput,"policy-receipt-key");
+      await overwriteReceipt("project.policy.update","policy-receipt-key",{
+        projectId:"project_atomic",
+        activeTasksLimit:2,
+        title:"active_tasks",
+        context:{activeTasksLimit:9,activeTasks:1,metric:"active_tasks"},
+        content:["active_tasks","active_tasks_limit"]
+      });
+      assert.deepEqual(
+        await services.policies.updatePolicy("user_atomic","project_atomic",policyInput,"policy-receipt-key"),
+        {
+          projectId:"project_atomic",
+          sandboxLimit:2,
+          title:"active_tasks",
+          context:{activeTasksLimit:9,activeTasks:1,metric:"active_tasks"},
+          content:["active_tasks","active_tasks_limit"]
+        }
+      );
+
+      const settingsRequest={name:"Receipt Project",expectedName:"Project"};
+      await services.settings.runIdempotentMutation(
+        "user_atomic",
+        "project_atomic",
+        "project.settings.update",
+        "settings-receipt-key",
+        settingsRequest,
+        "project_atomic",
+        ()=>services.settings.updateProject("user_atomic","project_atomic",settingsRequest)
+      );
+      await overwriteReceipt("project.settings.update","settings-receipt-key",{
+        project:{
+          id:"project_atomic",
+          taskConcurrencyLimit:2,
+          title:"active_tasks",
+          context:{taskConcurrencyLimit:9,activeTasksLimit:3}
+        },
+        workspaceLifecycleStatus:"active",
+        content:["active_tasks","active_tasks_limit"],
+        activeTasksLimit:7
+      });
+      assert.deepEqual(
+        await services.settings.runIdempotentMutation(
+          "user_atomic",
+          "project_atomic",
+          "project.settings.update",
+          "settings-receipt-key",
+          settingsRequest,
+          "project_atomic",
+          async()=>{throw new Error("settings replay executed the mutation");}
+        ),
+        {
+          project:{
+            id:"project_atomic",
+            sandboxLimit:2,
+            title:"active_tasks",
+            context:{taskConcurrencyLimit:9,activeTasksLimit:3}
+          },
+          workspaceLifecycleStatus:"active",
+          content:["active_tasks","active_tasks_limit"],
+          activeTasksLimit:7
+        }
+      );
+
+      await services.settings.runIdempotentProjectLifecycleMutation(
+        "user_atomic",
+        "project_atomic",
+        "project.archive",
+        "archive-receipt-key",
+        "project.archive",
+        ()=>services.settings.archiveProject("user_atomic","project_atomic")
+      );
+      await overwriteReceipt("project.archive","archive-receipt-key",{
+        id:"project_atomic",
+        taskConcurrencyLimit:1,
+        title:"active_tasks",
+        policy:{taskConcurrencyLimit:1}
+      });
+      assert.deepEqual(
+        await services.settings.runIdempotentProjectLifecycleMutation(
+          "user_atomic",
+          "project_atomic",
+          "project.archive",
+          "archive-receipt-key",
+          "project.archive",
+          async()=>{throw new Error("archive replay executed the mutation");}
+        ),
+        {id:"project_atomic",sandboxLimit:1,title:"active_tasks",policy:{taskConcurrencyLimit:1}}
+      );
+    }finally{
+      await client.end();
+    }
   });
 
   it("pages projected Audit rows and isolates actor and subject identity candidates",async()=>{
@@ -372,7 +626,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findFileLibrary(loser.newFileLibrary.id),null);
     assert.equal(await store.sandboxRuns.get(loser.sandboxRun.runId),null);
     assert.equal(await store.findTaskMessage(loser.initialMessage.id),null);
-    assert.equal((await store.findProjectResourceUsage("project_atomic"))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage("project_atomic"))?.activeSandboxes,1);
     assert.deepEqual(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.action==="task.create").map((event)=>event.resourceId),[winner.task.id]);
     const rejected=results.find((result)=>result.kind==="capacity_rejected");
     assert.deepEqual(rejected,{
@@ -457,7 +711,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(results.filter((result)=>result.kind==="capacity_rejected"&&result.admission.kind==="substrate_capacity_rejected").length,2);
     assert.equal((await store.sandboxRuns.list()).filter((candidate)=>candidate.namespace==="agentsmith"&&candidate.state!=="released").length,1);
     const usages=await Promise.all(["project_atomic","project_restart","project_message"].map((projectId)=>store.findProjectResourceUsage(projectId)));
-    assert.equal(usages.reduce((total,usage)=>total+(usage?.activeTasks??0),0),1);
+    assert.equal(usages.reduce((total,usage)=>total+(usage?.activeSandboxes??0),0),1);
     for(const [index,candidate] of [createRun,restartRun,messageInput.restart!.sandboxRun].entries()){
       if(results[index]?.kind==="capacity_rejected")assert.equal(await store.sandboxRuns.get(candidate.runId),null);
     }
@@ -491,8 +745,8 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(releaseResult,"applied");
     assert.ok(admissionResult.kind==="restarted"||admissionResult.kind==="capacity_rejected");
     assert.ok((await store.sandboxRuns.list()).filter((candidate)=>candidate.namespace==="agentsmith"&&candidate.state!=="released").length<=1);
-    assert.equal((await store.findProjectResourceUsage(occupied.projectId))?.activeTasks,0);
-    assert.equal((await store.findProjectResourceUsage(target.projectId))?.activeTasks,admissionResult.kind==="restarted"?1:0);
+    assert.equal((await store.findProjectResourceUsage(occupied.projectId))?.activeSandboxes,0);
+    assert.equal((await store.findProjectResourceUsage(target.projectId))?.activeSandboxes,admissionResult.kind==="restarted"?1:0);
   });
 
   it("keeps Sandbox-limit policy updates namespace-free while admission waits",async()=>{
@@ -506,8 +760,8 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     try{
       await blocker.query("begin");
       await blocker.query("select pg_advisory_xact_lock(hashtextextended($1,0))",["agentsmith-lite:sandbox:agentsmith"]);
-      const policy=store.patchProjectResourcePolicy(task.projectId,{activeTasksLimit:2},at);
-      assert.equal((await completesWithin(policy,2_000))?.activeTasksLimit,2);
+      const policy=store.patchProjectResourcePolicy(task.projectId,{sandboxLimit:2},at);
+      assert.equal((await completesWithin(policy,2_000))?.sandboxLimit,2);
       const admission=store.restartTaskSandboxAtomically({expectedReleasedRunId:null,task:replacement,runtimeState:{botifiedBaseUrl:"http://policy-lock"},sandboxRun:replacementRun,reservedAt:replacement.updatedAt,admission:{namespace:"agentsmith",namespaceLimit:1},...restartAdmissionReceipt(replacement,"policy-lock")});
       assert.equal(await settlesWithin(admission,50),false);
       await blocker.query("commit");
@@ -532,7 +786,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(created.filter((result)=>result.restarted).length,1);
     assert.equal(new Set(created.map((result)=>result.task.currentRunId)).size,1);
     assert.equal((await store.listTaskMessages(task.id)).filter((item)=>["message_first","message_second"].includes(item.id)).length,2);
-    assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeSandboxes,1);
     assert.equal((await store.sandboxRuns.listActive()).filter((item)=>item.taskId===task.id).length,1);
     assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,2);
   });
@@ -586,7 +840,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   });
 
   it("completes resource idempotency only for the matching Project and operation",async()=>{
-    await store.createProject({id:"project_idempotency_other",workspaceId:"workspace_atomic",name:"Other Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_idempotency_other",taskConcurrencyLimit:1,createdAt:at,updatedAt:at});
+    await store.createProject({id:"project_idempotency_other",workspaceId:"workspace_atomic",name:"Other Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_idempotency_other",sandboxLimit:1,createdAt:at,updatedAt:at});
     const resourceId="message_shared_resource";
     const records=[
       {projectId:"project_atomic",operation:"message" as const,key:"target",requestHash:"target-hash",claimToken:"target-claim"},
@@ -845,7 +1099,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     }else{
       assert.equal(restarted.kind,"conflict");
       assert.equal(deletion.kind,"ready");
-      assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeTasks,0);
+      assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeSandboxes,0);
       assert.equal(await store.sandboxRuns.get(replacement.currentRunId!),null);
     }
   });
@@ -900,10 +1154,10 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       ...firstInput,
       sandboxRun:{...firstRun,projectId:"project_wrong"}
     })).kind,"conflict");
-    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeTasks,0);
+    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,0);
     assert.equal((await store.restartTaskSandboxAtomically(firstInput)).kind,"restarted");
     assert.equal((await store.findTask(firstTask.id))?.currentRunId,firstRun.runId);
-    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
     assert.equal((await store.listTaskMessages(firstTask.id)).length,0);
     assert.equal((await store.restartTaskSandboxAtomically(firstInput)).kind,"conflict");
     assert.equal((await store.restartTaskSandboxAtomically({
@@ -912,7 +1166,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       task:{...firstReplacement,currentRunId:"run_after_running"},
       sandboxRun:{...firstRun,runId:"run_after_running"}
     })).kind,"conflict");
-    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
     const capacityTask={...firstTask,id:"task_capacity",fileLibraryId:"library_capacity"};
     assert.equal((await store.createTaskAtomically({
       task:capacityTask,
@@ -932,12 +1186,12 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     })).kind,"capacity_rejected");
     assert.equal((await store.findTask(capacityTask.id))?.currentRunId,null);
     assert.equal(await store.sandboxRuns.get(capacityRun.runId),null);
-    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
 
     const projectId="project_restart";
     const credentialId="credential_restart";
     const endpointId="endpoint_restart";
-    await store.createProject({id:projectId,workspaceId:"workspace_atomic",name:"Restart Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_restart",taskConcurrencyLimit:1,createdAt:at,updatedAt:at});
+    await store.createProject({id:projectId,workspaceId:"workspace_atomic",name:"Restart Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_restart",sandboxLimit:1,createdAt:at,updatedAt:at});
     await store.createProjectCredential({id:credentialId,projectId,name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:"restart",version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
     await store.createEndpoint({id:endpointId,projectId,name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId,capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
     const releasedTask={...taskRecord("task_restart","library_restart","run_released"),projectId,endpointId};
@@ -960,10 +1214,10 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       ...restartAdmissionReceipt(restartedTask,"restart")
     };
     assert.equal((await store.restartTaskSandboxAtomically({...restartInput,expectedReleasedRunId:"run_missing"})).kind,"conflict");
-    assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,0);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.activeSandboxes,0);
     assert.equal((await store.restartTaskSandboxAtomically(restartInput)).kind,"restarted");
     assert.equal((await store.findTask(releasedTask.id))?.currentRunId,restartedRun.runId);
-    assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(projectId))?.activeSandboxes,1);
     assert.equal((await store.listTaskMessages(releasedTask.id)).length,0);
   });
 
@@ -1026,7 +1280,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const measuredUsage=await store.findProjectResourceUsage("project_atomic");
     assert.equal(measuredUsage?.projectFileBytes,17);
     assert.equal(measuredUsage?.projectFileBytesMeasuredAt,fileMeasuredAt);
-    await store.adjustProjectResourceUsage({projectId:"project_atomic",delta:{activeTasks:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:1},updatedAt:"2026-07-23T00:00:45.000Z"});
+    await store.adjustProjectResourceUsage({projectId:"project_atomic",delta:{activeSandboxes:0,providerRequests:0,providerTokens:0,providerCost:0,projectFileBytes:1},updatedAt:"2026-07-23T00:00:45.000Z"});
     const projectedUsage=await store.findProjectResourceUsage("project_atomic");
     assert.equal(projectedUsage?.projectFileBytes,18);
     assert.equal(projectedUsage?.projectFileBytesMeasuredAt,fileMeasuredAt);
@@ -1130,7 +1384,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
   async function createProjectFixture(projectId:string):Promise<void>{
     const credentialId=`credential_${projectId}`;
-    await store.createProject({id:projectId,workspaceId:"workspace_atomic",name:projectId,ownerUserId:"user_atomic",rootPath:`workspaces/workspace_atomic/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:at,updatedAt:at});
+    await store.createProject({id:projectId,workspaceId:"workspace_atomic",name:projectId,ownerUserId:"user_atomic",rootPath:`workspaces/workspace_atomic/projects/${projectId}`,sandboxLimit:1,createdAt:at,updatedAt:at});
     await store.createProjectCredential({id:credentialId,projectId,name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:projectId,version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
     await store.createEndpoint({id:`endpoint_${projectId}`,projectId,name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId,capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
   }

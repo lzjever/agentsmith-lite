@@ -66,7 +66,7 @@ function ProjectOverviewProjectPage({ workspaceId, projectId }: { workspaceId: s
       {lifecycleStatus !== "active" || workspaceLifecycleStatus !== "active" ? <Banner status="warning" title="Project is read-only" description={projectLifecycleMessage(lifecycleStatus, workspaceLifecycleStatus)} /> : null}
       <section className="grid divide-y divide-border border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-y-0" aria-label="Project availability">
         <Availability label="Task endpoints" value={overview.taskReadyEndpointCount} detail={overview.taskReadyEndpointCount === 1 ? "tool-capable connection" : "tool-capable connections"} />
-        <Availability label="Task capacity" value={overview.project.taskConcurrencyLimit} detail="concurrent sandboxes" />
+        <Availability label="Sandbox limit" value={overview.project.sandboxLimit} detail="concurrent sandboxes" />
       </section>
       <section className="grid gap-10 pt-1 xl:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.8fr)]">
         <div>

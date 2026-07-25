@@ -36,7 +36,7 @@ import { MemberDirectoryPicker } from "../members/MemberDirectoryPicker";
 import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 
 const labels = {
-  activeTasks: "Active tasks",
+  activeSandboxes: "Active sandboxes",
   providerRequests: "Provider requests",
   providerTokens: "Provider tokens",
   providerCost: "Provider cost",

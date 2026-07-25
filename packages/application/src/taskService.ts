@@ -360,7 +360,7 @@ export class TaskService {
         throw new SandboxRetryableProductError(created.responseStatus,created.responseBody);
       }
       persisted=created.task;
-      if(create.reserveActive)await this.refreshActiveTaskAlerts(projectId);
+      if(create.reserveActive)await this.refreshSandboxCapacityAlerts(projectId);
       await this.promoteTaskPreparation(project.rootPath,library,id,input.fileLibrary.mode==="create_new",marker);
       await this.markCurrentTaskRunReady(persisted);
       return this.taskPresentation(userId,persisted);
@@ -839,7 +839,7 @@ export class TaskService {
       if(created.kind==="conflict")throw new ProductError("Task message or sandbox changed concurrently",409,"task_message_conflict");
       idempotencyCompleted=true;
       try{
-        if(created.restarted)await this.refreshActiveTaskAlerts(current.projectId);
+        if(created.restarted)await this.refreshSandboxCapacityAlerts(current.projectId);
         await this.ensureLiveSandbox(userId,created.task);
         const persisted=await this.store.findTaskMessage(created.message.id)??created.message;
         await this.dispatchTaskMessage(persisted);
@@ -987,9 +987,9 @@ export class TaskService {
     };
     await this.reconcileTaskPreparations(result.failedTaskIds);
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
-    const activeTasks = await this.store.listActiveTasks();
-    result.activeTaskCount=activeTasks.length;
-    for (const task of activeTasks) {
+    const activeSandboxes = await this.store.listActiveTasks();
+    result.activeTaskCount=activeSandboxes.length;
+    for (const task of activeSandboxes) {
       try {
         if(!await this.activeSandboxRun(task))continue;
         await this.syncTaskTimeline(task);
@@ -2483,9 +2483,9 @@ export class TaskService {
     return{namespace:this.config.namespace,namespaceLimit:1};
   }
 
-  private async refreshActiveTaskAlerts(projectId:string):Promise<void>{
-    try{await this.policies.refreshActiveTaskAlerts(projectId);}
-    catch(error){console.error(`Active Task alert refresh failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
+  private async refreshSandboxCapacityAlerts(projectId:string):Promise<void>{
+    try{await this.policies.refreshSandboxCapacityAlerts(projectId);}
+    catch(error){console.error(`Sandbox capacity alert refresh failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);}
   }
 
   private async bestEffortRecordProjectSandboxCapacityRejected(projectId:string):Promise<void>{

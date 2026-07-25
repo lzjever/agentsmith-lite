@@ -87,18 +87,18 @@ describe("profile and settings services", () => {
     const owner = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-owner", email: "settings-owner@example.test", emailVerified: true });
     const successor = await services.auth.loginExternalPrincipal({ issuer: "https://idp.test", subject: "settings-successor", email: "settings-successor@example.test", emailVerified: true });
     const workspace = await services.workspaces.createWorkspace(owner.user.id, { name: "Workspace" });
-    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project", taskConcurrencyLimit: 2 });
+    const project = await services.workspaces.createProject(owner.user.id, workspace.id, { name: "Project", sandboxLimit: 2 });
     await services.workspaceMemberships.add(owner.user.id, workspace.id, { email: successor.user.email }, "admin");
     await services.memberships.addMember(owner.user.id, project.id, successor.user.id, "admin");
 
     const updateProjectName = store.updateProjectName.bind(store);
     store.updateProjectName = async (projectId, name, updatedAt, expectedName) => {
       await store.transferProjectOwner(projectId, owner.user.id, successor.user.id, updatedAt);
-      await store.patchProjectResourcePolicy(projectId, { activeTasksLimit: 7 }, updatedAt);
+      await store.patchProjectResourcePolicy(projectId, { sandboxLimit: 7 }, updatedAt);
       return updateProjectName(projectId, name, updatedAt, expectedName);
     };
     const savedProject = (await services.settings.updateProject(owner.user.id, project.id, { name: "Renamed project", expectedName: project.name })).project;
-    assert.deepEqual({ name: savedProject.name, ownerUserId: savedProject.ownerUserId, taskConcurrencyLimit: savedProject.taskConcurrencyLimit }, { name: "Renamed project", ownerUserId: successor.user.id, taskConcurrencyLimit: 7 });
+    assert.deepEqual({ name: savedProject.name, ownerUserId: savedProject.ownerUserId, sandboxLimit: savedProject.sandboxLimit }, { name: "Renamed project", ownerUserId: successor.user.id, sandboxLimit: 7 });
 
     const updateWorkspaceName = store.updateWorkspaceName.bind(store);
     store.updateWorkspaceName = async (workspaceId, name, updatedAt, expectedName) => {

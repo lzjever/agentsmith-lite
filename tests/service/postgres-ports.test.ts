@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
 import { readPostgresMigrations } from "../../packages/adapters-postgres/src/migrations.js";
+import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
+import type { BeginTaskIdempotencyInput, TaskIdempotencyOperation } from "../../packages/ports/src/store.js";
 
 describe("postgres adapter ports", () => {
   it("exposes JSONB document and fenced lease semantics without Redis or Mongo", async () => {
@@ -34,6 +36,222 @@ describe("postgres adapter ports", () => {
     assert.doesNotMatch(migrationSql, /juicefs/i);
     assert.doesNotMatch(migrationSql, /redis/i);
     assert.doesNotMatch(migrationSql, /mongo/i);
+  });
+
+  it("normalizes completed PostgreSQL receipts only at operation-specific DTO fields", async () => {
+    function receipt(operation: TaskIdempotencyOperation, responseBody: unknown) {
+      const row = {
+        actor_id: "user_receipt",
+        project_id: "project_receipt",
+        operation,
+        idempotency_key: `${operation}-key`,
+        request_hash: `legacy-${operation}-request-hash`,
+        resource_id: "project_receipt",
+        status: "completed",
+        claim_token: "claim-token",
+        lease_expires_at: "2026-07-25T00:01:00.000Z",
+        response_status: 200,
+        response_body: responseBody,
+        created_at: "2026-07-25T00:00:00.000Z",
+        updated_at: "2026-07-25T00:00:01.000Z",
+      };
+      const client = {
+        async query(sql: string) {
+          if (/select \* from task_idempotency_records/i.test(sql)) return { rows: [row], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        },
+        release() {},
+      };
+      const pool = {
+        async connect() { return client; },
+        async query() { return { rows: [row], rowCount: 1 }; },
+      };
+      const store = Object.create(PostgresProductStore.prototype) as PostgresProductStore;
+      Object.defineProperty(store, "pool", { value: pool });
+      const input: BeginTaskIdempotencyInput = {
+        actorId: row.actor_id,
+        projectId: row.project_id,
+        operation,
+        key: row.idempotency_key,
+        requestHash: row.request_hash,
+        resourceId: row.resource_id,
+        claimToken: "new-claim-token",
+        now: "2026-07-25T00:00:02.000Z",
+        leaseExpiresAt: "2026-07-25T00:01:02.000Z",
+      };
+      return { input, row, store };
+    }
+
+    const projectStored = {
+      id: "project_receipt",
+      taskConcurrencyLimit: 2,
+      title: "active_tasks",
+      prompt: "active_tasks_limit",
+      context: { taskConcurrencyLimit: 9, activeTasksLimit: 3, activeTasks: 1, metric: "active_tasks" },
+      content: ["active_tasks", "active_tasks_limit", { taskConcurrencyLimit: 4 }],
+      similarKey: { taskConcurrencyLimits: 4, activeTask: 1 },
+    };
+    const projectExpected = {
+      id: "project_receipt",
+      sandboxLimit: 2,
+      title: "active_tasks",
+      prompt: "active_tasks_limit",
+      context: { taskConcurrencyLimit: 9, activeTasksLimit: 3, activeTasks: 1, metric: "active_tasks" },
+      content: ["active_tasks", "active_tasks_limit", { taskConcurrencyLimit: 4 }],
+      similarKey: { taskConcurrencyLimits: 4, activeTask: 1 },
+    };
+    const projectReceipt = receipt("project.archive", projectStored);
+    assert.deepEqual(await projectReceipt.store.beginTaskIdempotency(projectReceipt.input), {
+      kind: "replay",
+      resourceId: projectReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: projectExpected,
+    });
+    assert.deepEqual(await projectReceipt.store.findTaskIdempotency({
+      actorId: projectReceipt.input.actorId,
+      projectId: projectReceipt.input.projectId,
+      operation: projectReceipt.input.operation,
+      key: projectReceipt.input.key,
+      requestHash: projectReceipt.input.requestHash,
+    }), {
+      kind: "replay",
+      resourceId: projectReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: projectExpected,
+    });
+    assert.deepEqual(await projectReceipt.store.findTaskIdempotencyByResource({
+      actorId: projectReceipt.input.actorId,
+      operation: projectReceipt.input.operation,
+      key: projectReceipt.input.key,
+      requestHash: projectReceipt.input.requestHash,
+      resourceId: projectReceipt.input.resourceId,
+    }), {
+      kind: "replay",
+      resourceId: projectReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: projectExpected,
+    });
+    const unarchiveReceipt = receipt("project.unarchive", projectStored);
+    assert.deepEqual(await unarchiveReceipt.store.beginTaskIdempotency(unarchiveReceipt.input), {
+      kind: "replay",
+      resourceId: unarchiveReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: projectExpected,
+    });
+
+    const settingsStored = {
+      project: {
+        id: "project_receipt",
+        taskConcurrencyLimit: 3,
+        title: "active_tasks",
+        context: { taskConcurrencyLimit: 9, activeTasksLimit: 4 },
+      },
+      workspaceLifecycleStatus: "active",
+      content: ["active_tasks", "active_tasks_limit"],
+      activeTasksLimit: 7,
+    };
+    const settingsReceipt = receipt("project.settings.update", settingsStored);
+    assert.equal(settingsReceipt.input.requestHash, settingsReceipt.row.request_hash);
+    assert.deepEqual(await settingsReceipt.store.beginTaskIdempotency(settingsReceipt.input), {
+      kind: "replay",
+      resourceId: settingsReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: {
+        project: {
+          id: "project_receipt",
+          sandboxLimit: 3,
+          title: "active_tasks",
+          context: { taskConcurrencyLimit: 9, activeTasksLimit: 4 },
+        },
+        workspaceLifecycleStatus: "active",
+        content: ["active_tasks", "active_tasks_limit"],
+        activeTasksLimit: 7,
+      },
+    });
+
+    const policyStored = {
+      projectId: "project_receipt",
+      activeTasksLimit: 4,
+      title: "active_tasks",
+      context: { activeTasksLimit: 9, activeTasks: 2, metric: "active_tasks" },
+      content: ["active_tasks", "active_tasks_limit"],
+    };
+    const policyReceipt = receipt("project.policy.update", policyStored);
+    assert.equal(policyReceipt.input.requestHash, policyReceipt.row.request_hash);
+    assert.deepEqual(await policyReceipt.store.beginTaskIdempotency(policyReceipt.input), {
+      kind: "replay",
+      resourceId: policyReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: {
+        projectId: "project_receipt",
+        sandboxLimit: 4,
+        title: "active_tasks",
+        context: { activeTasksLimit: 9, activeTasks: 2, metric: "active_tasks" },
+        content: ["active_tasks", "active_tasks_limit"],
+      },
+    });
+
+    const alertStored = {
+      id: "alert_receipt",
+      type: "active_tasks_limit",
+      metric: "active_tasks",
+      title: "active_tasks",
+      context: { type: "active_tasks_limit", metric: "active_tasks", activeTasks: 1 },
+      content: ["active_tasks", "active_tasks_limit"],
+    };
+    for (const operation of ["project.alert.transition", "project.alert.acknowledge", "project.alert.silence"] as const) {
+      const alertReceipt = receipt(operation, alertStored);
+      assert.deepEqual(await alertReceipt.store.beginTaskIdempotency(alertReceipt.input), {
+        kind: "replay",
+        resourceId: alertReceipt.row.resource_id,
+        responseStatus: 200,
+        responseBody: { ...alertStored, type: "sandbox_capacity", metric: "active_sandboxes" },
+      });
+    }
+
+    const ruleStored = {
+      id: "rule_receipt",
+      alertType: "active_tasks_limit",
+      metric: "active_tasks",
+      name: "active_tasks",
+      context: { alertType: "active_tasks_limit", metric: "active_tasks" },
+      content: ["active_tasks", "active_tasks_limit"],
+    };
+    for (const operation of ["project.alert-rule.create", "project.alert-rule.update", "project.alert-rule.delete"] as const) {
+      const ruleReceipt = receipt(operation, ruleStored);
+      assert.deepEqual(await ruleReceipt.store.beginTaskIdempotency(ruleReceipt.input), {
+        kind: "replay",
+        resourceId: ruleReceipt.row.resource_id,
+        responseStatus: 200,
+        responseBody: { ...ruleStored, alertType: "sandbox_capacity", metric: "active_sandboxes" },
+      });
+    }
+
+    const taskStored = {
+      title: "active_tasks",
+      prompt: "active_tasks_limit",
+      context: { taskConcurrencyLimit: 2, activeTasksLimit: 3, activeTasks: 1 },
+      content: ["active_tasks", "active_tasks_limit", { activeTasks: 1 }],
+      taskConcurrencyLimit: 2,
+      activeTasksLimit: 3,
+      activeTasks: 1,
+    };
+    const taskReceipt = receipt("create", taskStored);
+    assert.deepEqual(await taskReceipt.store.beginTaskIdempotency(taskReceipt.input), {
+      kind: "replay",
+      resourceId: taskReceipt.row.resource_id,
+      responseStatus: 200,
+      responseBody: taskStored,
+    });
+    assert.deepEqual(
+      await taskReceipt.store.beginTerminalStart({ idempotency: taskReceipt.input } as Parameters<PostgresProductStore["beginTerminalStart"]>[0]),
+      { kind: "replay", responseStatus: 200, responseBody: taskStored },
+    );
+    assert.deepEqual(
+      await taskReceipt.store.failTaskSandboxStartupAtomically({ idempotency: taskReceipt.input } as unknown as Parameters<PostgresProductStore["failTaskSandboxStartupAtomically"]>[0]),
+      { kind: "replay", responseStatus: 200, responseBody: taskStored },
+    );
+    assert.deepEqual(projectStored.taskConcurrencyLimit, 2);
   });
 
   it("defines only the Phase 1 file library persistence model in migration 060", async () => {

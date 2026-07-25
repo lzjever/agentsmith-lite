@@ -51,11 +51,28 @@ describe("alert rule evaluation", () => {
     const { services, owner, project } = await setup("invalid-gauge-scope");
     await assert.rejects(
       () => services.alertRules.create(owner.id, project.id, {
-        alertType: "active_tasks_limit",
+        alertType: "sandbox_capacity",
         scope: { kind: "endpoint", endpointId: "endpoint_1" },
       }),
       /only supports project scope/,
     );
+  });
+
+  it("emits Sandbox capacity alerts and notification copy with only public Sandbox vocabulary", async () => {
+    const { store, services, owner, project } = await setup("sandbox-capacity-copy");
+    const rule = await services.alertRules.create(owner.id, project.id, {
+      alertType: "sandbox_capacity",
+      threshold: 0,
+    });
+    assert.equal(rule.name, "Sandbox capacity");
+
+    const alert = (await services.policies.alerts(owner.id, project.id)).items.find((item) => item.ruleId === rule.id);
+    assert.equal(alert?.type, "sandbox_capacity");
+    assert.equal(alert?.metric, "active_sandboxes");
+    const notification = (await store.listUserNotifications(owner.id)).find((item) => item.resourceId === alert?.id);
+    assert.equal(notification?.title, "Sandbox capacity reached");
+    assert.equal(notification?.body, "Project: Active sandboxes 0 of 0.");
+    assert.doesNotMatch(JSON.stringify({ alert, notification }), /activeTasks|active_tasks|Task capacity|Active tasks/);
   });
 
   it("defaults provider and failure rules to one hour and keeps gauges windowless", async () => {
@@ -71,7 +88,7 @@ describe("alert rule evaluation", () => {
       const rule = await services.alertRules.create(owner.id, project.id, { alertType });
       assert.equal(rule.windowSeconds, 3600, alertType);
     }
-    for (const alertType of ["active_tasks_limit", "project_file_bytes_limit"] as const) {
+    for (const alertType of ["sandbox_capacity", "project_file_bytes_limit"] as const) {
       const rule = await services.alertRules.create(owner.id, project.id, { alertType });
       assert.equal(rule.windowSeconds, null, alertType);
       await assert.rejects(

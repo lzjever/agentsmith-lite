@@ -16,7 +16,7 @@ import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 import { Dialog } from "../ui/Dialog";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
-  { value: "active_tasks_limit", label: "Task capacity", metric: "active_tasks", defaultWindowSeconds: null },
+  { value: "sandbox_capacity", label: "Sandbox capacity", metric: "active_sandboxes", defaultWindowSeconds: null },
   { value: "provider_requests_limit", label: "Provider requests", metric: "provider_requests", defaultWindowSeconds: null },
   { value: "provider_tokens_limit", label: "Provider tokens", metric: "provider_tokens", defaultWindowSeconds: null },
   { value: "provider_cost_limit", label: "Provider cost", metric: "provider_cost", defaultWindowSeconds: null },
@@ -95,7 +95,7 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, saving, c
               />
               <TextInput
                 label="Metric"
-                value={value.metric.replaceAll("_", " ")}
+                value={value.metric === "active_sandboxes" ? "Active sandboxes" : value.metric.replaceAll("_", " ")}
                 isDisabled
                 disabledMessage="Metric is determined by the alert type."
                 width="100%"
@@ -161,4 +161,4 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, saving, c
 export function alertRuleType(alertType: ProjectAlertType) {
   return alertRuleTypes.find((type) => type.value === alertType) ?? alertRuleTypes[0]!;
 }
-function supportsEndpointScope(type:ProjectAlertType){return type!=="active_tasks_limit"&&type!=="project_file_bytes_limit";}
+function supportsEndpointScope(type:ProjectAlertType){return type!=="sandbox_capacity"&&type!=="project_file_bytes_limit";}

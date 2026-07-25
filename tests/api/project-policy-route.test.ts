@@ -28,16 +28,20 @@ describe("PATCH project policy", () => {
 
       const policy = await requestJson(api.baseUrl, "PATCH", `/api/v1/projects/${project.id}/policy`, {
         expectedUpdatedAt: currentPolicy.updatedAt,
+        sandboxLimit: 3,
         providerRequestsLimit: null,
         providerCostLimit: 3.5
       }, cookie, csrf);
 
-      assert.equal(policy.activeTasksLimit, 2);
+      assert.equal(policy.sandboxLimit, 3);
+      assert.equal("activeTasksLimit" in policy, false);
       assert.equal(policy.providerRequestsLimit, null);
       assert.equal(policy.providerCostLimit, 3.5);
       assert.equal(policy.providerTokensLimit, null);
-      const invalidActiveLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, activeTasksLimit: null }) });
-      assert.equal(invalidActiveLimit.status, 400);
+      const invalidSandboxLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, sandboxLimit: null }) });
+      assert.equal(invalidSandboxLimit.status, 400);
+      const legacyLimit = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, activeTasksLimit: 4 }) });
+      assert.equal(legacyLimit.status, 400);
       const fractionalRequestWindow = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/policy`, { method: "PATCH", headers: { "content-type": "application/json", cookie, "x-csrf-token": csrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ expectedUpdatedAt: policy.updatedAt, endpointWindows: [{ endpointId: "missing", metric: "providerRequests", limit: 1.5, windowSeconds: 3600 }] }) });
       assert.equal(fractionalRequestWindow.status, 400);
       assert.match((await fractionalRequestWindow.json() as { error: string }).error, /count limits must be integers/i);

@@ -39,7 +39,7 @@ function workspace(id:string) {
 }
 
 function project(id:string) {
-  return { id, workspaceId: "workspace_1", name: "Project", ownerUserId: "owner", rootPath: "workspaces/workspace_1/projects/project_1", taskConcurrencyLimit: 2, lifecycleStatus: "active", pinnedAt: null, createdAt: "2026-07-24T00:00:00.000Z", updatedAt: "2026-07-24T00:00:00.000Z" };
+  return { id, workspaceId: "workspace_1", name: "Project", ownerUserId: "owner", rootPath: "workspaces/workspace_1/projects/project_1", sandboxLimit: 2, lifecycleStatus: "active", pinnedAt: null, createdAt: "2026-07-24T00:00:00.000Z", updatedAt: "2026-07-24T00:00:00.000Z" };
 }
 
 function requestUrl(input:string|URL|Request):string {

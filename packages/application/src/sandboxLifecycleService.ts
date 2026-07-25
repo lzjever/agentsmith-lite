@@ -509,15 +509,15 @@ export class SandboxLifecycleService {
     const result=await this.store.completeSandboxRunRelease({runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,auditEvent:{id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},createdAt:releasedAt}});
     if(result==="conflict")return null;
     try{
-      await evaluateProjectAlertRules(this.store,current.projectId,"active_tasks_limit");
-      await recoverProjectAlerts(this.store,current.projectId,"active_tasks_limit",{unconfiguredFallback:true});
+      await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
+      await recoverProjectAlerts(this.store,current.projectId,"sandbox_capacity",{unconfiguredFallback:true});
       if(stored.releaseReason!=="failed"){
         const endpointId=(await this.store.findTask(current.taskId))?.endpointId;
         await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_failure",endpointId?{endpointId}:{});
         await recoverProjectAlerts(this.store,current.projectId,"sandbox_failure",{...(endpointId?{endpointId}:{}),unconfiguredFallback:true});
       }
     }
-    catch(error){console.error(`Active Task alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
+    catch(error){console.error(`Sandbox capacity alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
     return{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
   }
 

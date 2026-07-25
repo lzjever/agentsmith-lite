@@ -21,7 +21,7 @@ describe("profile and settings API", () => {
     try {
       assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects/legacy`, { name: "Legacy project" }, "legacy-project-create")).response.status, 404);
       assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects`, { name: "Legacy project", governance: {} }, "legacy-project-body")).response.status, 400);
-      assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects`, { name: "Invalid concurrency", taskConcurrencyLimit: "2" }, "invalid-project-concurrency")).response.status, 400);
+      assert.equal((await call("POST", `/api/v1/workspaces/${strictWorkspace.id}/projects`, { name: "Invalid concurrency", sandboxLimit: "2" }, "invalid-project-concurrency")).response.status, 400);
     } finally {
       await json("DELETE", `/api/v1/workspaces/${strictWorkspace.id}`, undefined, "strict-workspace-delete");
     }

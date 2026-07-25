@@ -308,7 +308,7 @@ export class InMemoryProductStore implements ProductStore {
     });
     this.policies.set(project.id, {
       projectId: project.id,
-      activeTasksLimit: project.taskConcurrencyLimit,
+      sandboxLimit: project.sandboxLimit,
       providerRequestsLimit: null,
       providerTokensLimit: null,
       providerCostLimit: null,
@@ -319,7 +319,7 @@ export class InMemoryProductStore implements ProductStore {
     });
     this.usage.set(project.id, {
       projectId: project.id,
-      activeTasks: 0,
+      activeSandboxes: 0,
       providerRequests: 0,
       providerTokens: 0,
       providerCost: 0,
@@ -542,9 +542,9 @@ export class InMemoryProductStore implements ProductStore {
     if (!policy || (expectedUpdatedAt !== undefined && policy.updatedAt !== expectedUpdatedAt)) return null;
     const updated = { ...policy, ...input, updatedAt };
     this.policies.set(projectId, clone(updated));
-    if (input.activeTasksLimit !== undefined && input.activeTasksLimit !== null) {
+    if (input.sandboxLimit !== undefined && input.sandboxLimit !== null) {
       const project = this.projects.get(projectId);
-      if (project) this.projects.set(projectId, clone({ ...project, taskConcurrencyLimit: input.activeTasksLimit, updatedAt }));
+      if (project) this.projects.set(projectId, clone({ ...project, sandboxLimit: input.sandboxLimit, updatedAt }));
     }
     return clone(updated);
   }
@@ -558,7 +558,7 @@ export class InMemoryProductStore implements ProductStore {
     return clone(next);
   }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
-    if(input.delta.activeTasks!==0)throw new Error("active_tasks is an authoritative Sandbox Run projection");
+    if(input.delta.activeSandboxes!==0)throw new Error("active_sandboxes is an authoritative Sandbox Run projection");
     const policy = this.policies.get(input.projectId);
     const usage = this.usage.get(input.projectId);
     if (!policy || !usage || (input.limit && exceedsLimit(policy, usage, input))) return null;
@@ -682,7 +682,7 @@ export class InMemoryProductStore implements ProductStore {
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&(value.actorId??null)===input.actorId&&value.status!=="failed"&&value.reservedAt>=input.since).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||left.id.localeCompare(right.id));return{current:settlements.reduce((sum,value)=>sum+providerWindowValue(value,input.metric),0),oldestReservedAt:settlements[0]?.reservedAt??null};}
   async measureProjectAlertRule(input: { projectId:string; alertType:ProjectAlertType; metric:import("../../contracts/src/api.js").AlertRuleMetric; windowSeconds:number|null; endpointId:string|null; now:string }): Promise<number> {
     const usage=this.usage.get(input.projectId);
-    if(input.metric==="active_tasks")return usage?.activeTasks??0;
+    if(input.metric==="active_sandboxes")return usage?.activeSandboxes??0;
     if(input.metric==="project_file_bytes")return usage?.projectFileBytes??0;
     const cutoff=input.windowSeconds===null?null:Date.parse(input.now)-input.windowSeconds*1000;
     if(input.metric!=="failure_count")return [...this.providerSettlements.values()].filter(value=>value.projectId===input.projectId&&value.status==="settled"&&value.settledAt!==null&&(cutoff===null||Date.parse(value.settledAt)>=cutoff)&&(input.endpointId===null||value.endpointId===input.endpointId)).reduce((sum,value)=>sum+(input.metric==="provider_requests"?1:input.metric==="provider_tokens"?(value.usage?.tokens??0):(value.usage?.cost??0)),0);
@@ -1593,9 +1593,9 @@ export class InMemoryProductStore implements ProductStore {
     const activeSandboxes=runs.filter((candidate)=>candidate.projectId===run.projectId&&candidate.state!=="released").length;
     const policy=this.policies.get(run.projectId);
     if(!policy)throw new Error("Sandbox admission Project policy is unavailable");
-    if(policy.activeTasksLimit!==null&&activeSandboxes>=policy.activeTasksLimit){
+    if(policy.sandboxLimit!==null&&activeSandboxes>=policy.sandboxLimit){
       return this.rejectSandboxAdmission(
-        {kind:"project_capacity_rejected",activeSandboxes,sandboxLimit:policy.activeTasksLimit},
+        {kind:"project_capacity_rejected",activeSandboxes,sandboxLimit:policy.sandboxLimit},
         idempotency,presentation,rejectedAuditEvent,updatedAt
       );
     }
@@ -1636,7 +1636,7 @@ export class InMemoryProductStore implements ProductStore {
     const usage = this.usage.get(projectId);
     if(usage)this.usage.set(projectId,clone({
       ...usage,
-      activeTasks:this.sandboxRunRecords.snapshot().filter((run)=>run.projectId===projectId&&run.state!=="released").length,
+      activeSandboxes:this.sandboxRunRecords.snapshot().filter((run)=>run.projectId===projectId&&run.state!=="released").length,
       updatedAt
     }));
   }
@@ -2002,7 +2002,7 @@ function validateTaskRunReservation(input:AtomicTaskCreateInput):void{
 }
 
 function requiredAdmissionCreateIdempotency(input:AtomicTaskCreateInput):BeginTaskIdempotencyInput{
-  if(!input.idempotency||input.rejectionPresentation!==null||!input.rejectedAuditEvent)throw new Error("Active Task creation requires admission idempotency and rejection receipt inputs");
+  if(!input.idempotency||input.rejectionPresentation!==null||!input.rejectedAuditEvent)throw new Error("Sandbox creation requires admission idempotency and rejection receipt inputs");
   return input.idempotency;
 }
 
@@ -2148,8 +2148,8 @@ function taskIdempotencyKey(input: Pick<BeginTaskIdempotencyInput, "actorId" | "
 }
 
 function exceedsLimit(policy: ProjectResourcePolicy, usage: ProjectResourceUsage, input: ProjectResourceUsageAdjustment): boolean {
-  const key = input.limit === "active_tasks_limit" ? "activeTasks" : input.limit === "provider_requests_limit" ? "providerRequests" : input.limit === "provider_tokens_limit" ? "providerTokens" : input.limit === "provider_cost_limit" ? "providerCost" : "projectFileBytes";
-  const maximum = policy[`${key}Limit` as keyof ProjectResourcePolicy];
+  const key = input.limit === "sandbox_capacity" ? "activeSandboxes" : input.limit === "provider_requests_limit" ? "providerRequests" : input.limit === "provider_tokens_limit" ? "providerTokens" : input.limit === "provider_cost_limit" ? "providerCost" : "projectFileBytes";
+  const maximum = input.limit === "sandbox_capacity" ? policy.sandboxLimit : policy[`${key}Limit` as keyof ProjectResourcePolicy];
   return input.delta[key] > 0 && typeof maximum === "number" && usage[key] + input.delta[key] > maximum;
 }
 

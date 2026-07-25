@@ -277,7 +277,7 @@ describe("file library service", () => {
     const before=await directoryTree(libraryRoot);
     const policy=await services.store.findProjectResourcePolicy(projectId);
     assert.ok(policy);
-    await services.store.patchProjectResourcePolicy(projectId,{activeTasksLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
+    await services.store.patchProjectResourcePolicy(projectId,{sandboxLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
     await services.tasks.createTask(ownerId,projectId,{
       endpointId,
       prompt:"occupy the only slot",

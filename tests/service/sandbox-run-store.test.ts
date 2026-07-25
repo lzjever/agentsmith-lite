@@ -53,7 +53,7 @@ describe("sandbox Run store", () => {
     });
     const policy=await store.findProjectResourcePolicy(candidateRun.projectId);
     assert.ok(policy);
-    await store.patchProjectResourcePolicy(candidateRun.projectId,{activeTasksLimit:2},runTimestamp(3),policy.updatedAt);
+    await store.patchProjectResourcePolicy(candidateRun.projectId,{sandboxLimit:2},runTimestamp(3),policy.updatedAt);
     const replay=await store.createTaskAtomically({...input,idempotency:{...idempotency,claimToken:"capacity-replay-claim-2",now:runTimestamp(3),leaseExpiresAt:runTimestamp(5)}});
     assert.deepEqual(replay,{kind:"replay",responseStatus:first.responseStatus,responseBody:first.responseBody});
     assert.equal(await store.findTask(candidateRun.taskId),null);
@@ -123,7 +123,7 @@ describe("sandbox Run store", () => {
     const timestamp = runTimestamp(0);
     await store.createUser({ id:"user_1",email:"user@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp });
     await store.createWorkspace({ id:"workspace_1",name:"Workspace",ownerUserId:"user_1",createdAt:timestamp,updatedAt:timestamp });
-    await store.createProject({ id:"project_1",workspaceId:"workspace_1",name:"Project",ownerUserId:"user_1",rootPath:"workspaces/workspace_1/projects/project_1",taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp });
+    await store.createProject({ id:"project_1",workspaceId:"workspace_1",name:"Project",ownerUserId:"user_1",rootPath:"workspaces/workspace_1/projects/project_1",sandboxLimit:1,createdAt:timestamp,updatedAt:timestamp });
     const task = {
       id:"task_1",workspaceId:"workspace_1",projectId:"project_1",endpointId:"endpoint_1",
       fileLibraryId:"library_1",createdByUserId:"user_1",title:"Task",prompt:"Work",
@@ -377,13 +377,13 @@ describe("sandbox Run store", () => {
       ...firstInput,
       sandboxRun:{...firstRun,projectId:"project_other"}
     })).kind,"conflict");
-    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,0);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,0);
     assert.equal((await firstStore.restartTaskSandboxAtomically(firstInput)).kind,"restarted");
     assert.equal((await firstStore.findTask(firstTask.id))?.currentRunId,firstRun.runId);
-    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
     assert.equal((await firstStore.listTaskMessages(firstTask.id)).length,0);
     assert.equal((await firstStore.restartTaskSandboxAtomically(firstInput)).kind,"conflict");
-    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
     const capacityTask={...firstTask,id:"task_capacity",fileLibraryId:"library_capacity"};
     assert.equal((await firstStore.createTaskAtomically({
       task:capacityTask,
@@ -399,7 +399,7 @@ describe("sandbox Run store", () => {
     })).kind,"capacity_rejected");
     assert.equal((await firstStore.findTask(capacityTask.id))?.currentRunId,null);
     assert.equal(await firstStore.sandboxRuns.get(capacityRun.runId),null);
-    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeTasks,1);
+    assert.equal((await firstStore.findProjectResourceUsage(firstTask.projectId))?.activeSandboxes,1);
 
     const restartStore=createLocalInMemoryProductStore();
     const released=sandboxRun({state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2),fencingToken:2,updatedAt:runTimestamp(2)});
@@ -416,7 +416,7 @@ describe("sandbox Run store", () => {
     };
     assert.equal((await restartStore.restartTaskSandboxAtomically(restartInput)).kind,"restarted");
     assert.equal((await restartStore.findTask(restartTask.id))?.currentRunId,replacementRun.runId);
-    assert.equal((await restartStore.findProjectResourceUsage(restartTask.projectId))?.activeTasks,1);
+    assert.equal((await restartStore.findProjectResourceUsage(restartTask.projectId))?.activeSandboxes,1);
     assert.equal((await restartStore.listTaskMessages(restartTask.id)).length,0);
 
     const missingStore=createLocalInMemoryProductStore();
@@ -429,7 +429,7 @@ describe("sandbox Run store", () => {
       sandboxRun:{...firstRun,runId:"run_after_missing"},
       ...restartAdmission({...firstRun,taskId:missingTask.id,runId:"run_after_missing"},"missing")
     })).kind,"conflict");
-    assert.equal((await missingStore.findProjectResourceUsage(missingTask.projectId))?.activeTasks,0);
+    assert.equal((await missingStore.findProjectResourceUsage(missingTask.projectId))?.activeSandboxes,0);
 
     const staleStore=createLocalInMemoryProductStore();
     const currentReleased=sandboxRun({runId:"run_current",state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2)});
@@ -441,7 +441,7 @@ describe("sandbox Run store", () => {
       sandboxRun:{...replacementRun,runId:"run_after_stale"},
       ...restartAdmission({...replacementRun,taskId:staleTask.id,runId:"run_after_stale"},"stale")
     })).kind,"conflict");
-    assert.equal((await staleStore.findProjectResourceUsage(staleTask.projectId))?.activeTasks,0);
+    assert.equal((await staleStore.findProjectResourceUsage(staleTask.projectId))?.activeSandboxes,0);
 
     const runningStore=createLocalInMemoryProductStore();
     const running=sandboxRun();
@@ -453,7 +453,7 @@ describe("sandbox Run store", () => {
       sandboxRun:{...replacementRun,runId:"run_after_running"},
       ...restartAdmission({...replacementRun,taskId:runningTask.id,runId:"run_after_running"},"running")
     })).kind,"conflict");
-    assert.equal((await runningStore.findProjectResourceUsage(runningTask.projectId))?.activeTasks,1);
+    assert.equal((await runningStore.findProjectResourceUsage(runningTask.projectId))?.activeSandboxes,1);
   });
 
   it("begins Terminal idempotency and reserves its persisted Run in one operation",async()=>{
@@ -595,7 +595,7 @@ describe("sandbox Run store", () => {
               responseBody:{error:{code:"substrate_sandbox_capacity_reached",message:"Local Sandbox capacity unavailable",retryable:true,details:null,presentation:entry==="create"?null:{}}}
             });
         assert.equal(await store.sandboxRuns.get(candidateRun.runId),null);
-        assert.equal((await store.findProjectResourceUsage(projectId))?.activeTasks,scope==="project"?1:0);
+        assert.equal((await store.findProjectResourceUsage(projectId))?.activeSandboxes,scope==="project"?1:0);
         if(entry==="create")assert.equal(await store.findTask(candidateRun.taskId),null);
         if(entry==="message")assert.equal((await store.listTaskMessages(candidateRun.taskId)).length,0);
         const rejectedAudits=(await store.queryProjectAuditEvents(projectId,{limit:20})).items.filter((event)=>event.status==="rejected"&&event.resourceId===candidateRun.taskId);
@@ -653,9 +653,9 @@ describe("sandbox Run store", () => {
     });
     const staleUsage=await releasedStore.findProjectResourceUsage(releasedRun.projectId);
     assert.ok(staleUsage);
-    await releasedStore.upsertProjectResourceUsage({...staleUsage,activeTasks:99});
+    await releasedStore.upsertProjectResourceUsage({...staleUsage,activeSandboxes:99});
     assert.equal((await attemptAdmission(releasedStore,"restart",candidateRun,1)).kind,"restarted");
-    assert.equal((await releasedStore.findProjectResourceUsage(releasedRun.projectId))?.activeTasks,1);
+    assert.equal((await releasedStore.findProjectResourceUsage(releasedRun.projectId))?.activeSandboxes,1);
   });
 
   it("admits one winner for the last Project slot and mixed namespace cold starts",async()=>{
@@ -670,7 +670,7 @@ describe("sandbox Run store", () => {
     ]);
     assert.equal(projectResults.filter((result)=>result.kind==="restarted").length,1);
     assert.equal(projectResults.filter((result)=>result.kind==="capacity_rejected"&&result.admission.kind==="project_capacity_rejected").length,1);
-    assert.equal((await projectStore.findProjectResourceUsage(first.projectId))?.activeTasks,1);
+    assert.equal((await projectStore.findProjectResourceUsage(first.projectId))?.activeSandboxes,1);
 
     const namespaceStore=createLocalInMemoryProductStore();
     const createRun=scopedRun("namespace_race_create",{projectId:"project_create",taskId:"task_create",runId:"run_create",fileLibraryId:"library_create"});
@@ -729,7 +729,7 @@ describe("sandbox Run store", () => {
     assert.equal(result.kind,"created");
     assert.equal(result.kind==="created"?result.restarted:null,false);
     assert.equal(await store.sandboxRuns.get(unusedReplacement.runId),null);
-    assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeSandboxes,1);
   });
 
 });
@@ -738,7 +738,7 @@ async function createTaskWithRun(store:ReturnType<typeof createLocalInMemoryProd
   const timestamp=runTimestamp(0);
   await store.createUser({id:run.startedByUserId,email:"runner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
   await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
-  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,sandboxLimit:1,createdAt:timestamp,updatedAt:timestamp});
   const task={id:run.taskId,workspaceId:run.workspaceId,projectId:run.projectId,endpointId:"endpoint_1",fileLibraryId:run.fileLibraryId,createdByUserId:run.startedByUserId,title:"Task",prompt:"Work",agentContext:"",currentRunId:run.runId,archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
   const active=run.state!=="released";
   const created=await store.createTaskAtomically({
@@ -762,7 +762,7 @@ async function createTaskWithoutRun(store:ReturnType<typeof createLocalInMemoryP
   const timestamp=runTimestamp(0);
   await store.createUser({id:run.startedByUserId,email:"runner@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
   await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
-  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:1,createdAt:timestamp,updatedAt:timestamp});
+  await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:"Project",ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,sandboxLimit:1,createdAt:timestamp,updatedAt:timestamp});
   const task={id:run.taskId,workspaceId:run.workspaceId,projectId:run.projectId,endpointId:"endpoint_1",fileLibraryId:run.fileLibraryId,createdByUserId:run.startedByUserId,title:"Task",prompt:"Work",agentContext:"",currentRunId:null,archivedAt:null,deletedAt:null,createdAt:timestamp,updatedAt:timestamp};
   const created=await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:{id:run.fileLibraryId,workspaceId:run.workspaceId,projectId:run.projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp}});
   assert.equal(created.kind,"created");
@@ -845,7 +845,7 @@ async function ensureScopedProject(
   const timestamp=runTimestamp(0);
   if(!await store.findUserById(run.startedByUserId))await store.createUser({id:run.startedByUserId,email:`${run.startedByUserId}@example.test`,emailVerified:true,passwordHash:"hash",createdAt:timestamp,updatedAt:timestamp});
   if(!await store.findWorkspace(run.workspaceId))await store.createWorkspace({id:run.workspaceId,name:"Workspace",ownerUserId:run.startedByUserId,createdAt:timestamp,updatedAt:timestamp});
-  if(!await store.findProject(run.projectId))await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:run.projectId,ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,taskConcurrencyLimit:projectLimit,createdAt:timestamp,updatedAt:timestamp});
+  if(!await store.findProject(run.projectId))await store.createProject({id:run.projectId,workspaceId:run.workspaceId,name:run.projectId,ownerUserId:run.startedByUserId,rootPath:run.projectSubPath,sandboxLimit:projectLimit,createdAt:timestamp,updatedAt:timestamp});
 }
 
 async function attemptAdmission(

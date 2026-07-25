@@ -781,7 +781,7 @@ function AlertRow({
           className="mt-1"
         >
           {alert.metricValue !== null && alert.metricValue !== undefined
-            ? `${alert.metric?.replaceAll("_", " ")}: ${alert.metricValue}${
+            ? `${alert.metric === "active_sandboxes" ? "Active sandboxes" : alert.metric?.replaceAll("_", " ")}: ${alert.metricValue}${
                 alert.threshold !== null && alert.threshold !== undefined
                   ? ` of ${alert.threshold}`
                   : ""

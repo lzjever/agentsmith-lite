@@ -33,6 +33,13 @@ describe("project alert history API", () => {
       assert.deepEqual(await missingRuleKey.json(), { error: "Idempotency-Key header is required" });
       const removedRuleField = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ alertType: "sandbox_failure", channels: ["email"] }) });
       assert.equal(removedRuleField.status, 400);
+      const capacityRule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "sandbox_capacity" }, ownerCookie, ownerCsrf);
+      assert.equal(capacityRule.alertType, "sandbox_capacity");
+      assert.equal(capacityRule.metric, "active_sandboxes");
+      const legacyType = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ alertType: "active_tasks_limit" }) });
+      assert.equal(legacyType.status, 400);
+      const legacyMetric = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules`, { method: "POST", headers: { "content-type": "application/json", cookie: ownerCookie, "x-csrf-token": ownerCsrf, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ alertType: "sandbox_capacity", metric: "active_tasks" }) });
+      assert.equal(legacyMetric.status, 400);
       const rule = await json(api.baseUrl, "POST", `/api/v1/projects/${project.id}/alert-rules`, { alertType: "sandbox_failure" }, ownerCookie, ownerCsrf);
       const linkedRule = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alert-rules/${rule.id}`, { headers: { cookie: ownerCookie } });
       assert.equal(linkedRule.status, 200);
@@ -81,6 +88,7 @@ describe("project alert history API", () => {
       const history = await fetch(`${api.baseUrl}/api/v1/projects/${project.id}/alerts?view=history`, { headers: { cookie: ownerCookie } });
       assert.deepEqual(new Set((await history.json() as { items: Array<{ status: string }> }).items.map((item) => item.status)), new Set(["resolved", "dismissed"]));
       assert.deepEqual(await json(api.baseUrl, "DELETE", `/api/v1/projects/${project.id}/alert-rules/${rule.id}`, {}, ownerCookie, ownerCsrf), { deleted: true });
+      assert.deepEqual(await json(api.baseUrl, "DELETE", `/api/v1/projects/${project.id}/alert-rules/${capacityRule.id}`, {}, ownerCookie, ownerCsrf), { deleted: true });
     } finally { await api.close(); await rm(dataRoot, { recursive: true, force: true }); }
   });
 

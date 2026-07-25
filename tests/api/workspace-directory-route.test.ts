@@ -31,11 +31,17 @@ describe("workspace and project directory API", () => {
       assert.equal((await fetch(api.baseUrl+"/api/v1/workspaces?cursor=",{headers:{cookie}})).status,400);
       assert.equal((await fetch(api.baseUrl+"/api/v1/workspaces?unknown=true",{headers:{cookie}})).status,400);
 
-      const beta=await mutate(api.baseUrl,"POST",`/api/v1/workspaces/${first.workspace.id}/projects`,{name:"beta"},cookie,csrfToken);
+      const beta=await mutate(api.baseUrl,"POST",`/api/v1/workspaces/${first.workspace.id}/projects`,{name:"beta",sandboxLimit:3},cookie,csrfToken);
       const alpha=await mutate(api.baseUrl,"POST",`/api/v1/workspaces/${first.workspace.id}/projects`,{name:"Alpha"},cookie,csrfToken);
+      assert.equal(beta.sandboxLimit,3);
+      assert.equal("taskConcurrencyLimit" in beta,false);
+      const legacyProject=await fetch(`${api.baseUrl}/api/v1/workspaces/${first.workspace.id}/projects`,{method:"POST",headers:{"content-type":"application/json",cookie,"x-csrf-token":csrfToken,"idempotency-key":crypto.randomUUID()},body:JSON.stringify({name:"Legacy",taskConcurrencyLimit:3})});
+      assert.equal(legacyProject.status,400);
       await mutate(api.baseUrl,"PUT",`/api/v1/projects/${beta.id}/pin`,{pinned:true},cookie,csrfToken,false);
       const projects=await getJson(api.baseUrl,`/api/v1/workspaces/${first.workspace.id}/projects?limit=1`,cookie);
       assert.deepEqual(projects.items.map((item:{id:string})=>item.id),[beta.id]);
+      assert.equal(projects.items[0].sandboxLimit,3);
+      assert.equal("taskConcurrencyLimit" in projects.items[0],false);
       assert.equal(projects.total,2);
       assert.ok(projects.nextCursor);
       const filtered=await getJson(api.baseUrl,`/api/v1/workspaces/${first.workspace.id}/projects?q=alp`,cookie);
@@ -46,6 +52,8 @@ describe("workspace and project directory API", () => {
       assert.equal(workspaceDetail.projectCount,2);
       const projectDetail=await getJson(api.baseUrl,`/api/v1/projects/${beta.id}`,cookie);
       assert.equal(projectDetail.project.id,beta.id);
+      assert.equal(projectDetail.project.sandboxLimit,3);
+      assert.equal("taskConcurrencyLimit" in projectDetail.project,false);
       assert.equal(projectDetail.workspace.id,first.workspace.id);
       assert.equal((await fetch(api.baseUrl+"/api/v1/projects",{headers:{cookie}})).status,404);
       assert.equal((await fetch(api.baseUrl+"/api/v1/dashboard",{headers:{cookie}})).status,404);

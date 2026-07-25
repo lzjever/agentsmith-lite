@@ -323,7 +323,7 @@ export class PostgresProductStore implements ProductStore {
           project.name,
           project.ownerUserId,
           project.rootPath,
-          project.taskConcurrencyLimit,
+          project.sandboxLimit,
           project.createdAt,
           project.updatedAt
         ]
@@ -338,7 +338,7 @@ export class PostgresProductStore implements ProductStore {
            project_id, active_tasks_limit, provider_requests_limit, provider_tokens_limit,
            provider_cost_limit, project_file_bytes_limit, created_at, updated_at
          ) values ($1, $2, null, null, null, null, $3, $4)`,
-        [project.id, project.taskConcurrencyLimit, project.createdAt, project.updatedAt]
+        [project.id, project.sandboxLimit, project.createdAt, project.updatedAt]
       );
       await client.query(
         `insert into project_resource_usage (
@@ -506,12 +506,12 @@ export class PostgresProductStore implements ProductStore {
   async findProjectContextEntryByKey(workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null,contextKey:string):Promise<ProjectContextEntry|null>{const rows=await this.queryRows<ContextRow>('select * from project_context_entries where workspace_id=$1 and project_id is not distinct from $2 and scope=$3 and owner_user_id is not distinct from $4 and context_key=$5',[workspaceId,projectId,scope,ownerUserId,contextKey]);return rows[0]?mapContext(rows[0]):null;}
   async findProjectContextEntryById(id:string,workspaceId:string,projectId:string|null,scope:ProjectContextEntry["scope"],ownerUserId:string|null):Promise<ProjectContextEntry|null>{const rows=await this.queryRows<ContextRow>('select * from project_context_entries where id=$1 and workspace_id=$2 and project_id is not distinct from $3 and scope=$4 and owner_user_id is not distinct from $5',[id,workspaceId,projectId,scope,ownerUserId]);return rows[0]?mapContext(rows[0]):null;}
   async deleteProjectContextEntry(v: Pick<ProjectContextEntry, "id" | "workspaceId" | "projectId" | "scope" | "ownerUserId" | "version">): Promise<boolean> { return (await this.pool.query('delete from project_context_entries where id=$1 and workspace_id=$2 and project_id is not distinct from $3 and scope=$4 and owner_user_id is not distinct from $5 and version=$6',[v.id,v.workspaceId,v.projectId,v.scope,v.ownerUserId,v.version])).rowCount===1; }
-  async createProjectAlertRule(v:ProjectAlertRule):Promise<ProjectAlertRule|null>{return transaction(this.pool,async(client)=>{const project=await client.query("select id from projects where id=$1 for update",[v.projectId]);if(!project.rowCount)throw new Error("Project not found while creating alert rule");const count=await client.query<{count:string}>("select count(*)::text as count from project_alert_rules where project_id=$1",[v.projectId]);if(Number(count.rows[0]?.count??0)>=50)return null;const scope=v.scope??{kind:"project" as const};const row=(await client.query<AlertRuleRow>("insert into project_alert_rules (id,project_id,alert_type,name,metric,condition,threshold,window_seconds,scope_kind,endpoint_id,enabled,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *",[v.id,v.projectId,v.alertType,v.name??v.alertType.replaceAll("_"," "),v.metric??"failure_count",v.condition??"greater_than_or_equal",v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==="endpoint"?scope.endpointId:null,v.enabled,v.createdAt,v.updatedAt])).rows[0];if(!row)throw new Error("Alert rule insert returned no row");return mapAlertRule(row)})}
+  async createProjectAlertRule(v:ProjectAlertRule):Promise<ProjectAlertRule|null>{return transaction(this.pool,async(client)=>{const project=await client.query("select id from projects where id=$1 for update",[v.projectId]);if(!project.rowCount)throw new Error("Project not found while creating alert rule");const count=await client.query<{count:string}>("select count(*)::text as count from project_alert_rules where project_id=$1",[v.projectId]);if(Number(count.rows[0]?.count??0)>=50)return null;const scope=v.scope??{kind:"project" as const};const row=(await client.query<AlertRuleRow>("insert into project_alert_rules (id,project_id,alert_type,name,metric,condition,threshold,window_seconds,scope_kind,endpoint_id,enabled,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *",[v.id,v.projectId,toPersistedAlertType(v.alertType),v.name??v.alertType.replaceAll("_"," "),toPersistedAlertMetric(v.metric??"failure_count"),v.condition??"greater_than_or_equal",v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==="endpoint"?scope.endpointId:null,v.enabled,v.createdAt,v.updatedAt])).rows[0];if(!row)throw new Error("Alert rule insert returned no row");return mapAlertRule(row)})}
   async listProjectAlertRules(id:string){const rows=await this.queryRows<AlertRuleRow>('select * from project_alert_rules where project_id=$1 order by created_at,id collate "C" limit 51',[id]);if(rows.length>50)throw new Error("Project alert rule limit exceeded");return rows.map(mapAlertRule)}
   async listProjectAlertRuleViews(projectId:string){const rows=await this.queryRows<AlertRuleViewRow>('select rule.*,endpoint.name as endpoint_name from project_alert_rules rule left join model_endpoints endpoint on endpoint.project_id=rule.project_id and endpoint.id=rule.endpoint_id where rule.project_id=$1 order by rule.created_at,rule.id collate "C" limit 51',[projectId]);if(rows.length>50)throw new Error("Project alert rule limit exceeded");return rows.map(mapAlertRuleView)}
   async findProjectAlertRule(projectId:string,id:string){const rows=await this.queryRows<AlertRuleRow>("select * from project_alert_rules where project_id=$1 and id=$2",[projectId,id]);return rows[0]?mapAlertRule(rows[0]):null}
   async findProjectAlertRuleView(projectId:string,id:string){const rows=await this.queryRows<AlertRuleViewRow>("select rule.*,endpoint.name as endpoint_name from project_alert_rules rule left join model_endpoints endpoint on endpoint.project_id=rule.project_id and endpoint.id=rule.endpoint_id where rule.project_id=$1 and rule.id=$2",[projectId,id]);return rows[0]?mapAlertRuleView(rows[0]):null}
-  async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const scope=v.scope??{kind:'project' as const};const values:unknown[]=[v.id,v.alertType,v.name??v.alertType.replaceAll('_',' '),v.metric??'failure_count',v.condition??'greater_than_or_equal',v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==='endpoint'?scope.endpointId:null,v.enabled,v.updatedAt,v.projectId];const expected=expectedUpdatedAt===undefined?'':` and updated_at=$13`;if(expectedUpdatedAt!==undefined)values.push(expectedUpdatedAt);const r=await this.queryRows<AlertRuleRow>(`update project_alert_rules set alert_type=$2,name=$3,metric=$4,condition=$5,threshold=$6,window_seconds=$7,scope_kind=$8,endpoint_id=$9,enabled=$10,updated_at=$11 where id=$1 and project_id=$12${expected} returning *`,values);return r[0]?mapAlertRule(r[0]):null} async deleteProjectAlertRule(projectId:string,id:string){return (await this.pool.query('delete from project_alert_rules where id=$1 and project_id=$2',[id,projectId])).rowCount===1}
+  async updateProjectAlertRule(v:ProjectAlertRule,expectedUpdatedAt?:string){const scope=v.scope??{kind:'project' as const};const values:unknown[]=[v.id,toPersistedAlertType(v.alertType),v.name??v.alertType.replaceAll('_',' '),toPersistedAlertMetric(v.metric??'failure_count'),v.condition??'greater_than_or_equal',v.threshold??1,v.windowSeconds??null,scope.kind,scope.kind==='endpoint'?scope.endpointId:null,v.enabled,v.updatedAt,v.projectId];const expected=expectedUpdatedAt===undefined?'':` and updated_at=$13`;if(expectedUpdatedAt!==undefined)values.push(expectedUpdatedAt);const r=await this.queryRows<AlertRuleRow>(`update project_alert_rules set alert_type=$2,name=$3,metric=$4,condition=$5,threshold=$6,window_seconds=$7,scope_kind=$8,endpoint_id=$9,enabled=$10,updated_at=$11 where id=$1 and project_id=$12${expected} returning *`,values);return r[0]?mapAlertRule(r[0]):null} async deleteProjectAlertRule(projectId:string,id:string){return (await this.pool.query('delete from project_alert_rules where id=$1 and project_id=$2',[id,projectId])).rowCount===1}
 
   async createFileLibrary(value:FileLibrary):Promise<FileLibrary|null>{
     const rows=await this.queryRows<FileLibraryRow>(`insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing returning *`,[value.id,value.workspaceId,value.projectId,value.name,value.rootSubPath,value.createdByUserId,value.createdAt,value.updatedAt]);
@@ -619,13 +619,13 @@ export class PostgresProductStore implements ProductStore {
     const endpointWindows=input.endpointWindows;
     const scalarInput={...input};delete scalarInput.endpointWindows;
     const policyColumns = {
-      activeTasksLimit: "active_tasks_limit",
+      sandboxLimit: "active_tasks_limit",
       providerRequestsLimit: "provider_requests_limit",
       providerTokensLimit: "provider_tokens_limit",
       providerCostLimit: "provider_cost_limit",
       projectFileBytesLimit: "project_file_bytes_limit"
     } as const;
-    return transaction(this.pool,async client=>{const project=await client.query("select id from projects where id=$1 for update",[projectId]);if(!project.rows[0])return null;await client.query("select project_id from project_resource_policies where project_id=$1 for update",[projectId]);await client.query("select project_id from project_resource_usage where project_id=$1 for update",[projectId]);const keys=Object.keys(scalarInput) as Array<keyof typeof policyColumns>;const updates=keys.map((key,index)=>`${policyColumns[key]}=$${index+2}`);const values=keys.map(key=>scalarInput[key]);const updatedAtIndex=values.length+2;const expectedClause=expectedUpdatedAt===undefined?"":` and updated_at=$${updatedAtIndex+1}`;const params=[projectId,...values,updatedAt,...(expectedUpdatedAt===undefined?[]:[expectedUpdatedAt])];const row=(await client.query<ProjectPolicyRow>(`update project_resource_policies set ${updates.length?`${updates.join(", ")},`:""}updated_at=$${updatedAtIndex} where project_id=$1${expectedClause} returning *`,params)).rows[0];if(!row)return null;if(input.activeTasksLimit!==undefined&&input.activeTasksLimit!==null)await client.query("update projects set task_concurrency_limit=$2,updated_at=$3 where id=$1",[projectId,input.activeTasksLimit,updatedAt]);if(endpointWindows){await client.query("delete from project_endpoint_policy_windows where project_id=$1",[projectId]);for(const window of endpointWindows)await client.query("insert into project_endpoint_policy_windows(project_id,endpoint_id,metric,limit_value,window_seconds) values($1,$2,$3,$4,$5)",[projectId,window.endpointId,window.metric,window.limit,window.windowSeconds])}const result=mapPolicy(row);result.endpointWindows=endpointWindows??(await client.query<{endpoint_id:string;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;limit_value:number;window_seconds:number}>("select endpoint_id,metric,limit_value,window_seconds from project_endpoint_policy_windows where project_id=$1 order by endpoint_id,metric",[projectId])).rows.map(item=>({endpointId:item.endpoint_id,metric:item.metric,limit:Number(item.limit_value),windowSeconds:Number(item.window_seconds)}));return result})
+    return transaction(this.pool,async client=>{const project=await client.query("select id from projects where id=$1 for update",[projectId]);if(!project.rows[0])return null;await client.query("select project_id from project_resource_policies where project_id=$1 for update",[projectId]);await client.query("select project_id from project_resource_usage where project_id=$1 for update",[projectId]);const keys=Object.keys(scalarInput) as Array<keyof typeof policyColumns>;const updates=keys.map((key,index)=>`${policyColumns[key]}=$${index+2}`);const values=keys.map(key=>scalarInput[key]);const updatedAtIndex=values.length+2;const expectedClause=expectedUpdatedAt===undefined?"":` and updated_at=$${updatedAtIndex+1}`;const params=[projectId,...values,updatedAt,...(expectedUpdatedAt===undefined?[]:[expectedUpdatedAt])];const row=(await client.query<ProjectPolicyRow>(`update project_resource_policies set ${updates.length?`${updates.join(", ")},`:""}updated_at=$${updatedAtIndex} where project_id=$1${expectedClause} returning *`,params)).rows[0];if(!row)return null;if(input.sandboxLimit!==undefined&&input.sandboxLimit!==null)await client.query("update projects set task_concurrency_limit=$2,updated_at=$3 where id=$1",[projectId,input.sandboxLimit,updatedAt]);if(endpointWindows){await client.query("delete from project_endpoint_policy_windows where project_id=$1",[projectId]);for(const window of endpointWindows)await client.query("insert into project_endpoint_policy_windows(project_id,endpoint_id,metric,limit_value,window_seconds) values($1,$2,$3,$4,$5)",[projectId,window.endpointId,window.metric,window.limit,window.windowSeconds])}const result=mapPolicy(row);result.endpointWindows=endpointWindows??(await client.query<{endpoint_id:string;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;limit_value:number;window_seconds:number}>("select endpoint_id,metric,limit_value,window_seconds from project_endpoint_policy_windows where project_id=$1 order by endpoint_id,metric",[projectId])).rows.map(item=>({endpointId:item.endpoint_id,metric:item.metric,limit:Number(item.limit_value),windowSeconds:Number(item.window_seconds)}));return result})
   }
   async findProjectResourceUsage(projectId: string): Promise<ProjectResourceUsage | null> {
     const rows = await this.queryRows<ProjectUsageRow>("select * from project_resource_usage where project_id = $1", [projectId]); return rows[0] ? mapUsage(rows[0]) : null;
@@ -638,7 +638,7 @@ export class PostgresProductStore implements ProductStore {
     return rows[0] ? mapUsage(rows[0]) : null;
   }
   async adjustProjectResourceUsage(input: ProjectResourceUsageAdjustment): Promise<ProjectResourceUsage | null> {
-    if(input.delta.activeTasks!==0)throw new Error("active_tasks is an authoritative Sandbox Run projection");
+    if(input.delta.activeSandboxes!==0)throw new Error("active_tasks is an authoritative Sandbox Run projection");
     const delta = input.delta;
     const limitedDelta = input.limit ? usageDelta(input.limit, delta) : 0;
     const condition = input.limit && limitedDelta > 0
@@ -762,18 +762,18 @@ export class PostgresProductStore implements ProductStore {
   }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const rows=await this.queryRows<{value:string;oldest_reserved_at:unknown}>(`select coalesce(sum(case when $4='providerRequests' then 1 when $4='providerTokens' then case when status='settled' then coalesce(provider_tokens,0) else reserved_tokens end else case when status='settled' then coalesce(provider_cost,0) else reserved_cost end end),0)::text as value,min(reserved_at) as oldest_reserved_at from project_provider_settlements where project_id=$1 and endpoint_id=$2 and actor_id is not distinct from $3 and status<>'failed' and reserved_at >= $5`,[input.projectId,input.endpointId,input.actorId,input.metric,input.since]);return{current:Number(rows[0]?.value??0),oldestReservedAt:rows[0]?.oldest_reserved_at?toIso(rows[0].oldest_reserved_at):null};}
   async measureProjectAlertRule(input:{projectId:string;alertType:ProjectAlertType;metric:AlertRuleMetric;windowSeconds:number|null;endpointId:string|null;now:string}):Promise<number>{
-    if(input.metric==="active_tasks"||input.metric==="project_file_bytes"){const column=input.metric==="active_tasks"?"active_tasks":"project_file_bytes";const rows=await this.queryRows<{value:string}>(`select coalesce(${column},0)::text as value from project_resource_usage where project_id=$1`,[input.projectId]);return Number(rows[0]?.value??0)}
+    if(input.metric==="active_sandboxes"||input.metric==="project_file_bytes"){const column=input.metric==="active_sandboxes"?"active_tasks":"project_file_bytes";const rows=await this.queryRows<{value:string}>(`select coalesce(${column},0)::text as value from project_resource_usage where project_id=$1`,[input.projectId]);return Number(rows[0]?.value??0)}
     const cutoff=input.windowSeconds===null?null:new Date(Date.parse(input.now)-input.windowSeconds*1000).toISOString();
     if(input.metric!=="failure_count"){const expression=input.metric==="provider_requests"?"count(*)":input.metric==="provider_tokens"?"coalesce(sum(provider_tokens),0)":"coalesce(sum(provider_cost),0)";const values:unknown[]=[input.projectId];let where="project_id=$1 and status='settled'";if(cutoff){values.push(cutoff);where+=` and settled_at >= $${values.length}`}if(input.endpointId){values.push(input.endpointId);where+=` and endpoint_id=$${values.length}`}const rows=await this.queryRows<{value:string}>(`select (${expression})::text as value from project_provider_settlements where ${where}`,values);return Number(rows[0]?.value??0)}
     const values:unknown[]=[input.projectId];const clauses=["project_id=$1"];if(cutoff){values.push(cutoff);clauses.push(`created_at >= $${values.length}`)}if(input.endpointId){values.push(input.endpointId);clauses.push(`detail->>'endpointId'=$${values.length}`)}const failure=input.alertType==="provider_failure"?"action='provider.request' and status='rejected' and resource_kind='provider' and (detail->>'errorCategory') is not null":input.alertType==="endpoint_failure"?"resource_kind='endpoint' and status='rejected' and (detail->>'healthStatus')='unavailable'":input.alertType==="sandbox_failure"?"action='sandbox.failed' and status='accepted'":"false";const rows=await this.queryRows<{value:string}>(`select count(*)::text as value from project_audit_events where ${clauses.join(" and ")} and ${failure}`,values);return Number(rows[0]?.value??0)
   }
   private async transitionProviderSettlement(id: string, from: string, to: string, updatedAt: string, timestamp: string): Promise<ProjectProviderSettlement | null> { const rows=await this.queryRows<ProviderSettlementRow>(`update project_provider_settlements set status=$3, ${timestamp}=$2, updated_at=$2 where id=$1 and status=$4 returning *`,[id,updatedAt,to,from]); return rows[0] ? mapProviderSettlement(rows[0]) : null; }
   async upsertActiveProjectAlert(alert: ActiveProjectAlert): Promise<ActiveProjectAlert> {
-    const rows = await this.queryRows<ProjectAlertRow>(`insert into project_alerts (id,project_id,type,status,delivery_status,rule_id,metric,metric_value,threshold,endpoint_id,subject_actor_id,acknowledged_at,acknowledged_by,silenced_until,created_at,updated_at,resolved_at,dismissed_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) on conflict (project_id,type,(coalesce(rule_id,'')),(coalesce(endpoint_id,'')),(coalesce(subject_actor_id,''))) where status='active' do update set metric_value=excluded.metric_value,threshold=excluded.threshold,updated_at=excluded.updated_at returning *`, [alert.id,alert.projectId,alert.type,alert.status,alert.deliveryStatus,alert.ruleId??null,alert.metric??null,alert.metricValue??null,alert.threshold??null,alert.endpointId??null,alert.subjectActorId??null,alert.acknowledgedAt??null,alert.acknowledgedBy??null,alert.silencedUntil??null,alert.createdAt,alert.updatedAt,alert.resolvedAt,alert.dismissedAt]);
+    const rows = await this.queryRows<ProjectAlertRow>(`insert into project_alerts (id,project_id,type,status,delivery_status,rule_id,metric,metric_value,threshold,endpoint_id,subject_actor_id,acknowledged_at,acknowledged_by,silenced_until,created_at,updated_at,resolved_at,dismissed_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) on conflict (project_id,type,(coalesce(rule_id,'')),(coalesce(endpoint_id,'')),(coalesce(subject_actor_id,''))) where status='active' do update set metric_value=excluded.metric_value,threshold=excluded.threshold,updated_at=excluded.updated_at returning *`, [alert.id,alert.projectId,toPersistedAlertType(alert.type),alert.status,alert.deliveryStatus,alert.ruleId??null,alert.metric===null||alert.metric===undefined?null:toPersistedAlertMetric(alert.metric),alert.metricValue??null,alert.threshold??null,alert.endpointId??null,alert.subjectActorId??null,alert.acknowledgedAt??null,alert.acknowledgedBy??null,alert.silencedUntil??null,alert.createdAt,alert.updatedAt,alert.resolvedAt,alert.dismissedAt]);
     const row=rows[0];if(!row)throw new Error("Active alert upsert returned no row");return mapActiveAlert(row);
   }
   async queryProjectAlerts(projectId:string,query:import("../../ports/src/store.js").ProjectAlertStoreQuery):Promise<import("../../ports/src/store.js").ProjectAlertStorePage>{return transaction(this.pool,async(client)=>{const values:unknown[]=[projectId];const where=["alert.project_id=$1",query.view==="active"?"alert.status='active'":"alert.status in ('resolved','dismissed')"];if(query.after){values.push(query.after.createdAt,query.after.id);where.push(`(alert.created_at < $${values.length-1}::timestamptz or (alert.created_at = $${values.length-1}::timestamptz and alert.id collate "C" < $${values.length}::text collate "C"))`)}values.push(query.limit+1);const rows=(await client.query<ProjectAlertRow>(`select alert.*,endpoint.name as endpoint_name from project_alerts alert left join model_endpoints endpoint on endpoint.project_id=alert.project_id and endpoint.id=alert.endpoint_id where ${where.join(" and ")} order by alert.created_at desc,alert.id collate "C" desc limit $${values.length}`,values)).rows;const activeCount=Number((await client.query<{count:string}>("select count(*)::text as count from project_alerts where project_id=$1 and status='active'",[projectId])).rows[0]?.count??0);return{items:rows.slice(0,query.limit).map(mapAlert),hasMore:rows.length>query.limit,activeCount}},"repeatable read")}
-  async findActiveProjectAlert(projectId:string,type:ProjectAlertType,ruleId:string|null,endpointId:string|null,subjectActorId:string|null):Promise<ActiveProjectAlert|null>{const rows=await this.queryRows<ProjectAlertRow>("select * from project_alerts where project_id=$1 and type=$2 and status='active' and rule_id is not distinct from $3 and endpoint_id is not distinct from $4 and subject_actor_id is not distinct from $5",[projectId,type,ruleId,endpointId,subjectActorId]);return rows[0]?mapActiveAlert(rows[0]):null}
+  async findActiveProjectAlert(projectId:string,type:ProjectAlertType,ruleId:string|null,endpointId:string|null,subjectActorId:string|null):Promise<ActiveProjectAlert|null>{const rows=await this.queryRows<ProjectAlertRow>("select * from project_alerts where project_id=$1 and type=$2 and status='active' and rule_id is not distinct from $3 and endpoint_id is not distinct from $4 and subject_actor_id is not distinct from $5",[projectId,toPersistedAlertType(type),ruleId,endpointId,subjectActorId]);return rows[0]?mapActiveAlert(rows[0]):null}
   async findProjectAlert(projectId:string,id:string):Promise<ProjectAlert|null>{const rows=await this.queryRows<ProjectAlertRow>("select alert.*,endpoint.name as endpoint_name from project_alerts alert left join model_endpoints endpoint on endpoint.project_id=alert.project_id and endpoint.id=alert.endpoint_id where alert.project_id=$1 and alert.id=$2",[projectId,id]);return rows[0]?mapAlert(rows[0]):null}
   async transitionProjectAlert(projectId: string, id: string, status: "resolved" | "dismissed", updatedAt: string): Promise<ProjectAlert | null> { const column = status === "resolved" ? "resolved_at" : "dismissed_at"; const rows = await this.queryRows<ProjectAlertRow>(`with updated as (update project_alerts set status=$3, ${column}=$4, updated_at=$4 where project_id=$1 and id=$2 and status='active' returning *) select updated.*,endpoint.name as endpoint_name from updated left join model_endpoints endpoint on endpoint.project_id=updated.project_id and endpoint.id=updated.endpoint_id`, [projectId, id, status, updatedAt]); return rows[0] ? mapAlert(rows[0]) : null; }
   async updateProjectAlertState(projectId:string,id:string,input:{acknowledgedAt?:string;acknowledgedBy?:string;silencedUntil?:string|null},updatedAt:string){const rows=await this.queryRows<ProjectAlertRow>(`with updated as (update project_alerts set acknowledged_at=coalesce($3,acknowledged_at),acknowledged_by=coalesce($4,acknowledged_by),silenced_until=case when $5::boolean then $6::timestamptz else silenced_until end,updated_at=$7 where project_id=$1 and id=$2 and status='active' returning *) select updated.*,endpoint.name as endpoint_name from updated left join model_endpoints endpoint on endpoint.project_id=updated.project_id and endpoint.id=updated.endpoint_id`,[projectId,id,input.acknowledgedAt??null,input.acknowledgedBy??null,Object.hasOwn(input,'silencedUntil'),input.silencedUntil??null,updatedAt]);return rows[0]?mapAlert(rows[0]):null}
@@ -892,7 +892,7 @@ export class PostgresProductStore implements ProductStore {
     const idem=input.idempotency;
     const receipt=(await client.query<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",[idem.actorId,idem.projectId,idem.operation,idem.key])).rows[0];
     if(!receipt||receipt.request_hash!==idem.requestHash)return{kind:"conflict"};
-    if(receipt.status==="completed")return{kind:"replay",responseStatus:receipt.response_status!,responseBody:structuredClone(receipt.response_body)};
+    if(receipt.status==="completed")return{kind:"replay",responseStatus:receipt.response_status!,responseBody:mapTaskIdempotencyResponseBody(receipt.operation,receipt.response_body)};
     if(receipt.claim_token!==idem.claimToken||receipt.operation!=="terminal-start"||receipt.resource_id!==input.failure.runId)return{kind:"conflict"};
     const observed=await selectSandboxRunWithClient(client,input.failure.runId);
     if(!observed||observed.projectId!==idem.projectId)return{kind:"conflict"};
@@ -1536,7 +1536,7 @@ export class PostgresProductStore implements ProductStore {
       const locked = await client.query<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update", [input.actorId,input.projectId,input.operation,input.key]);
       const row = locked.rows[0]!;
       if (row.request_hash !== input.requestHash) return { kind: "hash_mismatch" };
-      if (row.status === "completed") return { kind: "replay", resourceId: row.resource_id, responseStatus: row.response_status!, responseBody: structuredClone(row.response_body) };
+      if (row.status === "completed") return { kind: "replay", resourceId: row.resource_id, responseStatus: row.response_status!, responseBody: mapTaskIdempotencyResponseBody(row.operation,row.response_body) };
       if (row.claim_token === input.claimToken) return { kind: "claimed", resourceId: row.resource_id, claimToken: row.claim_token };
       if (toIso(row.lease_expires_at) > input.now) return { kind: "in_progress", resourceId: row.resource_id };
       const reclaimed = await client.query<TaskIdempotencyRow>("update task_idempotency_records set claim_token=$5,lease_expires_at=$6,updated_at=$7 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 returning *", [input.actorId,input.projectId,input.operation,input.key,input.claimToken,input.leaseExpiresAt,input.now]);
@@ -1549,7 +1549,7 @@ export class PostgresProductStore implements ProductStore {
     const row=rows[0];
     if(!row)return null;
     if(row.request_hash!==input.requestHash)return{kind:"hash_mismatch"};
-    if(row.status==="completed")return{kind:"replay",resourceId:row.resource_id,responseStatus:row.response_status!,responseBody:structuredClone(row.response_body)};
+    if(row.status==="completed")return{kind:"replay",resourceId:row.resource_id,responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
     return{kind:"in_progress",resourceId:row.resource_id};
   }
 
@@ -1558,7 +1558,7 @@ export class PostgresProductStore implements ProductStore {
     const row=rows[0];
     if(!row)return null;
     if(row.request_hash!==input.requestHash)return{kind:"hash_mismatch"};
-    if(row.status==="completed")return{kind:"replay",resourceId:row.resource_id,responseStatus:row.response_status!,responseBody:structuredClone(row.response_body)};
+    if(row.status==="completed")return{kind:"replay",resourceId:row.resource_id,responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
     return{kind:"in_progress",resourceId:row.resource_id};
   }
   async findInProgressTerminalStartOperation(runId:string):Promise<import("../../ports/src/store.js").InProgressTerminalStartOperation|null>{
@@ -1928,6 +1928,48 @@ async function lockCredentialVersion(client: PoolClient, projectId: string, cred
 
 class AtomicTaskMessageConflict extends Error {}
 
+function mapTaskIdempotencyResponseBody(operation:string,value:unknown):unknown{
+  const mapped=structuredClone(value);
+  if(mapped===null||typeof mapped!=="object"||Array.isArray(mapped))return mapped;
+  const response=mapped as Record<string,unknown>;
+
+  if(operation==="project.archive"||operation==="project.unarchive"){
+    if(Object.hasOwn(response,"taskConcurrencyLimit")){
+      if(!Object.hasOwn(response,"sandboxLimit"))response.sandboxLimit=response.taskConcurrencyLimit;
+      delete response.taskConcurrencyLimit;
+    }
+    return response;
+  }
+  if(operation==="project.settings.update"){
+    const project=response.project;
+    if(project!==null&&typeof project==="object"&&!Array.isArray(project)){
+      const projectResponse=project as Record<string,unknown>;
+      if(Object.hasOwn(projectResponse,"taskConcurrencyLimit")){
+        if(!Object.hasOwn(projectResponse,"sandboxLimit"))projectResponse.sandboxLimit=projectResponse.taskConcurrencyLimit;
+        delete projectResponse.taskConcurrencyLimit;
+      }
+    }
+    return response;
+  }
+  if(operation==="project.policy.update"){
+    if(Object.hasOwn(response,"activeTasksLimit")){
+      if(!Object.hasOwn(response,"sandboxLimit"))response.sandboxLimit=response.activeTasksLimit;
+      delete response.activeTasksLimit;
+    }
+    return response;
+  }
+  if(operation==="project.alert.transition"||operation==="project.alert.acknowledge"||operation==="project.alert.silence"){
+    if(response.type==="active_tasks_limit")response.type="sandbox_capacity";
+    if(response.metric==="active_tasks")response.metric="active_sandboxes";
+    return response;
+  }
+  if(operation==="project.alert-rule.create"||operation==="project.alert-rule.update"||operation==="project.alert-rule.delete"){
+    if(response.alertType==="active_tasks_limit")response.alertType="sandbox_capacity";
+    if(response.metric==="active_tasks")response.metric="active_sandboxes";
+  }
+  return response;
+}
+
 async function claimTaskIdempotencyWithClient(client:PoolClient,input:BeginTaskIdempotencyInput):Promise<
   | {kind:"claimed";row:TaskIdempotencyRow}
   | {kind:"hash_mismatch"}
@@ -1946,7 +1988,7 @@ async function claimTaskIdempotencyWithClient(client:PoolClient,input:BeginTaskI
     [input.actorId,input.projectId,input.operation,input.key]
   )).rows[0];
   if(!row||row.request_hash!==input.requestHash)return{kind:"hash_mismatch"};
-  if(row.status==="completed")return{kind:"replay",responseStatus:row.response_status!,responseBody:structuredClone(row.response_body)};
+  if(row.status==="completed")return{kind:"replay",responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
   if(row.claim_token!==input.claimToken){
     if(toIso(row.lease_expires_at)>input.now)return{kind:"in_progress"};
     const reclaimed=(await client.query<TaskIdempotencyRow>(
@@ -2363,7 +2405,9 @@ interface SandboxReleaseTaskRow extends AgentTaskRow { project_workspace_id:stri
 
 interface ProfileRow { user_id: string; display_name: string | null; timezone: string | null; bio:string|null; job_title:string|null; company:string|null; greeting_preference:string|null; interests:string[]|null; updated_at: unknown; }
 interface NotificationRow { id:string; user_id:string; type:string; title:string; body:string|null; project_id:string|null; resource_kind:UserNotification["resourceKind"]; resource_id:string|null; link_path:string|null; read_at:unknown; created_at:unknown; dedupe_key:string|null; }
-interface AlertRuleRow { id:string; project_id:string; alert_type:ProjectAlertType; name:string; metric:AlertRuleMetric; condition:AlertRuleCondition; threshold:number; window_seconds:number|null; scope_kind:"project"|"endpoint"; endpoint_id:string|null; enabled:boolean; created_at:unknown; updated_at:unknown; }
+type PersistedProjectAlertType=Exclude<ProjectAlertType,"sandbox_capacity">|"active_tasks_limit";
+type PersistedAlertRuleMetric=Exclude<AlertRuleMetric,"active_sandboxes">|"active_tasks";
+interface AlertRuleRow { id:string; project_id:string; alert_type:PersistedProjectAlertType; name:string; metric:PersistedAlertRuleMetric; condition:AlertRuleCondition; threshold:number; window_seconds:number|null; scope_kind:"project"|"endpoint"; endpoint_id:string|null; enabled:boolean; created_at:unknown; updated_at:unknown; }
 interface AlertRuleViewRow extends AlertRuleRow {endpoint_name:string|null}
 
 interface ProviderSettlementRow {
@@ -2393,7 +2437,7 @@ interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:strin
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
-interface ProjectAlertRow { id: string; project_id: string; type: ProjectAlertType; status: ProjectAlertStatus; delivery_status: ProjectAlert["deliveryStatus"]; rule_id:string|null;metric:AlertRuleMetric|null;metric_value:number|null;threshold:number|null;endpoint_id:string|null;endpoint_name?:string|null;subject_actor_id:string|null;acknowledged_at:unknown;acknowledged_by:string|null;silenced_until:unknown; created_at: unknown; updated_at: unknown; resolved_at: unknown; dismissed_at: unknown; }
+interface ProjectAlertRow { id: string; project_id: string; type: PersistedProjectAlertType; status: ProjectAlertStatus; delivery_status: ProjectAlert["deliveryStatus"]; rule_id:string|null;metric:PersistedAlertRuleMetric|null;metric_value:number|null;threshold:number|null;endpoint_id:string|null;endpoint_name?:string|null;subject_actor_id:string|null;acknowledged_at:unknown;acknowledged_by:string|null;silenced_until:unknown; created_at: unknown; updated_at: unknown; resolved_at: unknown; dismissed_at: unknown; }
 interface ProjectAuditRow { id: string; project_id: string; actor_id: string | null; subject_user_id:string|null; action: ProjectAuditEvent["action"]; status: ProjectAuditEvent["status"]; resource_kind: ProjectAuditEvent["resourceKind"]; resource_id: string | null; detail:ProjectAuditEvent["detail"]; created_at: unknown; actor_display_name:string|null;actor_email:string|null;subject_display_name:string|null;subject_email:string|null; }
 interface SandboxUsageSettlementRow { run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;started_at:unknown;released_at:unknown;duration_seconds:number|string;cpu_request_millis:string;memory_request_bytes:string;cpu_limit_millis:string;memory_limit_bytes:string;release_reason:import("../../contracts/src/api.js").SandboxReleaseReason; }
 interface SandboxUsageHistoryRow extends SandboxUsageSettlementRow { task_title:string|null;task_available:boolean; }
@@ -2475,7 +2519,7 @@ function mapProject(row: ProjectRow): Project {
     name: row.name,
     ownerUserId: row.owner_user_id,
     rootPath: row.root_path,
-    taskConcurrencyLimit: row.task_concurrency_limit,
+    sandboxLimit: row.task_concurrency_limit,
     lifecycleStatus: row.lifecycle_status,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at)
@@ -2531,7 +2575,7 @@ function mapTask(row: AgentTaskRow): PersistedAgentTask {
 function mapProfile(row: ProfileRow): UserProfilePreferences { return { userId: row.user_id, displayName: row.display_name, timezone: row.timezone, bio:row.bio, jobTitle:row.job_title, company:row.company, greetingPreference:profileGreetingPreference(row.greeting_preference), interests:row.interests??[], updatedAt: toIso(row.updated_at) }; }
 function profileGreetingPreference(value:string|null):ProfileGreetingPreference|null{return PROFILE_GREETING_PREFERENCES.includes(value as ProfileGreetingPreference)?value as ProfileGreetingPreference:null}
 function mapNotification(row:NotificationRow):UserNotification{return{id:row.id,userId:row.user_id,type:row.type,title:row.title,body:row.body,projectId:row.project_id,resourceKind:row.resource_kind,resourceId:row.resource_id,linkPath:row.link_path,readAt:row.read_at?toIso(row.read_at):null,createdAt:toIso(row.created_at)}}
-function mapAlertRule(row:AlertRuleRow):ProjectAlertRule{return{id:row.id,projectId:row.project_id,name:row.name,alertType:row.alert_type,metric:row.metric,condition:row.condition,threshold:Number(row.threshold),windowSeconds:row.window_seconds===null?null:Number(row.window_seconds),scope:mapAlertRuleScope(row),enabled:row.enabled,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
+function mapAlertRule(row:AlertRuleRow):ProjectAlertRule{return{id:row.id,projectId:row.project_id,name:row.name,alertType:fromPersistedAlertType(row.alert_type),metric:fromPersistedAlertMetric(row.metric),condition:row.condition,threshold:Number(row.threshold),windowSeconds:row.window_seconds===null?null:Number(row.window_seconds),scope:mapAlertRuleScope(row),enabled:row.enabled,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)}}
 function mapAlertRuleView(row:AlertRuleViewRow):import("../../contracts/src/api.js").ProjectAlertRuleView{return{...mapAlertRule(row),endpointName:row.endpoint_name}}
 function mapAlertRuleScope(row:AlertRuleRow):AlertRuleScope{if(row.scope_kind==="project")return{kind:"project"};if(!row.endpoint_id)throw new Error("Endpoint-scoped alert rule row has no endpoint");return{kind:"endpoint",endpointId:row.endpoint_id}}
 
@@ -2588,27 +2632,42 @@ function mapTaskDeliveryReceipt(value: unknown): NonNullable<PersistedTaskMessag
   };
 }
 
-function policyValues(policy: ProjectResourcePolicy): unknown[] { return [policy.projectId, policy.activeTasksLimit, policy.providerRequestsLimit, policy.providerTokensLimit, policy.providerCostLimit, policy.projectFileBytesLimit, policy.createdAt, policy.updatedAt]; }
-function usageValues(usage: ProjectResourceUsage): unknown[] { return [usage.projectId, usage.activeTasks, usage.providerRequests, usage.providerTokens, usage.providerCost, usage.projectFileBytes, usage.projectFileBytesMeasuredAt, usage.updatedAt]; }
+function policyValues(policy: ProjectResourcePolicy): unknown[] { return [policy.projectId, policy.sandboxLimit, policy.providerRequestsLimit, policy.providerTokensLimit, policy.providerCostLimit, policy.projectFileBytesLimit, policy.createdAt, policy.updatedAt]; }
+function usageValues(usage: ProjectResourceUsage): unknown[] { return [usage.projectId, usage.activeSandboxes, usage.providerRequests, usage.providerTokens, usage.providerCost, usage.projectFileBytes, usage.projectFileBytesMeasuredAt, usage.updatedAt]; }
 function mapPolicy(row: ProjectPolicyRow): ProjectResourcePolicy {
-  if (row.active_tasks_limit === null) throw new Error("Project active task limit is not configured");
-  return { projectId: row.project_id, activeTasksLimit: row.active_tasks_limit, providerRequestsLimit: nullableNumber(row.provider_requests_limit), providerTokensLimit: nullableNumber(row.provider_tokens_limit), providerCostLimit: row.provider_cost_limit, projectFileBytesLimit: nullableNumber(row.project_file_bytes_limit), endpointWindows:[], createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) };
+  if (row.active_tasks_limit === null) throw new Error("Project Sandbox limit is not configured");
+  return { projectId: row.project_id, sandboxLimit: row.active_tasks_limit, providerRequestsLimit: nullableNumber(row.provider_requests_limit), providerTokensLimit: nullableNumber(row.provider_tokens_limit), providerCostLimit: row.provider_cost_limit, projectFileBytesLimit: nullableNumber(row.project_file_bytes_limit), endpointWindows:[], createdAt: toIso(row.created_at), updatedAt: toIso(row.updated_at) };
 }
-function mapUsage(row: ProjectUsageRow): ProjectResourceUsage { return { projectId: row.project_id, activeTasks: row.active_tasks, providerRequests: Number(row.provider_requests), providerTokens: Number(row.provider_tokens), providerCost: row.provider_cost, projectFileBytes: Number(row.project_file_bytes), projectFileBytesMeasuredAt: row.project_file_bytes_measured_at?toIso(row.project_file_bytes_measured_at):null, updatedAt: toIso(row.updated_at) }; }
+function mapUsage(row: ProjectUsageRow): ProjectResourceUsage { return { projectId: row.project_id, activeSandboxes: row.active_tasks, providerRequests: Number(row.provider_requests), providerTokens: Number(row.provider_tokens), providerCost: row.provider_cost, projectFileBytes: Number(row.project_file_bytes), projectFileBytesMeasuredAt: row.project_file_bytes_measured_at?toIso(row.project_file_bytes_measured_at):null, updatedAt: toIso(row.updated_at) }; }
 function providerExceededLimits(row:ProjectProviderSettlementRow):ProjectProviderUsageSettlement["exceededLimits"]{return[...(row.provider_requests_exceeded?["provider_requests_limit" as const]:[]),...(row.provider_tokens_exceeded?["provider_tokens_limit" as const]:[]),...(row.provider_cost_exceeded?["provider_cost_limit" as const]:[])]}
 
-function usageColumn(limit: ProjectAlertType): string { return limit === "active_tasks_limit" ? "active_tasks" : limit === "provider_requests_limit" ? "provider_requests" : limit === "provider_tokens_limit" ? "provider_tokens" : limit === "provider_cost_limit" ? "provider_cost" : "project_file_bytes"; }
+function usageColumn(limit: ProjectAlertType): string { return limit === "sandbox_capacity" ? "active_tasks" : limit === "provider_requests_limit" ? "provider_requests" : limit === "provider_tokens_limit" ? "provider_tokens" : limit === "provider_cost_limit" ? "provider_cost" : "project_file_bytes"; }
 function usageLimitColumn(limit: ProjectAlertType): string { return `${usageColumn(limit)}_limit`; }
 function usageDeltaPlaceholder(limit: ProjectAlertType): number { return limit === "provider_requests_limit" ? 2 : limit === "provider_tokens_limit" ? 3 : limit === "provider_cost_limit" ? 4 : 5; }
-function usageDelta(limit: ProjectAlertType, delta: ProjectResourceUsageAdjustment["delta"]): number { return limit === "active_tasks_limit" ? delta.activeTasks : limit === "provider_requests_limit" ? delta.providerRequests : limit === "provider_tokens_limit" ? delta.providerTokens : limit === "provider_cost_limit" ? delta.providerCost : delta.projectFileBytes; }
+function usageDelta(limit: ProjectAlertType, delta: ProjectResourceUsageAdjustment["delta"]): number { return limit === "sandbox_capacity" ? delta.activeSandboxes : limit === "provider_requests_limit" ? delta.providerRequests : limit === "provider_tokens_limit" ? delta.providerTokens : limit === "provider_cost_limit" ? delta.providerCost : delta.projectFileBytes; }
 function mapAlert(row:ProjectAlertRow):ProjectAlert{
-  const fields={id:row.id,projectId:row.project_id,deliveryStatus:row.delivery_status,ruleId:row.rule_id,metric:row.metric,metricValue:row.metric_value===null?null:Number(row.metric_value),threshold:row.threshold===null?null:Number(row.threshold),endpointId:row.endpoint_id,endpointName:row.endpoint_name??null,subjectActorId:row.subject_actor_id,acknowledgedAt:row.acknowledged_at?toIso(row.acknowledged_at):null,acknowledgedBy:row.acknowledged_by,silencedUntil:row.silenced_until?toIso(row.silenced_until):null,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at),resolvedAt:row.resolved_at?toIso(row.resolved_at):null,dismissedAt:row.dismissed_at?toIso(row.dismissed_at):null};
-  if(row.status==="active")return{...fields,type:row.type,status:"active"};
-  return{...fields,type:row.type,status:row.status};
+  const fields={id:row.id,projectId:row.project_id,deliveryStatus:row.delivery_status,ruleId:row.rule_id,metric:row.metric===null?null:fromPersistedAlertMetric(row.metric),metricValue:row.metric_value===null?null:Number(row.metric_value),threshold:row.threshold===null?null:Number(row.threshold),endpointId:row.endpoint_id,endpointName:row.endpoint_name??null,subjectActorId:row.subject_actor_id,acknowledgedAt:row.acknowledged_at?toIso(row.acknowledged_at):null,acknowledgedBy:row.acknowledged_by,silencedUntil:row.silenced_until?toIso(row.silenced_until):null,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at),resolvedAt:row.resolved_at?toIso(row.resolved_at):null,dismissedAt:row.dismissed_at?toIso(row.dismissed_at):null};
+  const type=fromPersistedAlertType(row.type);
+  if(row.status==="active")return{...fields,type,status:"active"};
+  return{...fields,type,status:row.status};
 }
+function toPersistedAlertType(value:ProjectAlertType):PersistedProjectAlertType{return value==="sandbox_capacity"?"active_tasks_limit":value}
+function fromPersistedAlertType(value:PersistedProjectAlertType):ProjectAlertType{return value==="active_tasks_limit"?"sandbox_capacity":value}
+function toPersistedAlertMetric(value:AlertRuleMetric):PersistedAlertRuleMetric{return value==="active_sandboxes"?"active_tasks":value}
+function fromPersistedAlertMetric(value:PersistedAlertRuleMetric):AlertRuleMetric{return value==="active_tasks"?"active_sandboxes":value}
 function mapActiveAlert(row:ProjectAlertRow):ActiveProjectAlert{const alert=mapAlert(row);if(!isActiveProjectAlert(alert))throw new Error("Expected an active project alert row");return alert}
-function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, subjectUserId:row.subject_user_id??null, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:row.detail??{}, createdAt: toIso(row.created_at) }; }
+function mapAudit(row: ProjectAuditRow): ProjectAuditEvent { return { id: row.id, projectId: row.project_id, actorId: row.actor_id, subjectUserId:row.subject_user_id??null, action: row.action, status: row.status, resourceKind: row.resource_kind, resourceId: row.resource_id,detail:mapPersistedAuditDetail(row.detail), createdAt: toIso(row.created_at) }; }
 function mapAuditView(row:ProjectAuditRow):import("../../contracts/src/api.js").ProjectAuditEventView{return{...mapAudit(row),actorDisplayName:row.actor_display_name,actorEmail:row.actor_email,subjectDisplayName:row.subject_display_name,subjectEmail:row.subject_email}}
+function mapPersistedAuditDetail(value:unknown):NonNullable<ProjectAuditEvent["detail"]>{
+  if(!value||typeof value!=="object"||Array.isArray(value))return{};
+  const source=value as Record<string,unknown>;
+  return sanitizeProjectAuditDetail({
+    ...source,
+    ...(source.metric==="active_tasks"?{metric:"active_sandboxes"}:{}),
+    ...(typeof source.activeTasks==="number"?{activeSandboxes:source.activeTasks}:{}),
+    ...(typeof source.activeTasksLimit==="number"?{sandboxLimit:source.activeTasksLimit}:{})
+  });
+}
 function mapSandboxUsageSettlement(row:SandboxUsageSettlementRow):SandboxUsageSettlement{return{runId:row.run_id,workspaceId:row.workspace_id,projectId:row.project_id,taskId:row.task_id,fileLibraryId:row.file_library_id,startedByUserId:row.started_by_user_id,startedAt:row.started_at?toIso(row.started_at):null,releasedAt:toIso(row.released_at),durationSeconds:Number(row.duration_seconds),resources:{cpuRequestMillis:String(row.cpu_request_millis),memoryRequestBytes:String(row.memory_request_bytes),cpuLimitMillis:String(row.cpu_limit_millis),memoryLimitBytes:String(row.memory_limit_bytes)},releaseReason:row.release_reason}}
 function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
   return {
@@ -2636,7 +2695,7 @@ function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
 function validateTaskRunReservation(input:AtomicTaskCreateInput):void{const expectedRunId=input.sandboxRun?.runId??null;const reservesActive=input.sandboxRun!==undefined&&input.sandboxRun.state!=="released";const run=input.sandboxRun;if(input.task.currentRunId!==expectedRunId||input.reserveActive!==reservesActive||(run!==undefined&&(input.task.id!==run.taskId||input.task.workspaceId!==run.workspaceId||input.task.projectId!==run.projectId||input.task.fileLibraryId!==run.fileLibraryId)))throw new Error("Task Run reservation is inconsistent")}
 
 function requiredAdmissionCreateIdempotency(input:AtomicTaskCreateInput):BeginTaskIdempotencyInput{
-  if(!input.idempotency||input.rejectionPresentation!==null||!input.rejectedAuditEvent)throw new Error("Active Task creation requires admission idempotency and rejection receipt inputs");
+  if(!input.idempotency||input.rejectionPresentation!==null||!input.rejectedAuditEvent)throw new Error("Sandbox creation requires admission idempotency and rejection receipt inputs");
   return input.idempotency;
 }
 

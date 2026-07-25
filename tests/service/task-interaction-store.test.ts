@@ -191,7 +191,7 @@ async function createTask(store:ReturnType<typeof createLocalInMemoryProductStor
   assert.equal((await store.createTaskAtomically({task:task(),reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100}})).kind,"created");
 }
 
-function project() { return { id:"project",workspaceId:"workspace",name:"Project",ownerUserId:"user",rootPath:"workspaces/workspace/projects/project",taskConcurrencyLimit:2,createdAt:timestamp(0),updatedAt:timestamp(0) }; }
+function project() { return { id:"project",workspaceId:"workspace",name:"Project",ownerUserId:"user",rootPath:"workspaces/workspace/projects/project",sandboxLimit:2,createdAt:timestamp(0),updatedAt:timestamp(0) }; }
 
 function interaction(id:string,revision:number,position:number,kind:TaskInteractionItem["kind"]):TaskInteractionItem {
   const base = { id,revision,taskId:"task_interactions",title:id,body:null,contentMode:"none" as const,position,occurredAt:timestamp(position),updatedAt:timestamp(revision+position) };

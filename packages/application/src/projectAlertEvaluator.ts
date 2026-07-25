@@ -155,7 +155,7 @@ export function matchesAlertRule(rule: ProjectAlertRule, value: number): boolean
 }
 
 export function defaultAlertMetric(type: ProjectAlertType) {
-  return type === "active_tasks_limit" ? "active_tasks" as const
+  return type === "sandbox_capacity" ? "active_sandboxes" as const
     : type === "provider_requests_limit" ? "provider_requests" as const
     : type === "provider_tokens_limit" ? "provider_tokens" as const
     : type === "provider_cost_limit" ? "provider_cost" as const
@@ -186,7 +186,7 @@ function alertNotificationBody(projectName: string, alert: ProjectAlert, title: 
 }
 function alertMetricLabel(metric: AlertRuleMetric): string {
   return {
-    active_tasks: "Active sandboxes",
+    active_sandboxes: "Active sandboxes",
     provider_requests: "Provider requests",
     provider_tokens: "Provider tokens",
     provider_cost: "Provider cost",

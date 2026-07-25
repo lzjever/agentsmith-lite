@@ -103,7 +103,7 @@ function project() {
     name: "Project",
     ownerUserId: "user_one",
     rootPath: "workspaces/workspace_one/projects/project_one",
-    taskConcurrencyLimit: 2,
+    sandboxLimit: 2,
     lifecycleStatus: "active" as const,
     createdAt: "2026-07-19T00:00:00.000Z",
     updatedAt: "2026-07-19T00:00:00.000Z"

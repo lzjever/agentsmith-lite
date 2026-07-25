@@ -76,7 +76,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     const retried=await new SandboxLifecycleService(store,{namespace:run.namespace,port:retryPort,now:()=>new Date(timestamp(4))}).reapSandboxRunsOnce({apply:true,runId:run.runId});
     assert.deepEqual(retried.errors,[]);
     assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
-    assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeTasks,0);
+    assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeSandboxes,0);
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
     assert.deepEqual((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.map((event)=>event.action),["sandbox.released"]);
 
@@ -142,7 +142,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal(drained.startupActionDeadlineAt,null);
     assert.equal(drained.startupClaimToken,null);
     assert.equal(drained.cleanupClaimedAt,null);
-    assert.equal((await store.findProjectResourceUsage(starting.projectId))?.activeTasks,1);
+    assert.equal((await store.findProjectResourceUsage(starting.projectId))?.activeSandboxes,1);
     assert.equal((await store.claimSandboxStartup({
       taskId:drained.taskId,runId:drained.runId,expectedFencingToken:drained.fencingToken,
       claimToken:"recovered-startup",claimedAt:timestamp(5),leaseExpiresAt:timestamp(7)
@@ -207,7 +207,7 @@ async function createReleaseRequestedRun(store:ReturnType<typeof createLocalInMe
   const owner="user_lifecycle",workspaceId="workspace_lifecycle",projectId="project_lifecycle",taskId="task_lifecycle",libraryId="library_lifecycle";
   await store.createUser({id:owner,email:"lifecycle@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp(0),updatedAt:timestamp(0)});
   await store.createWorkspace({id:workspaceId,name:"Workspace",ownerUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)});
-  await store.createProject({id:projectId,workspaceId,name:"Project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,taskConcurrencyLimit:1,createdAt:timestamp(0),updatedAt:timestamp(0)});
+  await store.createProject({id:projectId,workspaceId,name:"Project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,sandboxLimit:1,createdAt:timestamp(0),updatedAt:timestamp(0)});
   const task:PersistedAgentTask={id:taskId,workspaceId,projectId,endpointId:"endpoint_lifecycle",fileLibraryId:libraryId,createdByUserId:owner,title:"Task",prompt:"Work",agentContext:"",currentRunId:"run_lifecycle",archivedAt:null,deletedAt:null,createdAt:timestamp(0),updatedAt:timestamp(0)};
   const run:PersistedSandboxRunState={workspaceId,projectId,taskId,runId:task.currentRunId!,namespace:"agentsmith",state:"release_requested",image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${libraryId}/home`,fileLibraryId:libraryId,startedByUserId:owner,startedAt:timestamp(0),startupReadyAt:null,startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:"task-lifecycle",service:"task-lifecycle",configMap:"task-lifecycle-config",secret:"task-lifecycle-secret",serviceAccount:"task-lifecycle",networkPolicy:"task-lifecycle"},serviceKeySecretRef:{name:"task-lifecycle-secret",key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:"requested",releaseRequestedAt:timestamp(1),failedAt:null,releasedAt:null,createdAt:timestamp(0),updatedAt:timestamp(1)};
   const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},idempotency:{actorId:owner,projectId,operation:"create",key:"fixture-lifecycle",requestHash:"fixture-lifecycle-hash",resourceId:taskId,claimToken:"fixture-lifecycle-claim",now:timestamp(0),leaseExpiresAt:timestamp(9)},rejectionPresentation:null,rejectedAuditEvent:{id:"audit_fixture_lifecycle_rejected",projectId,actorId:owner,action:"task.create",status:"rejected",resourceKind:"task",resourceId:taskId,detail:{taskId,trigger:"task_create"},createdAt:timestamp(0)},newFileLibrary:{id:libraryId,workspaceId,projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,createdByUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)},sandboxRun:run});

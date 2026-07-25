@@ -1420,7 +1420,7 @@ describe("task interactions API", () => {
     await makeTaskRunActive(store,occupyingTask,"http://botified.internal");
     const policy=await store.findProjectResourcePolicy(auth.projectId);
     assert.ok(policy);
-    await store.patchProjectResourcePolicy(auth.projectId,{activeTasksLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
+    await store.patchProjectResourcePolicy(auth.projectId,{sandboxLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
     store.upsertActiveProjectAlert=async()=>{throw new Error("alert sink unavailable");};
 
     const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-capacity"};
@@ -1453,7 +1453,7 @@ describe("task interactions API", () => {
     const occupyingTask=await store.findTask(occupying.id as string);assert.ok(occupyingTask);
     await makeTaskRunActive(store,occupyingTask,"http://botified.internal");
     const policy=await store.findProjectResourcePolicy(auth.projectId);assert.ok(policy);
-    await store.patchProjectResourcePolicy(auth.projectId,{activeTasksLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
+    await store.patchProjectResourcePolicy(auth.projectId,{sandboxLimit:1},new Date(Date.parse(policy.updatedAt)+1).toISOString(),policy.updatedAt);
 
     const originalFind=store.findTaskIdempotency.bind(store);
     let initialLookups=0;
