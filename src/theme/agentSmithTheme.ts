@@ -75,7 +75,7 @@ export const agentSmithTheme = defineTheme({
     "--color-icon-disabled": ["#9aa3aa", "#68737c"],
 
     "--color-border": ["#d6dce1", "#343a40"],
-    "--color-border-emphasized": ["#b9c2c9", "#4b545c"],
+    "--color-border-emphasized": ["#838e97", "#707a83"],
 
     "--color-data-categorical-orange": ["#f47721", "#f47721"],
     "--color-accent": ["#1769aa", "#6bb6ff"],

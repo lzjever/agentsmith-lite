@@ -120,7 +120,7 @@ export function EndpointDialog({
                   }
                 />
               ) : null}
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid min-w-0 gap-4 sm:grid-cols-2">
                 <TextInput
                   label="Name"
                   value={input.name}
@@ -163,17 +163,18 @@ export function EndpointDialog({
                   />
                 </div>
                 <CredentialPicker projectId={projectId} value={input.credentialId} disabled={saving||discovering} onChange={(credential)=>onChange({...input,credentialId:credential.id,baseUrl:credential.baseUrl})} onUnavailable={()=>onChange({...input,credentialId:"",baseUrl:""})}/>
-                <NumberInput
-                  label="Timeout"
-                  value={input.requestTimeoutSecs}
-                  onChange={(value) => set("requestTimeoutSecs", value)}
-                  min={1}
-                  units="seconds"
-                  isRequired
-                  isDisabled={saving}
-                  size="lg"
-                  width="100%"
-                />
+                <div className="min-w-0">
+                  <NumberInput
+                    label="Timeout (seconds)"
+                    value={input.requestTimeoutSecs}
+                    onChange={(value) => set("requestTimeoutSecs", value)}
+                    min={1}
+                    isRequired
+                    isDisabled={saving}
+                    size="lg"
+                    width="100%"
+                  />
+                </div>
                 <div className="flex items-end gap-2 sm:col-span-2">
                   <Button
                     type="button"
