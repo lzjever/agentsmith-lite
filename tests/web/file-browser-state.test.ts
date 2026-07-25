@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ProjectFileEntry as FileEntry } from "../../packages/contracts/src/api.js";
+import type { ProjectFileListEntry as FileEntry } from "../../packages/contracts/src/api.js";
 import {
   FILE_BROWSER_PAGE_SIZE,
   createFileBrowserState,
+  fileBrowserDeletionFocusCandidates,
+  fileDeleteUnavailableMessage,
+  isFileBrowserDeleteTargetCurrent,
   reduceFileBrowserState,
   selectFileBrowserPage
 } from "../../src/components/files/fileBrowserState.js";
@@ -17,6 +20,10 @@ const fileEntry = (
   type: "file",
   size: 0,
   updatedAt: "2026-07-24T00:00:00.000Z",
+  capabilities: {
+    canDelete: true,
+    deleteUnavailableReason: null
+  },
   ...overrides
 });
 
@@ -27,7 +34,11 @@ const directoryEntry = (
   name,
   path: `files/${name}`,
   type: "directory",
-  updatedAt
+  updatedAt,
+  capabilities: {
+    canDelete: true,
+    deleteUnavailableReason: null
+  }
 });
 
 const numberedEntries = (count: number): FileEntry[] =>
@@ -273,5 +284,154 @@ describe("file browser refresh continuity", () => {
       entries: entries.filter((entry) => entry.path !== "files/item-002.txt")
     });
     assert.equal(state.selectedPath, null);
+  });
+});
+
+describe("file browser deletion continuity", () => {
+  it("returns the next and previous rows from the filtered, sorted presentation", () => {
+    let state = createFileBrowserState(numberedEntries(5));
+    state = reduceFileBrowserState(state, {
+      type: "sort_changed",
+      sort: { field: "name", direction: "desc" }
+    });
+    state = reduceFileBrowserState(state, {
+      type: "filter_changed",
+      query: "item"
+    });
+
+    assert.deepEqual(
+      fileBrowserDeletionFocusCandidates(state, "files/item-003.txt"),
+      {
+        nextPath: "files/item-002.txt",
+        previousPath: "files/item-004.txt"
+      }
+    );
+  });
+
+  it("uses the preceding row when deleting the only entry on a clamped final page", () => {
+    let state = createFileBrowserState(numberedEntries(51));
+    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
+
+    assert.deepEqual(
+      fileBrowserDeletionFocusCandidates(state, "files/item-051.txt"),
+      {
+        nextPath: null,
+        previousPath: "files/item-050.txt"
+      }
+    );
+  });
+
+  it("falls back to the list heading when the selected entry is outside the presentation", () => {
+    let state = createFileBrowserState(numberedEntries(3));
+    state = reduceFileBrowserState(state, {
+      type: "filter_changed",
+      query: "item-001"
+    });
+
+    assert.deepEqual(
+      fileBrowserDeletionFocusCandidates(state, "files/item-003.txt"),
+      { nextPath: null, previousPath: null }
+    );
+  });
+
+  it("maps server delete capability reasons to human-readable details", () => {
+    assert.equal(
+      fileDeleteUnavailableMessage("artifact_namespace_protected", "directory"),
+      "This folder preserves protected Task Artifacts and cannot be deleted."
+    );
+    assert.equal(
+      fileDeleteUnavailableMessage("read_only", "file"),
+      "This File Library is read-only, so this entry cannot be deleted."
+    );
+    assert.equal(fileDeleteUnavailableMessage(null, "directory"), null);
+  });
+
+  it("accepts a delete target only in the current library and parent folder", () => {
+    assert.equal(
+      isFileBrowserDeleteTargetCurrent(
+        { libraryId: "library_1", path: "reports/brief.txt" },
+        { libraryId: "library_1", path: "reports" }
+      ),
+      true
+    );
+    assert.equal(
+      isFileBrowserDeleteTargetCurrent(
+        { libraryId: "library_1", path: "brief.txt" },
+        { libraryId: "library_1", path: "" }
+      ),
+      true
+    );
+    assert.equal(
+      isFileBrowserDeleteTargetCurrent(
+        { libraryId: "library_1", path: "reports/brief.txt" },
+        { libraryId: "library_2", path: "reports" }
+      ),
+      false
+    );
+    assert.equal(
+      isFileBrowserDeleteTargetCurrent(
+        { libraryId: "library_1", path: "reports/brief.txt" },
+        { libraryId: "library_1", path: "" }
+      ),
+      false
+    );
+  });
+
+  it("keeps a known missing entry removed when reconciliation fails", () => {
+    const entries = numberedEntries(3);
+    let state = createFileBrowserState(entries);
+    state = reduceFileBrowserState(state, {
+      type: "selection_changed",
+      path: entries[1]!.path
+    });
+    state = reduceFileBrowserState(state, {
+      type: "entry_removed",
+      path: entries[1]!.path
+    });
+    state = reduceFileBrowserState(state, { type: "refresh_started" });
+    state = reduceFileBrowserState(state, {
+      type: "refresh_failed",
+      message: "Storage is temporarily unavailable"
+    });
+
+    assert.equal(state.selectedPath, null);
+    assert.deepEqual(
+      state.entries.map((entry) => entry.path),
+      [entries[0]!.path, entries[2]!.path]
+    );
+    assert.equal(state.loadState, "error");
+  });
+
+  it("marks current entry capabilities read-only without disturbing presentation state", () => {
+    const entries = numberedEntries(51);
+    entries[0] = {
+      ...entries[0]!,
+      capabilities: {
+        canDelete: false,
+        deleteUnavailableReason: "artifact_namespace_protected"
+      }
+    };
+    let state = createFileBrowserState(entries);
+    state = reduceFileBrowserState(state, {
+      type: "selection_changed",
+      path: "files/item-051.txt"
+    });
+    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
+    state = reduceFileBrowserState(state, { type: "delete_access_revoked" });
+
+    assert.equal(state.selectedPath, "files/item-051.txt");
+    assert.equal(selectFileBrowserPage(state).page, 2);
+    assert.equal(state.loadState, "ready");
+    assert.deepEqual(state.entries[0]!.capabilities, {
+      canDelete: false,
+      deleteUnavailableReason: "artifact_namespace_protected"
+    });
+    assert.equal(state.entries.every((entry) => entry.capabilities.canDelete === false), true);
+    assert.equal(
+      state.entries.slice(1).every((entry) =>
+        entry.capabilities.deleteUnavailableReason === "read_only"
+      ),
+      true
+    );
   });
 });

@@ -46,7 +46,8 @@ export type FileBrowserAction =
   | { type: "refresh_succeeded"; entries: ProjectFile[] }
   | { type: "refresh_failed"; message: string }
   | { type: "entry_upserted"; entry: ProjectFile }
-  | { type: "entry_removed"; path: string };
+  | { type: "entry_removed"; path: string }
+  | { type: "delete_access_revoked" };
 
 export interface FileBrowserPage {
   entries: ProjectFile[];
@@ -57,6 +58,11 @@ export interface FileBrowserPage {
     start: number;
     end: number;
   };
+}
+
+export interface FileBrowserDeletionFocusCandidates {
+  nextPath: string | null;
+  previousPath: string | null;
 }
 
 export const FILE_BROWSER_PAGE_SIZE = 50;
@@ -162,6 +168,20 @@ export function reduceFileBrowserState(
         "ready",
         ""
       );
+    case "delete_access_revoked":
+      return {
+        ...state,
+        entries: state.entries.map((entry) => ({
+          ...entry,
+          capabilities: {
+            canDelete: false,
+            deleteUnavailableReason:
+              entry.capabilities.deleteUnavailableReason === "artifact_namespace_protected"
+                ? "artifact_namespace_protected"
+                : "read_only"
+          }
+        }))
+      };
   }
 }
 
@@ -186,6 +206,49 @@ export function selectFileBrowserPage(state: FileBrowserState): FileBrowserPage 
       end: offset + entries.length
     }
   };
+}
+
+export function fileBrowserDeletionFocusCandidates(
+  state: FileBrowserState,
+  deletedPath: string
+): FileBrowserDeletionFocusCandidates {
+  const normalizedQuery = state.query.trim().toLowerCase();
+  const presented = sortFileEntries(
+    state.entries.filter((entry) =>
+      entry.name.toLowerCase().includes(normalizedQuery)
+    ),
+    state.sort
+  );
+  const deletedIndex = presented.findIndex((entry) => entry.path === deletedPath);
+  if (deletedIndex < 0) {
+    return { nextPath: null, previousPath: null };
+  }
+  return {
+    nextPath: presented[deletedIndex + 1]?.path ?? null,
+    previousPath: presented[deletedIndex - 1]?.path ?? null
+  };
+}
+
+export function fileDeleteUnavailableMessage(
+  reason: ProjectFile["capabilities"]["deleteUnavailableReason"],
+  entryType: ProjectFile["type"]
+): string | null {
+  if (reason === "artifact_namespace_protected") {
+    return `This ${entryType === "directory" ? "folder" : "file"} preserves protected Task Artifacts and cannot be deleted.`;
+  }
+  if (reason === "read_only") {
+    return "This File Library is read-only, so this entry cannot be deleted.";
+  }
+  return null;
+}
+
+export function isFileBrowserDeleteTargetCurrent(
+  target: { libraryId: string; path: string },
+  current: { libraryId: string | null; path: string }
+): boolean {
+  const separator = target.path.lastIndexOf("/");
+  const parentPath = separator < 0 ? "" : target.path.slice(0, separator);
+  return target.libraryId === current.libraryId && parentPath === current.path;
 }
 
 export function fileBrowserDisplay(state: "loading" | "ready" | "error", entries: ProjectFile[], path: string): FileBrowserDisplay {

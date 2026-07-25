@@ -2,7 +2,7 @@
 
 import { ArrowLeft, ChevronLeft, ChevronRight, Download, FileText, Folder, FolderOpen, FolderUp, Image, Pencil, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
-import { Banner, Button, Collapsible, EmptyState, FileInput, Heading, IconButton, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
+import { Banner, Button, Dialog as AstryxDialog, DialogHeader, EmptyState, FileInput, Heading, IconButton, Selector, Skeleton, Text, TextInput, useToast } from "@astryxdesign/core";
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectFile } from "../../lib/api/client";
 import { formatLocalDateTime } from "../../lib/format/date";
@@ -20,8 +20,13 @@ import { ConfirmationDialog, Dialog } from "../ui/Dialog";
 import { filesReturnToAfterNavigation } from "../tasks/task-peer-navigation";
 import {
   createFileBrowserState,
+  fileBrowserDeletionFocusCandidates,
+  fileDeleteUnavailableMessage,
+  isFileBrowserDeleteTargetCurrent,
   reduceFileBrowserState,
   selectFileBrowserPage,
+  type FileBrowserAction,
+  type FileBrowserDeletionFocusCandidates,
   type FileBrowserSort
 } from "./fileBrowserState";
 
@@ -41,7 +46,10 @@ type FilePreviewState =
   | { status: "loading"; path: string }
   | { status: "error"; path: string; message: string }
   | { status: "ready"; preview: FilePreview };
-type DeleteFileTarget = { libraryId: string; entry: ProjectFile };
+type DeleteEntryTarget = { libraryId: string; entry: ProjectFile };
+type FileBrowserPresentationAction = Extract<FileBrowserAction, {
+  type: "filter_changed" | "sort_changed" | "page_changed";
+}>;
 
 export function ProjectFilesPage({ workspaceId, projectId }: { workspaceId?: string; projectId: string }) {
   return <ProjectFiles key={`${workspaceId ?? "workspace"}:${projectId}`} workspaceId={workspaceId} projectId={projectId} />;
@@ -60,6 +68,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const previewVersion = useRef(0);
   const previewRequest = useRef<InlinePreviewRequest | undefined>(undefined);
   const input = useRef<HTMLInputElement>(null);
+  const listHeading = useRef<HTMLHeadingElement>(null);
+  const entrySelectionButtons = useRef(new Map<string, HTMLButtonElement>());
+  const detailsScrollPosition = useRef(0);
+  const focusRestoreVersion = useRef(0);
 
   const [libraries, setLibraries] = useState<FileLibrary[]>([]);
   const [librariesState, setLibrariesState] = useState<LoadState>("loading");
@@ -75,6 +87,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   browserRef.current = browser;
   const [operationMessage, setOperationMessage] = useState("");
   const [filesNotice, setFilesNotice] = useState("");
+  const [narrow, setNarrow] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [previewState, setPreviewState] = useState<FilePreviewState>({ status: "idle" });
   const [dropReady, setDropReady] = useState(false);
@@ -82,7 +95,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const [deletingFile, setDeletingFile] = useState(false);
   const [uploadFailure, setUploadFailure] = useState<{ libraryId: string; file: File; path: string; message: string; code?: string }>();
   const [replaceTarget, setReplaceTarget] = useState<{ libraryId: string; file: File; path: string }>();
-  const [deleteFileTarget, setDeleteFileTarget] = useState<DeleteFileTarget>();
+  const [deleteFileTarget, setDeleteFileTarget] = useState<DeleteEntryTarget>();
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<FileLibrary>();
   const [deleteLibraryTarget, setDeleteLibraryTarget] = useState<FileLibrary>();
@@ -104,13 +117,24 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setPreviewState({ status: "idle" });
   }, []);
 
-  const resetFileContext = useCallback(() => {
-    dispatchBrowser({ type: "location_changed" });
+  const removeKnownEntryFromPresentation = useCallback((entryPath: string) => {
+    const action = { type: "entry_removed", path: entryPath } as const;
+    browserRef.current = reduceFileBrowserState(browserRef.current, action);
+    dispatchBrowser(action);
     clearPreview();
     setMobileDetailsOpen(false);
   }, [clearPreview]);
 
+  const resetFileContext = useCallback(() => {
+    focusRestoreVersion.current += 1;
+    dispatchBrowser({ type: "location_changed" });
+    clearPreview();
+    setMobileDetailsOpen(false);
+    setDeleteFileTarget(undefined);
+  }, [clearPreview]);
+
   const applyLocation = useCallback((libraryId: string | null, nextPath: string) => {
+    setDeleteFileTarget(undefined);
     const changed = selectedLibraryRef.current !== libraryId || pathRef.current !== nextPath;
     if (changed) {
       invalidateFileReads();
@@ -180,6 +204,17 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   }, [loadLibraries]);
 
   useEffect(() => {
+    const media = window.matchMedia("(max-width: 1023px)");
+    const update = () => {
+      setNarrow(media.matches);
+      if (!media.matches) setMobileDetailsOpen(false);
+    };
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
     function restoreLocation() {
       const location = readFileBrowserLocation();
       if (workspaceId) {
@@ -199,16 +234,16 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     return () => window.removeEventListener("popstate", restoreLocation);
   }, [applyLocation, projectId, workspaceId]);
 
-  const loadFiles = useCallback(async () => {
+  const loadFiles = useCallback(async (options: { preserveOperationMessage?: boolean } = {}) => {
     if (!selectedLibraryId) {
       dispatchBrowser({ type: "refresh_succeeded", entries: [] });
-      return;
+      return [];
     }
     const requestedLibraryId = selectedLibraryId;
     const requestedPath = path;
     const version = ++fileLoadVersion.current;
     dispatchBrowser({ type: "refresh_started" });
-    setOperationMessage("");
+    if (!options.preserveOperationMessage) setOperationMessage("");
     setUploadFailure(undefined);
     try {
       const result = await apiClient.libraryFiles(projectId, requestedLibraryId, requestedPath);
@@ -220,19 +255,27 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
         if (!refreshedSelected) {
           clearPreview();
           setMobileDetailsOpen(false);
+          setFilesNotice("The selected entry no longer exists. The File Library view has been updated.");
         } else if (currentSelected && fileEntryVersionChanged(currentSelected, refreshedSelected)) {
           clearPreview();
         }
       }
       dispatchBrowser({ type: "refresh_succeeded", entries: result.entries });
+      return result.entries;
     } catch (error) {
       if (!mounted.current || version !== fileLoadVersion.current || selectedLibraryRef.current !== requestedLibraryId || pathRef.current !== requestedPath) return;
+      if (requestedPath && isFilePathNotFound(error)) {
+        setFilesNotice("The previous folder was removed. Returned to the File Library root.");
+        applyLocation(requestedLibraryId, "");
+        writeFileBrowserLocation(requestedLibraryId, "", true);
+        return;
+      }
       dispatchBrowser({
         type: "refresh_failed",
         message: errorMessage(error, "Files could not be loaded.")
       });
     }
-  }, [clearPreview, path, projectId, selectedLibraryId]);
+  }, [applyLocation, clearPreview, path, projectId, selectedLibraryId]);
 
   useEffect(() => {
     if (librariesState === "ready") void loadFiles();
@@ -264,26 +307,20 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   }
 
   function selectFile(entry: ProjectFile) {
-    dispatchBrowser({ type: "selection_changed", path: entry.path });
+    focusRestoreVersion.current += 1;
+    const action = { type: "selection_changed", path: entry.path } as const;
+    browserRef.current = reduceFileBrowserState(browserRef.current, action);
+    dispatchBrowser(action);
     if (activePreviewPath !== entry.path) clearPreview();
-    setMobileDetailsOpen(true);
+    if (narrow) {
+      if (!mobileDetailsOpen) detailsScrollPosition.current = window.scrollY;
+      setMobileDetailsOpen(true);
+    }
   }
 
   function openDeleteFile(entry: ProjectFile) {
-    if (!selectedLibrary) return;
+    if (!selectedLibrary || !entry.capabilities.canDelete) return;
     setDeleteFileTarget({ libraryId: selectedLibrary.id, entry });
-  }
-
-  function forgetFile(libraryId: string, filePath: string) {
-    setDeleteFileTarget((current) => current?.libraryId === libraryId && current.entry.path === filePath ? undefined : current);
-    if (selectedLibraryRef.current !== libraryId || pathRef.current !== parentLibraryPath(filePath)) return;
-    invalidateFileReads();
-    const selectedPath = browserRef.current.selectedPath;
-    dispatchBrowser({ type: "entry_removed", path: filePath });
-    if (selectedPath === filePath) {
-      clearPreview();
-      setMobileDetailsOpen(false);
-    }
   }
 
   async function revokeWriteAccess(error: unknown, libraryId: string) {
@@ -292,6 +329,9 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     librariesRef.current = next;
     setLibraries(next);
     if (selectedLibraryRef.current === libraryId) {
+      const action = { type: "delete_access_revoked" } as const;
+      browserRef.current = reduceFileBrowserState(browserRef.current, action);
+      dispatchBrowser(action);
       setUploadFailure(undefined);
       setReplaceTarget(undefined);
       setOperationMessage("File write access changed. This library is now read-only.");
@@ -315,11 +355,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       const written = await apiClient.uploadLibraryFile(projectId, libraryId, filePath, file, { overwrite, idempotencyKey: mutationKeys.key("library-file.upload", requestIdentity) });
       mutationKeys.complete("library-file.upload", requestIdentity);
       if (!mounted.current) return;
-      const entry: ProjectFile = { name: written.path.slice(written.path.lastIndexOf("/") + 1), path: written.path, type: "file", size: written.bytes, mediaType: written.mediaType, updatedAt: written.updatedAt };
       if (selectedLibraryRef.current === libraryId && pathRef.current === uploadPath) {
         invalidateFileReads();
         if (overwrite && browserRef.current.selectedPath === written.path) clearPreview();
-        dispatchBrowser({ type: "entry_upserted", entry });
+        await loadFiles();
       }
       if (overwrite) {
         setReplaceTarget(undefined);
@@ -369,10 +408,13 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     } catch (error) {
       if (!mounted.current || version !== previewVersion.current) return;
       if (isMissingFile(error)) {
+        const focusCandidates = fileBrowserDeletionFocusCandidates(browserRef.current, entry.path);
         request.dispose();
         if (previewRequest.current === request) previewRequest.current = undefined;
-        forgetFile(libraryId, entry.path);
-        setFilesNotice("File no longer exists. It was removed from this File Library view.");
+        removeKnownEntryFromPresentation(entry.path);
+        setFilesNotice("The selected file no longer exists. The File Library view has been updated.");
+        focusAfterEntryDeletion(focusCandidates);
+        scheduleFileReconciliation(libraryId, pathRef.current);
         return;
       }
       request.dispose();
@@ -386,10 +428,23 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   }
 
   async function removeFile() {
-    if (!deleteFileTarget || uploading || deletingFile) return;
+    if (!deleteFileTarget) return;
     const target = deleteFileTarget;
+    if (
+      !target.entry.capabilities.canDelete
+      || !isFileBrowserDeleteTargetCurrent(
+        { libraryId: target.libraryId, path: target.entry.path },
+        { libraryId: selectedLibraryRef.current, path: pathRef.current }
+      )
+    ) {
+      setDeleteFileTarget(undefined);
+      return;
+    }
+    if (uploading || deletingFile) return;
     const libraryId = target.libraryId;
     const requestIdentity = `${libraryId}:${target.entry.path}`;
+    const focusCandidates = fileBrowserDeletionFocusCandidates(browserRef.current, target.entry.path);
+    const objectLabel = target.entry.type === "directory" ? "Folder" : "File";
     setDeletingFile(true);
     try {
       let alreadyMissing = false;
@@ -401,17 +456,76 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       if (!mounted.current) return;
       const targetIsCurrent = selectedLibraryRef.current === libraryId && pathRef.current === parentLibraryPath(target.entry.path);
       setDeleteFileTarget(undefined);
-      forgetFile(libraryId, target.entry.path);
-      if (alreadyMissing && targetIsCurrent) setFilesNotice("File no longer exists. The File Library view has been updated.");
-      else if (alreadyMissing) showToast({ body: "File no longer exists", type: "info" });
-      else showToast({ body: "File deleted", type: "info" });
+      const message = alreadyMissing
+        ? `${objectLabel} ${target.entry.path} no longer exists. The File Library view has been updated.`
+        : `${objectLabel} ${target.entry.path} deleted.`;
+      if (targetIsCurrent) {
+        removeKnownEntryFromPresentation(target.entry.path);
+        showToast({ body: message, type: "info" });
+        focusAfterEntryDeletion(focusCandidates);
+        scheduleFileReconciliation(libraryId, pathRef.current);
+      } else {
+        showToast({ body: message, type: "info" });
+      }
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("library-file.delete", requestIdentity);
-      await revokeWriteAccess(error, libraryId);
-      throw new Error(errorMessage(error, "File could not be deleted."));
+      const accessChanged = await revokeWriteAccess(error, libraryId);
+      if (accessChanged) {
+        setDeleteFileTarget(undefined);
+        if (selectedLibraryRef.current === libraryId) {
+          void loadFiles({ preserveOperationMessage: true });
+        }
+        return;
+      }
+      throw new Error(errorMessage(error, `${objectLabel} could not be deleted.`));
     } finally {
       if (mounted.current) setDeletingFile(false);
     }
+  }
+
+  function focusAfterEntryDeletion(candidates: FileBrowserDeletionFocusCandidates) {
+    const version = ++focusRestoreVersion.current;
+    const libraryId = selectedLibraryRef.current;
+    const currentPath = pathRef.current;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (selectedLibraryRef.current !== libraryId || pathRef.current !== currentPath) return;
+        if (version !== focusRestoreVersion.current || browserRef.current.selectedPath !== null) return;
+        const target = [candidates.nextPath, candidates.previousPath]
+          .filter((candidate): candidate is string => candidate !== null)
+          .map((candidate) => entrySelectionButtons.current.get(candidate))
+          .find((candidate) => candidate?.isConnected);
+        if (narrow) window.scrollTo(0, detailsScrollPosition.current);
+        (target ?? listHeading.current)?.focus({ preventScroll: narrow });
+      });
+    });
+  }
+
+  function scheduleFileReconciliation(libraryId: string, folderPath: string) {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (selectedLibraryRef.current !== libraryId || pathRef.current !== folderPath) return;
+        invalidateFileReads();
+        void loadFiles();
+      });
+    });
+  }
+
+  function changeFileBrowserPresentation(action: FileBrowserPresentationAction) {
+    focusRestoreVersion.current += 1;
+    browserRef.current = reduceFileBrowserState(browserRef.current, action);
+    dispatchBrowser(action);
+  }
+
+  function closeMobileDetails() {
+    focusRestoreVersion.current += 1;
+    setMobileDetailsOpen(false);
+    window.requestAnimationFrame(() => {
+      window.scrollTo(0, detailsScrollPosition.current);
+      const selectedPath = browserRef.current.selectedPath;
+      (selectedPath ? entrySelectionButtons.current.get(selectedPath) : undefined)
+        ?.focus({ preventScroll: true });
+    });
   }
 
   function openCreateLibrary() {
@@ -515,6 +629,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     <div className="grid min-h-[34rem] gap-4 lg:grid-cols-[16rem_minmax(0,1fr)_19rem]">
       <LibrariesPane state={librariesState} message={librariesMessage} libraries={libraries} selectedLibraryId={selectedLibraryId} projectBasePath={projectBasePath} canCreate={canCreateLibrary} mutationBusy={mutationBusy} onRetry={loadLibraries} onSelect={selectLibrary} onCreate={openCreateLibrary} onRename={openRenameLibrary} onDelete={setDeleteLibraryTarget} />
       <section className={`min-w-0 overflow-hidden rounded-md border bg-surface ${dropReady ? "border-accent ring-2 ring-accent" : "border-border"}`} aria-label="Library files" aria-busy={browser.loadState === "loading"} onDragEnter={(event) => { event.preventDefault(); if (canWriteFiles && !mutationBusy) setDropReady(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDropReady(false); }} onDrop={(event) => { event.preventDefault(); setDropReady(false); if (!canWriteFiles || mutationBusy) return; const dropped = event.dataTransfer.files?.[0]; if (dropped) void upload(dropped); }}>
+        <h2 ref={listHeading} className="sr-only" tabIndex={-1}>Library files</h2>
         {!selectedLibrary ? <NoLibrarySelected canCreate={canCreateLibrary} onCreate={openCreateLibrary} /> : <>
           <p className="sr-only" aria-live="polite">{dropReady ? "Drop a file to upload" : ""}</p>
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border px-3">
@@ -522,8 +637,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
             <div className="flex shrink-0 items-center gap-1"><IconButton label="Refresh files" tooltip="Refresh files" variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void loadFiles()} isDisabled={browser.loadState === "loading" || mutationBusy} />{canWriteFiles ? <FileInput ref={input} label="Upload file" isLabelHidden value={null} onChange={selectUpload} placeholder={uploading ? "Uploading" : "Upload"} isDisabled={mutationBusy} isLoading={uploading} width={128} /> : null}</div>
           </div>
           <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row">
-            <TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={browser.query} onChange={(query) => dispatchBrowser({ type: "filter_changed", query })} hasClear placeholder="Filter files" size="lg" width="100%" />
-            <Selector label="Sort files" isLabelHidden options={fileSortOptions} value={`${browser.sort.field}:${browser.sort.direction}`} onChange={(value) => { const [field, direction] = value.split(":") as [FileBrowserSort["field"], FileBrowserSort["direction"]]; dispatchBrowser({ type: "sort_changed", sort: { field, direction } }); }} size="lg" className="w-full shrink-0 sm:w-44" />
+            <TextInput label="Filter files" isLabelHidden startIcon={<Search size={16} />} value={browser.query} onChange={(query) => changeFileBrowserPresentation({ type: "filter_changed", query })} hasClear placeholder="Filter files" size="lg" width="100%" />
+            <Selector label="Sort files" isLabelHidden options={fileSortOptions} value={`${browser.sort.field}:${browser.sort.direction}`} onChange={(value) => { const [field, direction] = value.split(":") as [FileBrowserSort["field"], FileBrowserSort["direction"]]; changeFileBrowserPresentation({ type: "sort_changed", sort: { field, direction } }); }} size="lg" className="w-full shrink-0 sm:w-44" />
           </div>
           {filesNotice ? <Banner className="mx-3 mt-3" status="info" title="File Library updated" description={filesNotice} isDismissable onDismiss={() => setFilesNotice("")} /> : null}
           {operationMessage ? <InlineError message={operationMessage} onDismiss={() => setOperationMessage("")} /> : null}
@@ -532,14 +647,29 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
           {initialFilesLoading ? <FileBrowserLoading /> : null}
           {initialFilesError ? <FileBrowserError message={browser.message} onRetry={loadFiles} /> : null}
           {browser.loadState === "ready" && browser.entries.length === 0 ? <FileBrowserEmpty nested={path !== ""} canUpload={canWriteFiles} onUpload={() => input.current?.click()} /> : null}
-          {noMatches ? <FileBrowserNoMatches query={browser.query.trim()} onClear={() => dispatchBrowser({ type: "filter_changed", query: "" })} /> : null}
-          {browser.entries.length > 0 && !noMatches ? <FileBrowserList entries={page.entries} parent={parent} selectedPath={browser.selectedPath} onNavigate={navigate} onSelect={selectFile} /> : null}
-          {page.totalCount > 0 ? <FileBrowserPagination page={page.page} pageCount={page.pageCount} range={page.range} totalCount={page.totalCount} onPageChange={(nextPage) => dispatchBrowser({ type: "page_changed", page: nextPage })} /> : null}
+          {noMatches ? <FileBrowserNoMatches query={browser.query.trim()} onClear={() => changeFileBrowserPresentation({ type: "filter_changed", query: "" })} /> : null}
+          {browser.entries.length > 0 && !noMatches ? <FileBrowserList entries={page.entries} parent={parent} selectedPath={browser.selectedPath} selectionButtons={entrySelectionButtons} onNavigate={navigate} onSelect={selectFile} /> : null}
+          {page.totalCount > 0 ? <FileBrowserPagination page={page.page} pageCount={page.pageCount} range={page.range} totalCount={page.totalCount} onPageChange={(nextPage) => changeFileBrowserPresentation({ type: "page_changed", page: nextPage })} /> : null}
         </>}
       </section>
       <aside className="hidden rounded-md border border-border bg-surface p-4 lg:block"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></aside>
     </div>
-    <div className="lg:hidden">{selected ? <Collapsible trigger="File details" isOpen={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}><div className="mt-2 rounded-md border border-border bg-surface p-4"><FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} /></div></Collapsible> : null}</div>
+    <AstryxDialog
+      isOpen={narrow && mobileDetailsOpen && Boolean(selected)}
+      onOpenChange={(open) => { if (!open) closeMobileDetails(); }}
+      position={{ right: 0, top: 0, bottom: 0 }}
+      width="min(26rem, 100vw)"
+      maxHeight="100dvh"
+      padding={0}
+      purpose="info"
+      aria-label={selected ? `${selected.type === "directory" ? "Folder" : "File"} details for ${selected.name}` : "Entry details"}
+      style={{ height: "100dvh", maxWidth: "100vw", borderRadius: 0 }}
+    >
+      <DialogHeader title="Details" {...(selected ? { subtitle: selected.name } : {})} hasDivider onOpenChange={(open) => { if (!open) closeMobileDetails(); }} />
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} />
+      </div>
+    </AstryxDialog>
     <LibraryNameDialog mode="create" open={createOpen} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!libraryMutationPending) { setCreateOpen(open); if (!open) setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={createLibrary} />
     <LibraryNameDialog mode="rename" open={Boolean(renameTarget)} name={libraryName} error={libraryDialogError} pending={libraryMutationPending} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setRenameTarget(undefined); setLibraryDialogError(""); } }} onNameChange={setLibraryName} onSubmit={renameLibrary} />
     <DeleteLibraryDialog library={deleteLibraryTarget} pending={libraryMutationPending} error={libraryDeleteError} onOpenChange={(open) => { if (!open && !libraryMutationPending) { setDeleteLibraryTarget(undefined); setLibraryDeleteError(""); } }} onConfirm={deleteLibrary} />
@@ -612,8 +742,11 @@ function FileBrowserNoMatches({ query, onClear }: { query: string; onClear: () =
   return <EmptyState className="min-h-64" icon={<Search />} title="No matching files" description={`No files in this folder match "${query}".`} actions={<Button label="Clear filter" variant="ghost" size="lg" onClick={onClear} />} />;
 }
 
-function FileBrowserList({ entries, parent, selectedPath, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | null; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
-  return <div className="divide-y divide-border">{parent !== null ? <button type="button" className="grid w-full grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 text-left text-secondary hover:bg-overlay-hover hover:text-primary" onClick={() => onNavigate(parent)}><FolderUp className="size-5" /><span>Up one folder</span><Text type="supporting" color="secondary">..</Text></button> : null}{entries.map((entry) => <FileRow key={entry.path} entry={entry} selected={entry.path === selectedPath} onNavigate={onNavigate} onSelect={onSelect} />)}</div>;
+function FileBrowserList({ entries, parent, selectedPath, selectionButtons, onNavigate, onSelect }: { entries: ProjectFile[]; parent: string | null; selectedPath: string | null; selectionButtons: React.RefObject<Map<string, HTMLButtonElement>>; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
+  return <ul className="divide-y divide-border" aria-label="Files and folders">
+    {parent !== null ? <li><button type="button" className="flex w-full items-center gap-3 px-3 py-3 text-left text-secondary hover:bg-overlay-hover hover:text-primary" onClick={() => onNavigate(parent)}><FolderUp className="size-5 shrink-0" /><span className="min-w-0 flex-1">Up one folder</span><Text type="supporting" color="secondary">..</Text></button></li> : null}
+    {entries.map((entry) => <li key={entry.path}><FileRow entry={entry} selected={entry.path === selectedPath} selectionButtons={selectionButtons} onNavigate={onNavigate} onSelect={onSelect} /></li>)}
+  </ul>;
 }
 
 function FileBrowserPagination({ page, pageCount, range, totalCount, onPageChange }: { page: number; pageCount: number; range: { start: number; end: number }; totalCount: number; onPageChange: (page: number) => void }) {
@@ -627,21 +760,46 @@ function FileBrowserPagination({ page, pageCount, range, totalCount, onPageChang
   </div>;
 }
 
-function FileRow({ entry, selected, onNavigate, onSelect }: { entry: ProjectFile; selected: boolean; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
+function FileRow({ entry, selected, selectionButtons, onNavigate, onSelect }: { entry: ProjectFile; selected: boolean; selectionButtons: React.RefObject<Map<string, HTMLButtonElement>>; onNavigate: (path: string) => void; onSelect: (entry: ProjectFile) => void }) {
   const directory = entry.type === "directory";
-  return <div className={`grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-3 px-3 py-3 ${selected ? "bg-muted" : "hover:bg-overlay-hover"}`}><span className="text-icon-secondary">{directory ? <Folder className="size-5" /> : <FileText className="size-5" />}</span><button type="button" className="min-w-0 truncate text-left text-primary" title={entry.name} onClick={() => directory ? onNavigate(entry.path) : onSelect(entry)}><Text type="supporting">{entry.name}</Text></button><button type="button" className="rounded-sm px-2 py-1 text-secondary hover:bg-overlay-hover hover:text-primary" aria-label={`Show details for ${entry.name}`} onClick={() => onSelect(entry)}><Text type="supporting" color="secondary">{directory ? "Folder" : formatBytes(entry.size ?? 0)}</Text></button></div>;
+  return <div className={`flex min-h-12 items-stretch gap-1 px-1.5 py-1.5 ${selected ? "bg-accent-muted ring-1 ring-inset ring-accent" : "hover:bg-overlay-hover"}`}>
+    <button
+      ref={(node) => {
+        if (node) selectionButtons.current.set(entry.path, node);
+        else selectionButtons.current.delete(entry.path);
+      }}
+      type="button"
+      className="flex w-full min-w-0 flex-1 items-center gap-3 rounded-sm px-1.5 py-1.5 text-left text-primary focus-visible:ring-2 focus-visible:ring-accent"
+      title={entry.name}
+      aria-pressed={selected}
+      onClick={() => onSelect(entry)}
+      onDoubleClick={() => { if (directory) onNavigate(entry.path); }}
+    >
+      <span className="shrink-0 text-icon-secondary">{directory ? <Folder className="size-5" /> : <FileText className="size-5" />}</span>
+      <span className="min-w-0 flex-1 truncate"><Text type="supporting">{entry.name}</Text></span>
+      <Text type="supporting" color="secondary">{directory ? "Folder" : formatBytes(entry.size ?? 0)}</Text>
+    </button>
+    {directory ? <IconButton label={`Open folder ${entry.name}`} tooltip="Open folder" variant="ghost" icon={<FolderOpen size={17} />} onClick={() => onNavigate(entry.path)} /> : null}
+  </div>;
 }
 
 function FileDetails({ entry, projectId, library, mutationBusy, previewState, onDelete, onPreview, onClosePreview }: { entry: ProjectFile | undefined; projectId: string; library: FileLibrary | undefined; mutationBusy: boolean; previewState: FilePreviewState; onDelete: (entry: ProjectFile) => void; onPreview: (entry: ProjectFile) => void; onClosePreview: () => void }) {
-  if (!entry || !library) return <EmptyState className="min-h-48" isCompact title="No file selected" description="Select a file to view its details." />;
+  if (!entry || !library) return <EmptyState className="min-h-48" isCompact title="No entry selected" description="Select a file or folder to view its details." />;
   const file = entry.type === "file";
+  const deleteUnavailable = fileDeleteUnavailableMessage(entry.capabilities.deleteUnavailableReason, entry.type)
+    ?? (!entry.capabilities.canDelete ? "This entry cannot be deleted." : null);
   const previewForEntry =
     (previewState.status === "ready" && previewState.preview.path === entry.path) ||
     (previewState.status !== "idle" && previewState.status !== "ready" && previewState.path === entry.path);
   return <div className="space-y-4">
     <div><Text type="supporting" color="secondary" display="block">{file ? "File" : "Folder"}</Text><Heading level={2} className="mt-2 break-words">{entry.name}</Heading><Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-all" className="mt-1">{entry.path}</Text></div>
     <dl className="space-y-3 border-y border-border py-3"><div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Size</Text></dt><dd><Text type="supporting">{file ? formatBytes(entry.size ?? 0) : "-"}</Text></dd></div>{file ? <div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Type</Text></dt><dd className="break-all text-right"><Text type="code">{entry.mediaType ?? "application/octet-stream"}</Text></dd></div> : null}<div className="flex justify-between gap-3"><dt><Text type="supporting" color="secondary">Updated</Text></dt><dd className="text-right"><Text type="supporting">{formatDate(entry.updatedAt)}</Text></dd></div></dl>
-    {file ? <div className="flex flex-wrap gap-2"><Button as="a" label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/>{isInlinePreviewAvailable({ mediaType: entry.mediaType, bytes: entry.size ?? 0 }, filePreviewByteLimits) ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} isLoading={previewState.status === "loading" && previewState.path === entry.path} onClick={() => onPreview(entry)} /> : null}{library.capabilities.canWriteFiles ? <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={mutationBusy} onClick={() => onDelete(entry)} /> : null}</div> : null}
+    <div className="flex flex-wrap gap-2">
+      {file ? <Button as="a" label="Download" href={apiClient.libraryFileDownloadUrl(projectId, library.id, entry.path)} variant="secondary" size="lg" icon={<Download size={16} />}/> : null}
+      {file && isInlinePreviewAvailable({ mediaType: entry.mediaType, bytes: entry.size ?? 0 }, filePreviewByteLimits) ? <Button label="Preview" variant="secondary" size="lg" icon={<Image size={16} />} isLoading={previewState.status === "loading" && previewState.path === entry.path} onClick={() => onPreview(entry)} /> : null}
+      <Button label="Delete" variant="destructive" size="lg" icon={<Trash2 size={16} />} isDisabled={!entry.capabilities.canDelete || mutationBusy} onClick={() => onDelete(entry)} />
+    </div>
+    {!entry.capabilities.canDelete && deleteUnavailable ? <Text as="p" type="supporting" color="secondary">{deleteUnavailable}</Text> : null}
     {previewForEntry ? <FilePreviewPanel state={previewState} entry={entry} onRetry={() => onPreview(entry)} onClose={onClosePreview} /> : null}
   </div>;
 }
@@ -663,13 +821,15 @@ function FilePreviewPanel({ state, entry, onRetry, onClose }: { state: FilePrevi
 
 export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { entry: ProjectFile | undefined; deleting: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
   const [error, setError] = useState("");
+  const folder = entry?.type === "directory";
+  const objectLabel = folder ? "Folder" : "File";
   useEffect(() => setError(""), [entry?.path]);
   async function confirm() {
     setError("");
     try {
       await onConfirm();
     } catch (cause) {
-      setError(errorMessage(cause, "File could not be deleted."));
+      setError(errorMessage(cause, `${objectLabel} could not be deleted.`));
     }
   }
   const handleOpenChange = (open: boolean) => {
@@ -678,7 +838,18 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
       onCancel();
     }
   };
-  return <ConfirmationDialog isOpen={entry !== undefined} onOpenChange={handleOpenChange} title="Delete file?" description={<Text as="p" color="secondary">This permanently removes the file from this File Library.</Text>} actionLabel="Delete" busy={deleting} onAction={() => void confirm()}>{entry ? <Text as="p" display="block">File: <Text weight="semibold">{entry.name}</Text></Text> : null}{error ? <Banner status="error" title="File could not be deleted" description={error} /> : null}</ConfirmationDialog>;
+  return <ConfirmationDialog
+    isOpen={entry !== undefined}
+    onOpenChange={handleOpenChange}
+    title={folder ? "Delete folder?" : "Delete file?"}
+    description={<Text as="p" color="secondary">{folder ? "This permanently deletes the folder and everything inside it." : "This permanently deletes the file."}</Text>}
+    actionLabel={folder ? "Delete folder" : "Delete file"}
+    busy={deleting}
+    onAction={() => void confirm()}
+  >
+    {entry ? <Text as="p" display="block" wordBreak="break-all">{objectLabel}: <Text weight="semibold">{entry.path}</Text></Text> : null}
+    {error ? <Banner status="error" title={`${objectLabel} could not be deleted`} description={error} /> : null}
+  </ConfirmationDialog>;
 }
 
 function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm }: { library: FileLibrary | undefined; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
@@ -750,7 +921,11 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 function isMissingFile(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404 && error.message === "File not found";
+  return error instanceof ApiError && error.status === 404 && (error.code === "file_path_not_found" || error.message === "File not found");
+}
+
+function isFilePathNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "file_path_not_found";
 }
 
 export function formatBytes(bytes: number): string {

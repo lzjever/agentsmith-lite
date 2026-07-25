@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { apiClient } from "../../src/lib/api/client.js";
+import { ApiError, apiClient, type ProjectFile } from "../../src/lib/api/client.js";
 
 describe("file libraries API client", () => {
   it("uses the project File Library CRUD contract", async () => {
@@ -42,24 +42,61 @@ describe("file libraries API client", () => {
       const request = new Request(new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url, "http://localhost"), init);
       requests.push(request);
       if (request.url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "person@example.test" }, csrfToken: "csrf_1" });
-      if (request.method === "GET" && !request.url.includes("/preview")) return Response.json({ entries: [] });
+      if (request.method === "GET" && !request.url.includes("/preview")) return Response.json({
+        entries: [{
+          name: "brief.txt",
+          path: "reports/brief.txt",
+          type: "file",
+          size: 3,
+          mediaType: "text/plain",
+          updatedAt: "x",
+          capabilities: {
+            canDelete: false,
+            deleteUnavailableReason: "read_only"
+          }
+        }]
+      });
       if (request.method === "GET") return new Response("preview", { headers: { "content-type": "text/plain" } });
       return Response.json(request.method === "PUT" ? { path: "reports/brief.txt", bytes: 3, mediaType: "text/plain", updatedAt: "x" } : { deleted: true });
     };
 
     try {
       await apiClient.currentIdentity();
-      await apiClient.libraryFiles("project_1", "library_1", "reports");
+      const listed = await apiClient.libraryFiles("project_1", "library_1", "reports");
       await apiClient.uploadLibraryFile("project_1", "library_1", "reports/brief.txt", new File(["abc"], "brief.txt", { type: "text/plain" }), { idempotencyKey: "upload-key" });
       await apiClient.previewLibraryFile("project_1", "library_1", "reports/brief.txt");
       await apiClient.deleteLibraryFile("project_1", "library_1", "reports/brief.txt", "delete-file-key");
 
       assert.equal(requests[1]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files?path=reports");
+      const entry: ProjectFile = listed.entries[0]!;
+      assert.deepEqual(entry.capabilities, {
+        canDelete: false,
+        deleteUnavailableReason: "read_only"
+      });
       assert.deepEqual([requests[2]!.method, requests[2]!.headers.get("content-type"), requests[2]!.headers.get("idempotency-key")], ["PUT", "text/plain", "upload-key"]);
       assert.equal(requests[2]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files?path=reports%2Fbrief.txt");
       assert.equal(requests[3]!.url, "http://localhost/api/v1/projects/project_1/file-libraries/library_1/files/preview?path=reports%2Fbrief.txt");
       assert.deepEqual(await requests[4]!.json(), { path: "reports/brief.txt" });
       assert.equal(apiClient.libraryFileDownloadUrl("project_1", "library_1", "reports/brief.txt"), "/api/v1/projects/project_1/file-libraries/library_1/files/download?path=reports%2Fbrief.txt");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("preserves the typed missing-path code from a folder listing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json(
+      { error: "File path not found", code: "file_path_not_found" },
+      { status: 404 }
+    );
+
+    try {
+      await assert.rejects(
+        apiClient.libraryFiles("project_1", "library_1", "removed/folder"),
+        (error) => error instanceof ApiError
+          && error.status === 404
+          && error.code === "file_path_not_found"
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
