@@ -13,6 +13,13 @@ successor Tasks for follow-up messages, terminal Task completion after one
 agent turn, idle TTL, automatic Sandbox reclamation, or deletion of Task HOME
 and Botified state during Sandbox release, this plan supersedes them.
 
+For the current correction milestone,
+`docs/core-workflow-product-improvement-plan.md` supersedes this document only
+for Sandbox-capacity admission/presentation, Task browser-session continuity,
+file/folder deletion, non-empty unbound File Library deletion, the protected
+Artifact namespace, and their updated completion criteria. The Task/session/
+Library/Run model and explicit release semantics here remain authoritative.
+
 ## 1. Product Decision
 
 AgentSmith Lite keeps four different product objects instead of treating one

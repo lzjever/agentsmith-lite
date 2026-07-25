@@ -7,7 +7,7 @@
 AgentSmith Lite 保留原 AgentSmith Web App 的工作台体验，并通过同源 `/api/v1` 产品 API 提供 workspace、project、endpoint、多个 Project-scoped File Library、task 和 artifact。substrates 安装 k3s、PostgreSQL、S3-compatible storage、JuiceFS CSI 和 Keycloak，并输出应用消费的 env/secrets；它不承载产品业务逻辑。
 
 - Keycloak/OIDC 是唯一生产身份路径。服务端建立 session，并持久化本地 OIDC identity、English-only local profile、workspace/project 归属和 membership；不发放或接受 personal API key。
-- Web 保留原项目的 Next App Router、保留功能的信息架构和工作流；Next 不是 Lite 要删除的依赖。视觉实现全面迁入 Astryx，旧样式、主题 token 和 primitive 只能迁移、基于 Astryx 重写或删除，不保留历史包覆、兼容层或平行视觉体系。`docs/web-experience-improvement-plan.md` 是后续 Web 体验和视觉实现的权威计划。
+- Web 保留原项目的 Next App Router、保留功能的信息架构和工作流；Next 不是 Lite 要删除的依赖。视觉实现全面迁入 Astryx，旧样式、主题 token 和 primitive 只能迁移、基于 Astryx 重写或删除，不保留历史包覆、兼容层或平行视觉体系。`docs/web-experience-improvement-plan.md` 保留 Astryx 架构和有界视图决策；当前 Sandbox capacity、Task 连续性、Files 删除/恢复、Shell 和 Dialog 修正以 `docs/core-workflow-product-improvement-plan.md` 为权威。
 - Lite 当前只提供英文产品界面。迁移原 Web 时彻底排除 `next-intl`、翻译 catalog、locale layout、URL locale 前缀和语言切换；页面只有一份英文实现，不为假设中的未来多语言预留抽象。
 - Web UI 仅是产品 API 客户端。授权、endpoint 调用、文件路径安全、task 生命周期、artifact 投影和 sandbox 清理均由服务端拥有。页面不得承载 agent、Kubernetes、数据库、Botified 或 provider 业务逻辑。AgentSmith 服务端只通过 Botified 服务接口与其交互。
 - 每个 project 在 substrate 提供的 JuiceFS PVC 上拥有多个独立 File Library。每个 Task 必须独占绑定一个 Library；Task 创建时可新建 Library 或选择当前用户有权使用且未绑定的 Library。Files 页面列出当前 Project 中用户可访问的 Libraries，并提供所选 Library 的 list、二进制 upload、preview、download 和 delete。

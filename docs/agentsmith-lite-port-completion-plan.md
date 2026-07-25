@@ -6,6 +6,12 @@ Complete the retained AgentSmith workspace experience as independently demoable
 vertical slices. This is a handoff implementation plan, not an audit, report,
 or release procedure.
 
+Post-port corrections discovered in the working product are owned by
+`docs/core-workflow-product-improvement-plan.md`. Its Sandbox capacity,
+directory deletion, non-empty File Library deletion, Artifact-path protection,
+Task continuity, shell, and dialog decisions replace narrower assumptions in
+this historical port plan.
+
 The reference application in `../.reference/agentsmith` is the user-experience
 baseline. A reference capability is `REQUIRED_PORT` unless this document's
 explicit-exclusion table names it. `MERGED_SINGLE_PATH` is permitted only when

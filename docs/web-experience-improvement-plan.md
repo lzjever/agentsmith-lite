@@ -21,6 +21,13 @@ This document is authoritative for Web information architecture, visual
 implementation, interaction performance, responsive composition, and the
 related read APIs needed to keep views bounded.
 
+For the current correction milestone,
+`docs/core-workflow-product-improvement-plan.md` supersedes this document only
+for shell/page-header composition, direct Astryx dialog use, released-Task
+capacity and continuity, Files selection/deletion/recovery, and the resulting
+visual completion criteria. The one-theme Astryx architecture and bounded-view
+decisions here remain authoritative.
+
 The following documents retain their existing authority:
 
 - `docs/task-workspace-product-improvement-plan.md` owns Task, File Library,
