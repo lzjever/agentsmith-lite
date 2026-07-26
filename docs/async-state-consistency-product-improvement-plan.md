@@ -1,6 +1,7 @@
 # AgentSmith Lite Task Runtime Consistency Plan
 
-Status: Ready for development handoff
+Status: Development in progress; official cutover blocked on required Botified
+release
 
 ## 1. Purpose
 
@@ -34,8 +35,16 @@ After this milestone:
 7. File retries resolve the original operation and never reapply it to a path
    recreated after the operation began.
 
-The Web remains an API client. Authorization, command admission, idempotency,
-Run fencing, runtime control, and file operation identity remain server-side.
+The target runtime boundary is:
+
+`Web -> AgentSmith API -> {Botified official service API | AgentSmith-owned bash-executor}`
+
+The Web remains an AgentSmith API client. AgentSmith server-side code uses the
+official Botified service API for Agent work and connects directly to the
+AgentSmith-owned `bash-executor` for Terminal. Botified and `bash-executor` run
+as two process-isolated containers with the same Run PVC mounted; Terminal does
+not traverse Botified. Authorization, command admission, idempotency, Run
+fencing, runtime control, and file operation identity remain server-side.
 
 ## 3. Authority And Supersession
 
@@ -54,6 +63,10 @@ This plan supersedes only these older implementation decisions:
 - Release being expressed without the exact Run the user confirmed;
 - Abort or Stop implicitly targeting whatever work is current when the server
   handles the request;
+- Terminal transport traversing a Botified Terminal route rather than the
+  AgentSmith-owned executor;
+- compiling or retaining a vendored Botified source path after the required
+  official release is available;
 - Web mutation keys being cleared based on HTTP status or `ApiError` class;
 - multiple components independently replacing evolving Task presentation.
 
@@ -81,6 +94,8 @@ JuiceFS mount.
 - Terminal local transport state, including close code `1009`.
 - Release during startup and exact Run fencing.
 - Exact-target Abort and background-work Stop.
+- Official Botified artifact cutover and direct AgentSmith API-to-executor
+  Terminal transport.
 - File upload, overwrite, recursive delete, and File Library rename retries.
 - Stale Task and Files list/detail responses directly involved in these paths.
 - The smallest API, store, Botified port, and documentation changes required.
@@ -93,7 +108,11 @@ JuiceFS mount.
 - Artifact storage redesign.
 - Credential, Endpoint, Policy, Audit, Usage, or Alert architecture changes.
 - Generic event sourcing, workflow, saga, command bus, or retry service.
-- A new repository, service, operator, queue, or compatibility adapter.
+- A new repository, service, operator, queue, proxy sidecar, or compatibility
+  adapter.
+- An AgentSmith compatibility facade, shim, Botified vendor fork, or
+  AgentSmith-built Botified artifact after official cutover.
+- A Botified Terminal route or provider credential inside the Sandbox.
 - Multi-replica Terminal occupancy.
 - Broad visual redesign.
 - Governance artifacts, evidence, generated reports, rehearsals, release gates,
@@ -153,6 +172,15 @@ fingerprint, and payload. The route returns the stored or converging typed
 result. Do not add a command-result query API, second command table, or
 client-side command system.
 
+Commands that call Botified have two durable replay layers. The AgentSmith
+receipt is the product command record and is durably bound to one fixed
+downstream Botified command key before dispatch. The official Botified service
+stores and replays its own receipt for that downstream key. If AgentSmith does
+not know the downstream result, it may only query or replay the same operation
+with that same downstream key against the original exact Run target. It never
+allocates a replacement downstream key, infers acceptance from timeline state,
+or converts an unknown result into success or failure.
+
 ### 5.2 Mutation-key lifetime
 
 `useMutationKeys` is the one Web helper for command identity. It exposes
@@ -176,6 +204,16 @@ cleanup. On remount, an unresolved action reconstructs the same payload from
 that locked draft and replays the original mutation route with the same key and
 fingerprint. The prompt remains only in the normal form draft; do not save a
 second prompt or serialized request payload for idempotency.
+
+Terminal start, Release, Abort, and Stop retain their unresolved non-secret
+command identity across component remounts in the same authenticated-user
+`sessionStorage` scope. The retained record contains the operation, key,
+fingerprint, Task identity, exact public request target, and creation time:
+Terminal start retains `expectedRunId + expectedSandboxState`, Release retains
+`expectedRunId`, Abort retains `expectedRunId + turnId`, and Stop retains
+`expectedRunId + interactionId`. Remount replays the original route and locked
+target until the server disposition resolves the key. It does not retarget the
+command from newer canonical state or persist Botified internal IDs.
 
 An upload key may be replayed only while the current page still holds the
 original `File` object. Upload recovery does not cross a component remount.
@@ -318,8 +356,8 @@ transaction framework.
 | Task message | interaction/queue admission and receipt commit | Task + interaction identity | stream/GET shows one accepted message |
 | Terminal start | Run reservation and in-progress receipt commit | `expectedRunId + expectedSandboxState` | Run activation and completed receipt commit atomically |
 | Release | `release_requested` fence and receipt commit | `expectedRunId` | drain barrier confirms exact resources absent |
-| Abort turn | control intent commit | `expectedRunId + turnId` | Botified stable compare-and-abort result |
-| Stop background work | control intent commit | `expectedRunId + interactionId` | Botified stable exact-work result |
+| Abort turn | control intent and fixed downstream command key commit | `expectedRunId + canonical Botified turnId` | Botified stable compare-and-abort receipt |
+| Stop background work | control intent, resolved target, and fixed downstream command key commit | `expectedRunId + interactionId + resolved Botified backgroundTaskId` | Botified stable exact-background-work receipt |
 | Upload/overwrite | ordered file operation receipt and staged identity commit | Library + normalized path + fingerprint | earlier durable path operations converge first, then one filesystem commit or precise conflict |
 | Recursive delete | ordered receipt plus quarantine identity commit | Library + normalized path | earlier durable path operations converge first; replay resumes same quarantine only |
 | Library rename | renamed row and receipt commit | Library + `expectedUpdatedAt` | replay returns durable name |
@@ -350,15 +388,17 @@ contracts are exact:
 - Stop carries `expectedRunId + interactionId`.
 
 These are public object identities, not the server's internal fencing token.
+For Stop, AgentSmith authorizes the interaction and resolves its canonical
+Botified `backgroundTaskId` before committing the exact control target; the Web
+does not send or persist that internal ID.
 
 The Botified service API must support exact compare-and-abort and exact
-background-work stop identities with a stable command result. AgentSmith uses
-that service API directly. It must not emulate exact control with a blind
-session-wide abort, and it must not invoke Botified TUI behavior.
-
-If the installed Botified release lacks this service contract, update the
-Botified release dependency before implementing exact Abort/Stop. Do not add an
-AgentSmith-side adapter that pretends a blind abort is exact.
+background-work stop identities with a stable command-key result. AgentSmith
+uses that official service API directly. It must not emulate exact control with
+a blind session-wide abort, infer a turn identity from a cycle, timeline cursor,
+or Run ID, or invoke Botified TUI behavior. If canonical Botified `turnId` is
+absent, the Abort capability is false and the API rejects Abort rather than
+pretending another identity is exact.
 
 ## 7. Runtime Lifecycle
 
@@ -409,11 +449,19 @@ Separate:
 Changing endpoint or credential health cannot remove control over already
 running work.
 
-AgentSmith commits the exact control intent before calling Botified. Botified
-compares the target identity at execution time and returns a stable result for
-the command key. Replaying the same command against an already-stopped exact
-target returns the original successful outcome. A different Run, turn, or work
-item returns target conflict.
+AgentSmith commits the exact control intent, fixed downstream command key, and
+exact Run-derived Botified service target before calling Botified. Botified
+compares the target identity at execution time and durably returns a stable
+receipt for that command key. A lost response or AgentSmith restart replays only
+that key against that target. Replaying the same command against an
+already-stopped exact target returns the original successful outcome. A
+different Run, turn, or background task returns target conflict and is never
+selected as a replacement target.
+
+Abort uses only the canonical Botified `turnId` projected for the exact Run.
+Stop uses the authorized product `interactionId` to resolve and commit the
+matching canonical Botified `backgroundTaskId`; both identities remain bound in
+the receipt.
 
 ### 7.4 Terminal transport
 
@@ -422,22 +470,72 @@ eligibility. It deliberately excludes process-local
 `occupiedTerminalTaskIds`; `openTaskTerminal` keeps that admission mutex and
 rejects a second concurrent transport.
 
+The browser WebSocket terminates at AgentSmith API. AgentSmith resolves the
+executor endpoint on the existing exact Run-derived Service target and
+performs an authenticated `taskId + runId` handshake with a Run-scoped executor
+service key before relaying the socket directly to `bash-executor`. It does not
+use a Botified Terminal route. Botified reaches the external bash executor
+through its official loopback contract inside the two-container Sandbox Pod;
+both containers mount the same PVC but do not share a process namespace.
+
+The Sandbox NetworkPolicy allows only the required AgentSmith API ingress to
+the executor Service and the existing broker egress. The executor service key
+is non-provider, exact-Run scoped, and supplied only through the live Sandbox
+secret/configuration path. Real provider credentials remain in AgentSmith and
+never enter either Sandbox container.
+
 The Web observes `taskId`, exact public `runId`, Sandbox lifecycle, and
 `openTerminal`. Task change, Run change, non-active lifecycle, or
 `openTerminal = false` terminates old transport intent. Terminal Start records
 only its target Run intent and waits for canonical observation of that exact Run
 as active and capable before connecting; a third Run cannot inherit the intent.
 
-WebSocket exact-Run periodic recheck and close-code `1009` handling remain Slice
-3. Do not add distributed occupancy or a general connection manager in this
-milestone.
+AgentSmith API owns browser-socket admission and periodic exact-Run
+authorization recheck. It closes the browser socket with `1008` when that
+authorization, capability, Run identity, or executor handshake no longer
+matches, and with `1009` when its bounded input/output relay buffer is exceeded.
+The Web owns terminal-intent disposal for both codes and never restores
+capability locally. These controls remain Slice 3. Do not add distributed
+occupancy or a general connection manager in this milestone.
 
 ## 8. Implementation Slices
 
-Execute these slices in order. Each slice deletes the obsolete competing path
-as part of the same change.
+Slice 1 and Slice 2 are complete against the existing dependency and are not
+blocked retroactively by the official release wait. Remaining work completes
+Slice 0 when the official release is available and before Slice 3 exact
+controls, then continues the product slices. Each cutover or feature change
+deletes its obsolete competing path in that same change.
+
+### Slice 0: Official Botified prerequisite and cutover
+
+Status: blocked only on the required official Botified release.
+
+The next formal Botified release must provide all of:
+
+- the external bash executor loopback contract;
+- durable message delivery receipt replay;
+- cold discard for `runtime.resume_unfinished=false`;
+- exact compare-and-Abort;
+- exact background Stop with a stable downstream command-key result;
+- explicit per-provider `allow_insecure_http` support so Botified can call the
+  AgentSmith built-in broker over in-cluster HTTP.
+
+AgentSmith does not supply pseudo-exact behavior, a compatibility facade or
+shim, or a vendor fork for any missing contract.
+
+When that release is available, AgentSmith consumes the official artifact by
+immutable release version and digest and does not compile Botified source. The
+same cutover deletes `third_party/botified`, `PINNED_SOURCE.json` and any other
+Botified PIN input, the Botified source build stage, and every fallback to the
+vendored path. Before cutover, retain the current runnable path; after cutover,
+retain only the official artifact path. This changes neither the two active
+repositories `agentsmith-lite` and `agentsmith-lite-substrates` nor the
+existing deployed service set.
 
 ### Slice 1: Typed command convergence
+
+Status: complete against the existing dependency; official artifact validation
+is completed during Slice 0 cutover.
 
 Implement:
 
@@ -464,12 +562,16 @@ Focused behavior checks:
   interaction after same-route replay, including after a remount;
 - a Task create admitted before response loss resumes JuiceFS preparation and
   returns the same Task after same-route replay, including after a remount;
+- after official cutover, an accepted Botified delivery receipt survives
+  Botified and AgentSmith restart and replays by the same fixed downstream key;
 - the same key with a changed fingerprint is rejected without changing the
   original operation.
 
 User result: no false definitive failure and no duplicate action after Retry.
 
 ### Slice 2: Monotonic Task and Files presentation
+
+Status: complete against the existing dependency.
 
 Implement:
 
@@ -520,7 +622,12 @@ Implement:
 - `expectedRunId` on Release;
 - persistent drain barrier plus process-local startup cancellation;
 - exact Botified target identities for Abort and Stop;
+- official `runtime.resume_unfinished=false` cold discard for the first Run
+  after explicit Release;
 - separate start-new-work and control-existing-work predicates;
+- direct AgentSmith API-to-executor Terminal transport with exact Run-derived
+  endpoint on the existing Service target, handshake, service key, and
+  NetworkPolicy;
 - WebSocket admission capture of exact public `runId` plus periodic canonical
   recheck that closes exact-Run mismatch with `1008`;
 - Terminal `1009` transport-intent termination.
@@ -536,6 +643,16 @@ Focused behavior checks:
   record released until post-deadline enumeration is empty;
 - a stale Release confirmation cannot release a newer Run;
 - credential or endpoint drift does not prevent exact Abort/Stop;
+- unresolved Terminal start, Release, Abort, and Stop survive a Web remount and
+  replay the same locked product key and target;
+- a lost Abort/Stop response followed by AgentSmith restart replays the same
+  downstream command key to the same exact Run target and returns its stable
+  receipt;
+- the first Run after Release starts with
+  `runtime.resume_unfinished=false`, discards unfinished work, and preserves
+  completed history;
+- Terminal connects from Web through AgentSmith API directly to the exact
+  Run's executor, with no Botified Terminal route;
 - close `1009` disposes one transport and leaves one usable Connect action.
 
 User result: startup, control, Release, and Terminal connection behavior match
@@ -582,13 +699,15 @@ Likely existing modules:
 | Terminal state | `TaskTerminalPanel.tsx`, terminal reducer/start helper |
 | Task/runtime commands | `packages/application/src/taskService.ts`, `runtimeService.ts` |
 | lifecycle | `sandboxLifecycleService.ts`, sandbox reconciler and existing stores |
-| Botified boundary | `packages/ports/src/botified.ts` and its current adapter |
+| official Botified boundary | `packages/ports/src/botified.ts`, `packages/botified-runtime`, runtime image/version/digest packaging, and removal of `third_party/botified` at cutover |
+| executor Terminal | `packages/bash-executor`, `packages/api-entry-node`, existing exact Run Service/Secret and Sandbox NetworkPolicy rendering |
 | Files | `fileService.ts`, `fileLibraryService.ts`, `recursiveDeletionService.ts`, Files pages |
 | contracts/docs | `api-contract.md`, `sandbox-controller.md`, `botified-runtime.md` where behavior changes |
 
 Do not move behavior into new packages merely to match this table. Follow the
 current ownership boundary and add only exact store methods needed for atomic
-commits.
+commits. Keep the two active repositories; do not add a repository, deployed
+service, proxy sidecar, Botified Terminal route, or Sandbox provider key.
 
 ## 10. Verification And Acceptance
 
@@ -621,6 +740,11 @@ automatic release gates.
 
 The milestone is complete when:
 
+- AgentSmith consumes the required official Botified release by immutable
+  version and digest, no longer compiles vendored source, and has no
+  `third_party/botified`, pin/build stage, fallback, facade, shim, or fork;
+- official Botified delivery and exact-control receipts survive restart and
+  replay only by their original downstream command keys;
 - all commands in the matrix have one durable acceptance point, one typed
   outcome path, and one replay path;
 - the Web retains unresolved Task create/message identity and normal form draft
@@ -632,11 +756,18 @@ The milestone is complete when:
 - Release targets `expectedRunId`, fences late activation, and keeps the drain
   barrier until a post-settlement/deadline observation confirms absence;
 - Abort and Stop carry exact target identities through the Botified service
-  API;
-- Terminal close `1009` cannot produce shell/Connect oscillation;
+  API, Stop binds the resolved background task, and Abort is unavailable
+  without a canonical Botified turn ID;
+- the first Run after Release uses official cold discard and cannot resume
+  unfinished prior-Run work;
+- Terminal runs Web-to-AgentSmith-to-executor with an exact Run handshake and
+  service key, while `1008`/`1009` cannot produce shell/Connect oscillation;
 - file replay never re-enters a recreated source path;
 - obsolete competing implementations are deleted;
-- no new governance layer, generic workflow, repository, or service exists.
+- no new governance layer, generic workflow, repository, service, proxy
+  sidecar, Botified Terminal route, or Sandbox provider key exists.
 
-No additional planning, evidence, release, or test-governance document is
-required for development to begin.
+Slice 1 and Slice 2 require no additional handoff. Development continues while
+the official cutover and Slice 3 exact controls wait for the required Botified
+release; no additional planning, evidence, release, or test-governance document
+is required.
