@@ -21,16 +21,49 @@ describe("task terminal surface state", () => {
   });
 
   it("mounts transport only for a canonical active presentation", () => {
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false)), true);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false), true), true);
     assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false), false), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("starting"), true)), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("released"), false)), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("failed"), false)), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active", false), false), true), true);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("starting"), true), true), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("released"), false), true), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("failed"), false), true), false);
+  });
+
+  it("keeps an owned active transport mounted across occupied capability presentations", () => {
+    let intent = createTerminalIntentState();
+    const available = terminalSurfaceState(presentation("active", true), false);
+    assert.equal(terminalTransportEnabled(available, intent.transportRequested), false);
+
+    intent = reduceTerminalIntent(intent, { type: "connect_requested" });
+    assert.equal(terminalTransportEnabled(available, intent.transportRequested), true);
+
+    for (const openTerminal of [false, false, true, false, true]) {
+      const nextPresentation = presentation("active", openTerminal);
+      intent = reduceTerminalIntent(intent, {
+        type: "sandbox_observed",
+        sandboxState: nextPresentation.sandboxState.state
+      });
+      assert.equal(
+        terminalTransportEnabled(
+          terminalSurfaceState(nextPresentation, false),
+          intent.transportRequested
+        ),
+        true,
+        `openTerminal=${openTerminal}`
+      );
+    }
   });
 
   it("arms transport only from explicit Connect or a final active Start receipt", () => {
     const initial = createTerminalIntentState();
-    for (const type of ["terminal_selected", "history_restored", "task_refreshed"] as const) {
+    for (const type of [
+      "terminal_selected",
+      "history_restored",
+      "task_refreshed",
+      "view_left",
+      "start_failed",
+      "transport_terminated"
+    ] as const) {
       const next = reduceTerminalIntent({ transportRequested: true }, { type });
       assert.equal(next.transportRequested, false, type);
     }
@@ -57,6 +90,30 @@ describe("task terminal surface state", () => {
         sandboxState: "starting"
       }).transportRequested,
       false
+    );
+  });
+
+  it("disarms transport when the sandbox is no longer active", () => {
+    for (const sandboxState of [
+      "starting",
+      "release_requested",
+      "released",
+      "failed"
+    ] as const) {
+      const next = reduceTerminalIntent(
+        { transportRequested: true },
+        { type: "sandbox_observed", sandboxState }
+      );
+      assert.equal(next.transportRequested, false, sandboxState);
+    }
+
+    const active = { transportRequested: true };
+    assert.equal(
+      reduceTerminalIntent(active, {
+        type: "sandbox_observed",
+        sandboxState: "active"
+      }),
+      active
     );
   });
 });

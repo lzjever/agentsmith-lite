@@ -380,7 +380,6 @@ export function TaskConversationWorkspace({
     const safeError = taskMessageReceiptError(receipt);
     if (safeError) throw new Error(safeError);
     dispatch({ type: "message_accepted", receipt });
-    handlers.current.onPresentationChange(receipt.presentation);
     scrollToLatest();
     void refreshAfterMessageMutation();
   }

@@ -17,6 +17,11 @@ export type TerminalIntentAction =
   | { type: "task_refreshed" }
   | { type: "view_left" }
   | { type: "connect_requested" }
+  | {
+      type: "sandbox_observed";
+      sandboxState: TaskDetail["sandboxState"]["state"];
+    }
+  | { type: "transport_terminated" }
   | { type: "start_progressed" }
   | {
       type: "start_completed";
@@ -36,6 +41,10 @@ export function reduceTerminalIntent(
   switch (action.type) {
     case "connect_requested":
       return state.transportRequested ? state : { transportRequested: true };
+    case "sandbox_observed":
+      return action.sandboxState === "active" || !state.transportRequested
+        ? state
+        : { transportRequested: false };
     case "start_completed":
       return action.receiptStatus === "active" && action.sandboxState === "active"
         ? { transportRequested: true }
@@ -44,6 +53,7 @@ export function reduceTerminalIntent(
     case "history_restored":
     case "task_refreshed":
     case "view_left":
+    case "transport_terminated":
     case "start_progressed":
     case "start_failed":
       return state.transportRequested ? { transportRequested: false } : state;
@@ -71,9 +81,9 @@ export function terminalSurfaceState(
 
 export function terminalTransportEnabled(
   state: TaskTerminalSurfaceState,
-  explicitlyOpened = true
+  transportRequested: boolean
 ): boolean {
-  return state.kind === "active" && explicitlyOpened;
+  return state.presentation.sandboxState.state === "active" && transportRequested;
 }
 
 function assertNever(value: never): never {

@@ -294,6 +294,37 @@ describe("task presentation reducer", () => {
     assert.strictEqual(rejected.presentation, rejectedPresentation);
   });
 
+  it("treats a message receipt as admission without replacing authoritative queue or presentation state", () => {
+    const dispatching={...queued("Continue","2026-07-13T00:02:00.000Z"),deliveryStatus:"dispatching" as const,editable:false};
+    const activePresentation=presentation({abortTurn:false});
+    const streamed=createTaskPresentationState({
+      items:[interaction("interaction_existing",1,10,"Existing")],
+      queuedMessages:[dispatching],
+      presentation:activePresentation
+    });
+    const startingPresentation={
+      ...presentation(),
+      currentTurn:{state:"starting" as const},
+      sandboxState:{state:"starting" as const,runId:"run_1",cause:null}
+    };
+
+    const accepted=reduceTaskPresentationState(streamed,{
+      type:"message_accepted",
+      receipt:{
+        messageId:"message_1",
+        disposition:"queued_for_active_run",
+        duplicate:false,
+        queuedMessage:queued("Continue","2026-07-13T00:01:00.000Z"),
+        interaction:null,
+        presentation:startingPresentation
+      }
+    });
+
+    assert.deepEqual(accepted.queuedMessages,[dispatching]);
+    assert.strictEqual(accepted.presentation,activePresentation);
+    assert.deepEqual(accepted.items,streamed.items);
+  });
+
   it("applies parent mutation presentations independently", () => {
     const initial = createTaskPresentationState({
       items: [],

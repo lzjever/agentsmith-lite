@@ -43,6 +43,16 @@ export function TaskTerminalPanel({
   const [startError, setStartError] = useState("");
   const [capacityRecovery, setCapacityRecovery] = useState<SandboxCapacityRecovery | null>(null);
   const surface = terminalSurfaceState(presentation, explicitStartPending);
+  const handleAccessTerminated = useCallback(() => {
+    onIntent({ type: "transport_terminated" });
+  }, [onIntent]);
+
+  useEffect(() => {
+    onIntent({
+      type: "sandbox_observed",
+      sandboxState: presentation.sandboxState.state
+    });
+  }, [onIntent, presentation.sandboxState.state]);
 
   useEffect(() => () => {
     operation.current?.abort();
@@ -96,7 +106,10 @@ export function TaskTerminalPanel({
   }
 
   if (terminalTransportEnabled(surface, transportRequested)) {
-    return <TerminalTransport taskId={taskId} />;
+    return <TerminalTransport
+      taskId={taskId}
+      onAccessTerminated={handleAccessTerminated}
+    />;
   }
 
   const cleanupMessage = presentation.sandboxState.cause?.message
@@ -133,7 +146,13 @@ export function TaskTerminalPanel({
   </section>;
 }
 
-function TerminalTransport({ taskId }: { taskId: string }) {
+function TerminalTransport({
+  taskId,
+  onAccessTerminated
+}: {
+  taskId: string;
+  onAccessTerminated: () => void;
+}) {
   const active = true;
   const { tokens } = useTheme();
   const terminalTheme = useMemo(() => xtermThemeFromTokens(tokens), [tokens]);
@@ -263,17 +282,20 @@ function TerminalTransport({ taskId }: { taskId: string }) {
     let disposed = false;
     let retryScheduled = false;
     let shellExited = false;
+    let transportTerminated = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const socket = new WebSocket(apiClient.taskTerminalWebSocketUrl(taskId));
     socketInstance.current = socket;
     setState("connecting");
 
     const retryOrFail = (message: string) => {
-      if (disposed || retryScheduled || shellExited) return;
+      if (disposed || retryScheduled || shellExited || transportTerminated) return;
       const delay = AUTO_RECONNECT_DELAYS_MS[reconnectAttempt.current];
       if (delay === undefined) {
+        transportTerminated = true;
         setError(message);
         setState("error");
+        onAccessTerminated();
         return;
       }
       retryScheduled = true;
@@ -334,13 +356,15 @@ function TerminalTransport({ taskId }: { taskId: string }) {
       if (!disposed) retryOrFail("Task terminal connection failed.");
     };
     socket.onclose = (event) => {
-      if (disposed) return;
+      if (disposed || transportTerminated) return;
       if (event.code === 1008) {
+        transportTerminated = true;
         shellExited = true;
         if (retryTimer) clearTimeout(retryTimer);
         retryScheduled = false;
         setError(event.reason || "Task terminal access changed.");
         setState("error");
+        onAccessTerminated();
         return;
       }
       if (shellExited) {
@@ -363,7 +387,7 @@ function TerminalTransport({ taskId }: { taskId: string }) {
       socket.close();
       if (socketInstance.current === socket) socketInstance.current = null;
     };
-  }, [fitTerminal, generation, taskId, terminalEpoch]);
+  }, [fitTerminal, generation, onAccessTerminated, taskId, terminalEpoch]);
 
   useEffect(() => {
     const updateAppearance = () => {

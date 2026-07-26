@@ -1498,10 +1498,28 @@ describe("task interactions API", () => {
     assert.equal((firstBody as {error:{code:string}}).error.code,"project_sandbox_capacity_reached");
   });
 
-  it("keeps an ordinary message restart pending when its accepted Kubernetes response is lost",async()=>{
+  it("returns a stopped-sandbox message admission before startup and lets runtime sync deliver it once",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
+    let startupEntered!:()=>void;
+    let continueStartup!:()=>void;
+    const entered=new Promise<void>((resolve)=>{startupEntered=resolve;});
+    const startupGate=new Promise<void>((resolve)=>{continueStartup=resolve;});
+    let gateReleased=false;
+    const liveSandbox={port:{
+      async applyResource(resource:import("../../packages/contracts/src/api.js").KubernetesResource){
+        resources.push(structuredClone(resource));
+        startupEntered();
+        if(!gateReleased)await startupGate;
+        return"applied" as const;
+      },
+      async deleteResource(){return"deleted" as const;},
+      async getPodReadiness(){return"ready" as const;},
+      async listManagedResources(){return structuredClone(resources);}
+    }};
     try{
       api=await createApiServer({
         port:0,
@@ -1509,15 +1527,11 @@ describe("task interactions API", () => {
         builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,
         sandboxNamespaceLimit:100,
+        runtimeTickIntervalMs:60_000,
         store,
-        botifiedClient:new FakeBotifiedClient([]),
+        botifiedClient:botified,
         botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{
-          async applyResource(){throw Object.assign(new Error("message restart response lost"),{code:"ECONNRESET"});},
-          async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
-          async listManagedResources(){return[];}
-        }}
+        liveSandbox
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"released message",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Released message files"}})).task;
@@ -1526,25 +1540,48 @@ describe("task interactions API", () => {
       await releaseTaskRunFixture(store,persisted);
 
       const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"released-message-startup-failure"};
-      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content:"continue despite startup failure"})});
+      const content="continue after restart";
+      const request=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
+      const winner=await Promise.race([
+        request.then((response)=>({kind:"response" as const,response})),
+        entered.then(()=>({kind:"startup" as const}))
+      ]);
+      if(winner.kind==="startup"){
+        gateReleased=true;
+        continueStartup();
+        await request;
+        assert.fail("message admission waited for sandbox startup");
+      }
+      const first=winner.response;
       const firstBody=await first.json() as {messageId:string;disposition:string;duplicate:boolean};
-      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content:"continue despite startup failure"})});
-      const replayBody=await replay.json() as {messageId:string;disposition:string;duplicate:boolean};
       assert.equal(first.status,200);
-      assert.equal(replay.status,200);
       assert.equal(firstBody.disposition,"queued_for_active_run");
-      assert.equal(replayBody.disposition,"queued_for_active_run");
-      assert.equal(replayBody.messageId,firstBody.messageId);
-      assert.equal(replayBody.duplicate,false);
       assert.equal((await store.findTaskMessage(firstBody.messageId))?.deliveryStatus,"pending");
+      assert.equal(resources.length,0);
       const currentTask=await store.findTask(task.id as string);
       assert.ok(currentTask?.currentRunId);
       const pendingRun=await store.sandboxRuns.get(currentTask.currentRunId);
       assert.equal(pendingRun?.state,"starting");
-      assert.ok(pendingRun?.startupClaimToken);
-      assert.ok(pendingRun?.startupActionDeadlineAt);
-      assert.equal(pendingRun?.releaseRequestedAt,null);
+      assert.equal(pendingRun?.startupClaimToken,null);
+
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      const sync=background.tasks.syncActiveTasksOnce();
+      await entered;
+      gateReleased=true;
+      continueStartup();
+      await sync;
+      await background.tasks.syncActiveTasksOnce();
+
+      assert.equal((await store.findTaskMessage(firstBody.messageId))?.deliveryStatus,"accepted");
+      assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
     }finally{
+      gateReleased=true;
+      continueStartup();
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
     }
   });

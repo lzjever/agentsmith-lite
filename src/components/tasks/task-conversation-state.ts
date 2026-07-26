@@ -177,18 +177,10 @@ export function reduceTaskPresentationState(
       const items = action.receipt.interaction
         ? reconcileTaskInteractions(state.items, [action.receipt.interaction])
         : state.items;
-      const queuedMessages = action.receipt.queuedMessage
-        ? [
-            ...state.queuedMessages.filter((message) => message.id !== action.receipt.queuedMessage?.id),
-            action.receipt.queuedMessage
-          ]
-        : state.queuedMessages;
       return {
         ...state,
         items,
         itemIndex: items === state.items ? state.itemIndex : createItemIndex(items),
-        queuedMessages,
-        presentation: action.receipt.presentation,
         followMode: "following",
         newActivityCount: 0
       };

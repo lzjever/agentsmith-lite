@@ -842,12 +842,7 @@ export class TaskService {
       }
       if(created.kind==="conflict")throw new ProductError("Task message or sandbox changed concurrently",409,"task_message_conflict");
       idempotencyCompleted=true;
-      try{
-        if(created.restarted)await this.refreshSandboxCapacityAlerts(current.projectId);
-        await this.ensureLiveSandbox(userId,created.task);
-        const persisted=await this.store.findTaskMessage(created.message.id)??created.message;
-        await this.dispatchTaskMessage(persisted);
-      }catch{}
+      if(created.restarted)void this.refreshSandboxCapacityAlerts(current.projectId);
       return structuredClone(acceptedReceipt);
     }catch(error){
       if(error instanceof ProductError&&!idempotencyCompleted)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:taskOperationErrorBody(error),updatedAt:nowIso()});
