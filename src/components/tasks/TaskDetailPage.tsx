@@ -4,8 +4,7 @@ import { Archive, ArrowLeft, Info, RefreshCw, TerminalSquare } from "lucide-reac
 import { Banner, Button as AstryxButton, Dialog, DialogHeader, Heading, IconButton, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import type { TaskDetail as TaskDetailProjection, TaskInteractionSnapshot } from "../../lib/api/client";
-import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtifact, type TaskArtifactKind } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtifact, type TaskArtifactKind, type TaskInteractionItem, type TaskInteractionSnapshot } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
 import { useCurrentUser } from "../app-shell/current-user";
 import { DocumentTitle } from "../layout/DocumentTitle";
@@ -17,6 +16,14 @@ import { TaskConversationWorkspace } from "./TaskConversationWorkspace";
 import { TaskLifecycleActions } from "./TaskLifecycleActions";
 import { TaskRunStatus } from "./TaskRunStatus";
 import { TaskTerminalPanel } from "./TaskTerminalPanel";
+import {
+  captureTaskCommandFence,
+  createSerialTaskRefreshTail,
+  createTaskPresentationState,
+  reduceTaskPresentationState,
+  type TaskCommandFence,
+  type TaskPresentationAction
+} from "./task-conversation-state";
 import { clearTaskDraft, shouldClearTaskDraftForAccessStatus, taskDraftStorage, type TaskDraftIdentity } from "./task-draft-snapshot";
 import { useTaskMutationKeys } from "./task-mutation-key";
 import {
@@ -40,6 +47,9 @@ type ArtifactPageState = {
   cursorStack: Array<string | null>;
   nextCursor: string | null;
 };
+type CanonicalRefreshResult =
+  | { snapshot: TaskInteractionSnapshot; applied: boolean }
+  | { error: unknown };
 
 export function TaskDetailPage({ workspaceId, projectId, taskId }: { workspaceId: string; projectId: string; taskId: string }) {
   return <TaskDetail key={`${workspaceId}:${projectId}:${taskId}`} workspaceId={workspaceId} projectId={projectId} taskId={taskId} />;
@@ -49,8 +59,16 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   const currentUser = useCurrentUser();
   const mounted = useRef(true);
   const mutationKeys = useTaskMutationKeys();
-  const [detail, setDetail] = useState<TaskDetailProjection>();
-  const [interactionSnapshot, setInteractionSnapshot] = useState<TaskInteractionSnapshot>();
+  const [taskPresentation, reactDispatchTaskPresentation] = useReducer(
+    reduceTaskPresentationState,
+    { taskId },
+    createTaskPresentationState
+  );
+  const taskPresentationRef = useRef(taskPresentation);
+  taskPresentationRef.current = taskPresentation;
+  const canonicalReadId = useRef(0);
+  const canonicalRefreshTail = useRef<ReturnType<typeof createSerialTaskRefreshTail> | null>(null);
+  canonicalRefreshTail.current ??= createSerialTaskRefreshTail();
   const [artifactPage, setArtifactPage] = useState<ArtifactPageState>({
     items: [],
     filter: "all",
@@ -95,35 +113,96 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
     taskId
   };
 
+  const dispatchTaskPresentation = useCallback((action: TaskPresentationAction) => {
+    const next = reduceTaskPresentationState(taskPresentationRef.current, action);
+    taskPresentationRef.current = next;
+    reactDispatchTaskPresentation(action);
+    return next;
+  }, []);
+
+  const captureCommandFence = useCallback(
+    () => captureTaskCommandFence(taskPresentationRef.current),
+    []
+  );
+
+  const acceptCanonicalMutation = useCallback((
+    kind: Extract<TaskPresentationAction, { type: "canonical_mutation_accepted" }>["kind"],
+    fence: TaskCommandFence,
+    options: { targetRunId?: string; interaction?: TaskInteractionItem | null } = {}
+  ) => dispatchTaskPresentation({
+    type: "canonical_mutation_accepted",
+    taskId,
+    kind,
+    fence,
+    ...options
+  }), [dispatchTaskPresentation, taskId]);
+
   const loadSnapshot = useCallback(async (quiet = false) => {
     const version = ++taskLoadVersion.current;
+    const readId = ++canonicalReadId.current;
+    const baseCanonicalEpoch = taskPresentationRef.current.canonicalEpoch;
+    dispatchTaskPresentation({
+      type: "canonical_read_started",
+      taskId,
+      readId,
+      baseCanonicalEpoch
+    });
     if (!quiet) setTaskState("loading");
     setTaskError("");
     try {
       const snapshot = await apiClient.getTaskInteractions(taskId);
       const detail = snapshot.presentation;
-      if (!mounted.current || version !== taskLoadVersion.current) return;
+      if (
+        !mounted.current
+        || version !== taskLoadVersion.current
+        || taskPresentationRef.current.latestCanonicalReadId !== readId
+      ) return;
       if (detail.task.id !== taskId || detail.task.workspaceId !== workspaceId || detail.task.projectId !== projectId) {
         throw new ApiError(404, "This task does not belong to this project.");
       }
-      setDetail(detail);
-      setInteractionSnapshot(snapshot);
-      setTaskState("ready");
+      const before = taskPresentationRef.current;
+      const next = dispatchTaskPresentation({
+        type: "canonical_snapshot_received",
+        taskId,
+        readId,
+        baseCanonicalEpoch,
+        snapshot
+      });
+      if (next.initialized) setTaskState("ready");
+      return {
+        snapshot,
+        applied: next !== before && next.canonicalEpoch > before.canonicalEpoch
+      };
     } catch (reason) {
-      if (!mounted.current || version !== taskLoadVersion.current) return;
+      if (
+        !mounted.current
+        || version !== taskLoadVersion.current
+        || taskPresentationRef.current.latestCanonicalReadId !== readId
+      ) return;
       setTaskError(message(reason));
       if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
         if (shouldClearTaskDraftForAccessStatus(reason.status)) {
           clearTaskDraft(taskDraftStorage(), draftIdentity);
         }
-        setDetail(undefined);
-        setInteractionSnapshot(undefined);
         setTaskState(reason.status === 404 ? "missing" : "forbidden");
       } else if (!quiet) {
         setTaskState("error");
       }
+      return { error: reason };
     }
-  }, [currentUser.id, projectId, taskId, workspaceId]);
+  }, [currentUser.id, dispatchTaskPresentation, projectId, taskId, workspaceId]);
+
+  const requestCanonicalRefresh = useCallback(
+    (quiet = true) => canonicalRefreshTail.current!(() => loadSnapshot(quiet)),
+    [loadSnapshot]
+  );
+  const requestConversationCanonicalRefresh = useCallback(async (
+    quiet = true
+  ): Promise<Exclude<CanonicalRefreshResult, { error: unknown }> | undefined> => {
+    const result: CanonicalRefreshResult | undefined = await requestCanonicalRefresh(quiet);
+    if (result && "error" in result) throw result.error;
+    return result;
+  }, [requestCanonicalRefresh]);
 
   const loadArtifacts = useCallback(async (quiet = false, options: {
     cursor?: string | null;
@@ -157,12 +236,12 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       setArtifactsError(message(reason));
       setArtifactsState("error");
       if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
-        await loadSnapshot(true);
+        await requestCanonicalRefresh(true);
       }
     } finally {
       if (mounted.current && version === artifactsLoadVersion.current) setRefreshingArtifacts(false);
     }
-  }, [artifactPage.cursor, artifactPage.cursorStack, artifactPage.filter, loadSnapshot, taskId]);
+  }, [artifactPage.cursor, artifactPage.cursorStack, artifactPage.filter, requestCanonicalRefresh, taskId]);
 
   useEffect(() => {
     mounted.current = true;
@@ -171,8 +250,8 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
     };
   }, []);
   useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+    void requestCanonicalRefresh(false);
+  }, [requestCanonicalRefresh]);
   useEffect(() => {
     let disposed = false;
     void apiClient.projectCapabilities(projectId).then((capabilities) => {
@@ -207,7 +286,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   },[artifactsState,loadArtifacts,mode,taskState]);
   async function refresh() {
     dispatchTerminalIntent({ type: "task_refreshed" });
-    await loadSnapshot(true);
+    await requestCanonicalRefresh(true);
     if (artifactsState !== "idle") {
       await loadArtifacts(false, { cursor: null, cursorStack: [] });
     }
@@ -245,13 +324,11 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       clearTaskDraft(taskDraftStorage(), draftIdentity);
     }
     setTaskError(reason.message);
-    setDetail(undefined);
-    setInteractionSnapshot(undefined);
     setTaskState(reason.status === 404 ? "missing" : "forbidden");
   }, [currentUser.id, projectId, taskId]);
-  const handlePresentationChange=useCallback((presentation:TaskDetailProjection)=>{setDetail(presentation);},[]);
 
   async function deleteTask() {
+    const detail = taskPresentationRef.current.presentation;
     if (!detail?.capabilities.deleteTask || deleting || releasing || lifecycleBusy) return;
     setDeleting(true);
     try {
@@ -264,8 +341,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       if (!mounted.current) return;
       mutationKeys.completeApiFailure(reason, "task-delete", taskId);
       if (isReadOnlyMutationError(reason)) {
-        setDetail((current) => current ? { ...current, capabilities:{ ...current.capabilities, deleteTask:false } } : current);
-        await loadSnapshot(true);
+        await requestCanonicalRefresh(true);
       }
       throw reason;
     } finally {
@@ -274,7 +350,9 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   }
 
   async function abortTaskTurn() {
+    const detail = taskPresentationRef.current.presentation;
     if (!detail?.capabilities.abortTurn || turnAborting) return;
+    const fence = captureCommandFence();
     setTurnAborting(true);
     try {
       await apiClient.abortTaskTurn(
@@ -282,12 +360,13 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
         mutationKeys.key("task-turn-abort", taskId)
       );
       mutationKeys.complete("task-turn-abort", taskId);
+      acceptCanonicalMutation("abort", fence);
     } catch (reason) {
       mutationKeys.completeApiFailure(reason, "task-turn-abort", taskId);
       if (
         reason instanceof ApiError
         && (reason.status === 403 || reason.status === 404 || reason.status === 409)
-      ) await loadSnapshot(true);
+      ) await requestCanonicalRefresh(true);
       throw reason;
     } finally {
       if (mounted.current) setTurnAborting(false);
@@ -295,20 +374,22 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   }
 
   async function releaseSandbox() {
+    const detail = taskPresentationRef.current.presentation;
     if (!detail?.capabilities.releaseSandbox || releasing || deleting || lifecycleBusy) return;
+    const fence = captureCommandFence();
     setReleasing(true);
     try {
-      const receipt = await apiClient.releaseTaskSandbox(taskId, mutationKeys.key("task-sandbox-release", taskId));
+      await apiClient.releaseTaskSandbox(taskId, mutationKeys.key("task-sandbox-release", taskId));
       mutationKeys.complete("task-sandbox-release", taskId);
       if (!mounted.current) return;
-      setDetail(receipt.presentation);
+      acceptCanonicalMutation("release", fence);
     } catch (reason) {
       if (!mounted.current) return;
       mutationKeys.completeApiFailure(reason, "task-sandbox-release", taskId);
       if (
         reason instanceof ApiError
         && (reason.status === 403 || reason.status === 404 || reason.status === 409)
-      ) await loadSnapshot(true);
+      ) await requestCanonicalRefresh(true);
       throw reason;
     } finally {
       if (mounted.current) setReleasing(false);
@@ -318,14 +399,17 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   if (taskState === "loading") return <RouteLoadingPage title="Task" />;
   if (taskState === "missing") return <TaskLoadFailure title="Task not found" detail="This task does not exist or is no longer available." basePath={basePath} />;
   if (taskState === "forbidden") return <TaskLoadFailure title="Task unavailable" detail="You no longer have permission to access this task." basePath={basePath} />;
-  if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void loadSnapshot()} />;
-  if (!detail || !interactionSnapshot) return null;
+  if (taskState === "error") return <TaskLoadFailure title="Task unavailable" detail={taskError} basePath={basePath} onRetry={() => void requestCanonicalRefresh(false)} />;
+  const detail = taskPresentation.presentation;
+  if (!detail || !taskPresentation.initialized) return null;
 
   const { task, capabilities, lifecycle, sandboxState } = detail;
   const mutationBusy = deleting || releasing || lifecycleBusy || turnAborting;
   const releaseLabel=sandboxState.state==="failed"||sandboxState.state==="release_requested"?"Retry release":"Release sandbox";
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifactPage.items} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} filter={artifactPage.filter} hasNext={artifactPage.nextCursor !== null} hasPrevious={artifactPage.cursorStack.length > 0} onFilterChange={changeArtifactFilter} onNext={nextArtifactPage} onPrevious={previousArtifactPage} onRefresh={refreshArtifacts} onRetry={retryArtifacts} />;
-  const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={() => loadSnapshot(true)} /> : null;
+  const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={async () => {
+    await requestCanonicalRefresh(true);
+  }} /> : null;
   const archivedNotice = lifecycle.state === "archived" ? <Banner status="info" icon={<Archive size={16} />} title="Task archived" description="Its conversation, files, and artifacts remain available." /> : null;
   const sandboxFailureNotice = sandboxState.state === "failed"
     ? <Banner status="error" title="Sandbox unavailable" description={sandboxState.cause?.message ?? "Release the failed Sandbox before continuing this Task."} />
@@ -359,7 +443,9 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
           <div className="ml-auto flex shrink-0 flex-nowrap items-center gap-1">
             <IconButton ref={detailsTriggerRef} label="Task details" tooltip="Task details" variant="ghost" size="lg" icon={<Info size={16} />} onClick={() => setDetailsOpen(true)} />
             <IconButton label="Refresh task" tooltip="Refresh task" variant="ghost" size="lg" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={() => void refresh()} />
-            <TaskLifecycleActions task={task} capabilities={capabilities} releaseLabel={releaseLabel} onRefresh={() => loadSnapshot(true)} onRelease={releaseSandbox} onDelete={deleteTask} disabled={turnAborting} onBusyChange={setLifecycleBusy} />
+            <TaskLifecycleActions task={task} capabilities={capabilities} releaseLabel={releaseLabel} onRefresh={async () => {
+              await requestCanonicalRefresh(true);
+            }} onRelease={releaseSandbox} onDelete={deleteTask} disabled={turnAborting} onBusyChange={setLifecycleBusy} />
           </div>
         </div>
         <TabList value={mode} onChange={selectWorkspaceMode} aria-label="Task workspace views" className="min-w-0 shrink-0 overflow-x-auto px-2 sm:px-3">
@@ -372,8 +458,8 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       {archivedNotice ? <div className="shrink-0 pt-2">{archivedNotice}</div> : null}
       {sandboxFailureNotice ? <div className="shrink-0 pt-2">{sandboxFailureNotice}</div> : null}
       <div ref={taskWorkspaceRef} tabIndex={-1} className="grid min-h-0 min-w-0 flex-1 overflow-hidden pt-2 outline-none" data-testid="task-workspace">
-        <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} userId={currentUser.id} projectId={projectId} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} initialSnapshot={interactionSnapshot} presentation={detail} commandBusy={turnAborting} onPresentationChange={handlePresentationChange} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
-        {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} presentation={detail} transportRequested={terminalIntent.transportRequested} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} onPresentationChange={handlePresentationChange} /></div> : null}
+        <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} userId={currentUser.id} projectId={projectId} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} state={taskPresentation} dispatch={dispatchTaskPresentation} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestConversationCanonicalRefresh} commandBusy={turnAborting} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
+        {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} presentation={detail} canonicalEpoch={taskPresentation.canonicalEpoch} intent={terminalIntent} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestCanonicalRefresh} /></div> : null}
         <section className={`${mode === "artifacts" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-border bg-surface`} aria-label="Task Artifacts"><div className="shrink-0 border-b border-border px-3 py-3"><Heading level={4} accessibilityLevel={2}>Artifacts</Heading></div><div className="min-h-0 flex-1 overflow-y-auto p-3">{artifactsPanel}</div></section>
       </div>
     </div>

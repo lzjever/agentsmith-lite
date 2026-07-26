@@ -43,6 +43,7 @@ export type FileBrowserAction =
   | { type: "selection_changed"; path: string | null }
   | { type: "location_changed" }
   | { type: "refresh_started" }
+  | { type: "refresh_invalidated" }
   | { type: "refresh_succeeded"; entries: ProjectFile[] }
   | { type: "refresh_failed"; message: string }
   | { type: "entry_upserted"; entry: ProjectFile }
@@ -150,6 +151,8 @@ export function reduceFileBrowserState(
       };
     case "refresh_started":
       return { ...state, loadState: "loading", message: "" };
+    case "refresh_invalidated":
+      return { ...state, loadState: "ready", message: "" };
     case "refresh_succeeded":
       return replaceEntries(state, action.entries, "ready", "");
     case "refresh_failed":

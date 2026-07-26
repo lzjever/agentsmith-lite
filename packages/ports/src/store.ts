@@ -263,6 +263,16 @@ export interface TaskInteractionStoreSnapshot {
   lastSyncedAt: string | null;
 }
 
+export interface TaskInteractionChangeStorePage {
+  changes: PersistedTaskInteractionChange[];
+  upperChangeSeq: number;
+  latestChangeSeq: number;
+  queuedMessages: PersistedTaskMessage[];
+  suppressedInteractionIds: string[];
+  historyStatus: TaskHistoryStatus;
+  lastSyncedAt: string | null;
+}
+
 export type JsonDocumentCollection =
   | "project_settings"
   | "endpoint_snapshots"
@@ -808,6 +818,7 @@ export interface ProductStore {
   completeTaskIdempotencyForResource(input: CompleteTaskIdempotencyForResourceInput): Promise<number>;
   persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult>;
   readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null>;
+  readTaskInteractionChangePage(taskId: string, afterChangeSeq: number, limit: number): Promise<TaskInteractionChangeStorePage | null>;
   listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]>;
   findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null>;
   findTaskInteractionByCorrelation(taskId: string, correlation: TaskInteractionCorrelation): Promise<TaskInteractionItem | null>;

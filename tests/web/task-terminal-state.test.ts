@@ -9,6 +9,67 @@ import {
 } from "../../src/components/tasks/task-terminal-state.js";
 
 describe("task terminal surface state", () => {
+  it("waits for canonical exact target Run before connecting after Terminal Start", () => {
+    let intent = observe(
+      createTerminalIntentState(),
+      canonicalObservation({
+        canonicalEpoch: 1,
+        runId: "run_1",
+        sandboxState: "released"
+      })
+    );
+    const fence = {
+      taskId: "task_1",
+      startedAtCanonicalEpoch: 1,
+      expectedRunId: "run_1",
+      expectedSandboxState: "released" as const
+    };
+    intent = observe(intent, canonicalObservation({
+      canonicalEpoch: 2,
+      runId: "run_1",
+      sandboxState: "released"
+    }));
+    intent = reduceExpectedTerminalAction(intent, {
+      type: "start_target_recorded",
+      fence,
+      targetRunId: "run_2"
+    });
+    intent = observe(intent, canonicalObservation({
+      canonicalEpoch: 3,
+      runId: "run_2",
+      sandboxState: "starting"
+    }));
+    assert.equal(intent.transportRequested, false);
+    intent = observe(intent, canonicalObservation({
+      canonicalEpoch: 4,
+      runId: "run_2",
+      sandboxState: "active"
+    }));
+    assert.equal(intent.transportRequested, true);
+
+    let thirdRun = observe(createTerminalIntentState(), canonicalObservation({
+      canonicalEpoch: 1,
+      runId: "run_1",
+      sandboxState: "released"
+    }));
+    thirdRun = reduceExpectedTerminalAction(thirdRun, {
+      type: "start_target_recorded",
+      fence,
+      targetRunId: "run_2"
+    });
+    thirdRun = observe(thirdRun, canonicalObservation({
+      canonicalEpoch: 2,
+      runId: "run_3",
+      sandboxState: "active"
+    }));
+    thirdRun = observe(thirdRun, canonicalObservation({
+      canonicalEpoch: 3,
+      runId: "run_2",
+      sandboxState: "active"
+    }));
+    assert.equal(thirdRun.transportRequested, false);
+  });
+
   it("keeps Terminal selectable while making unavailable, start, and cleanup states explicit", () => {
     assert.equal(terminalSurfaceState(presentation("released", false), false).kind, "unavailable");
     assert.equal(terminalSurfaceState(presentation("released"), false).kind, "start");
@@ -21,40 +82,36 @@ describe("task terminal surface state", () => {
   });
 
   it("mounts transport only for a canonical active presentation", () => {
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false), true), true);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false), false), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active", false), false), true), true);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("starting"), true), true), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("released"), false), true), false);
-    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("failed"), false), true), false);
+    let intent = observe(createTerminalIntentState(), canonicalObservation());
+    intent = reduceTerminalIntent(intent, {
+      type: "connect_requested",
+      observation: canonicalObservation()
+    });
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active"), false), intent), true);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("active", false), false), intent), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("starting"), true), intent), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("released"), false), intent), false);
+    assert.equal(terminalTransportEnabled(terminalSurfaceState(presentation("failed"), false), intent), false);
   });
 
-  it("keeps an owned active transport mounted across occupied capability presentations", () => {
-    let intent = createTerminalIntentState();
-    const available = terminalSurfaceState(presentation("active", true), false);
-    assert.equal(terminalTransportEnabled(available, intent.transportRequested), false);
+  it("terminates transport intent when canonical Terminal capability is removed", () => {
+    let intent = observe(createTerminalIntentState(), canonicalObservation());
+    intent = reduceTerminalIntent(intent, {
+      type: "connect_requested",
+      observation: canonicalObservation()
+    });
+    assert.equal(intent.transportRequested, true);
 
-    intent = reduceTerminalIntent(intent, { type: "connect_requested" });
-    assert.equal(terminalTransportEnabled(available, intent.transportRequested), true);
+    intent = observe(intent, canonicalObservation({ canonicalEpoch: 2, openTerminal: false }));
 
-    for (const openTerminal of [false, false, true, false, true]) {
-      const nextPresentation = presentation("active", openTerminal);
-      intent = reduceTerminalIntent(intent, {
-        type: "sandbox_observed",
-        sandboxState: nextPresentation.sandboxState.state
-      });
-      assert.equal(
-        terminalTransportEnabled(
-          terminalSurfaceState(nextPresentation, false),
-          intent.transportRequested
-        ),
-        true,
-        `openTerminal=${openTerminal}`
-      );
-    }
+    assert.equal(intent.transportRequested, false);
+    assert.equal(
+      terminalTransportEnabled(terminalSurfaceState(presentation("active", false), false), intent),
+      false
+    );
   });
 
-  it("arms transport only from explicit Connect or a final active Start receipt", () => {
+  it("arms ordinary transport only from explicit Connect", () => {
     const initial = createTerminalIntentState();
     for (const type of [
       "terminal_selected",
@@ -64,59 +121,111 @@ describe("task terminal surface state", () => {
       "start_failed",
       "transport_terminated"
     ] as const) {
-      const next = reduceTerminalIntent({ transportRequested: true }, { type });
+      const observed = observe(createTerminalIntentState(), canonicalObservation());
+      const connected = reduceTerminalIntent(observed, {
+        type: "connect_requested",
+        observation: canonicalObservation()
+      });
+      const next = reduceTerminalIntent(connected, { type });
       assert.equal(next.transportRequested, false, type);
     }
-    assert.equal(
-      reduceTerminalIntent(initial, { type: "connect_requested" }).transportRequested,
-      true
-    );
+    assert.equal(reduceTerminalIntent(initial, {
+      type: "connect_requested",
+      observation: canonicalObservation()
+    }).transportRequested, true);
     assert.equal(
       reduceTerminalIntent(initial, { type: "start_progressed" }).transportRequested,
       false
     );
-    assert.equal(
-      reduceTerminalIntent(initial, {
-        type: "start_completed",
-        receiptStatus: "active",
-        sandboxState: "active"
-      }).transportRequested,
-      true
-    );
-    assert.equal(
-      reduceTerminalIntent(initial, {
-        type: "start_completed",
-        receiptStatus: "in_progress",
-        sandboxState: "starting"
-      }).transportRequested,
-      false
-    );
   });
 
-  it("disarms transport when the sandbox is no longer active", () => {
+  it("disarms transport on non-active, run change, and task change observations", () => {
+    let epoch = 1;
     for (const sandboxState of [
       "starting",
       "release_requested",
       "released",
       "failed"
     ] as const) {
-      const next = reduceTerminalIntent(
-        { transportRequested: true },
-        { type: "sandbox_observed", sandboxState }
-      );
+      let intent = observe(createTerminalIntentState(), canonicalObservation({ canonicalEpoch: epoch++ }));
+      intent = reduceTerminalIntent(intent, {
+        type: "connect_requested",
+        observation: canonicalObservation({ canonicalEpoch: epoch - 1 })
+      });
+      const next = observe(intent, canonicalObservation({ canonicalEpoch: epoch++, sandboxState }));
       assert.equal(next.transportRequested, false, sandboxState);
     }
 
-    const active = { transportRequested: true };
-    assert.equal(
-      reduceTerminalIntent(active, {
-        type: "sandbox_observed",
-        sandboxState: "active"
-      }),
-      active
-    );
+    let intent = observe(createTerminalIntentState(), canonicalObservation({ canonicalEpoch: epoch++ }));
+    intent = reduceTerminalIntent(intent, {
+      type: "connect_requested",
+      observation: canonicalObservation({ canonicalEpoch: epoch - 1 })
+    });
+    intent = observe(intent, canonicalObservation({ canonicalEpoch: epoch++, runId: "run_2" }));
+    assert.equal(intent.transportRequested, false);
+
+    intent = reduceTerminalIntent(intent, {
+      type: "connect_requested",
+      observation: canonicalObservation({ canonicalEpoch: epoch - 1, runId: "run_2" })
+    });
+    intent = observe(intent, canonicalObservation({
+      canonicalEpoch: 1,
+      taskId: "task_2",
+      runId: "run_3"
+    }));
+    assert.equal(intent.transportRequested, false);
+  });
+
+  it("does not let a late Run-A observation restore intent after Run-B", () => {
+    let intent = observe(createTerminalIntentState(), canonicalObservation({ canonicalEpoch: 1 }));
+    intent = reduceTerminalIntent(intent, {
+      type: "connect_requested",
+      observation: canonicalObservation({ canonicalEpoch: 1 })
+    });
+    intent = observe(intent, canonicalObservation({ canonicalEpoch: 3, runId: "run_2" }));
+    assert.equal(intent.transportRequested, false);
+
+    const afterRunB = intent;
+    intent = observe(intent, canonicalObservation({ canonicalEpoch: 2, runId: "run_1" }));
+
+    assert.strictEqual(intent, afterRunB);
+    assert.equal(intent.transportRequested, false);
   });
 });
+
+function canonicalObservation(overrides: Partial<{
+  taskId: string;
+  canonicalEpoch: number;
+  runId: string;
+  sandboxState: TaskDetail["sandboxState"]["state"];
+  openTerminal: boolean;
+}> = {}) {
+  return {
+    taskId: "task_1",
+    canonicalEpoch: overrides.canonicalEpoch ?? 1,
+    runId: "run_1",
+    sandboxState: "active" as const,
+    openTerminal: true,
+    ...overrides
+  };
+}
+
+function reduceExpectedTerminalAction(
+  state: ReturnType<typeof createTerminalIntentState>,
+  action: unknown
+) {
+  return reduceTerminalIntent(state, action as Parameters<typeof reduceTerminalIntent>[1]);
+}
+
+function observe(
+  state: ReturnType<typeof createTerminalIntentState>,
+  observation: ReturnType<typeof canonicalObservation>
+) {
+  return reduceTerminalIntent(state, {
+    type: "canonical_observed",
+    observation
+  });
+}
 
 function presentation(
   state: "starting" | "active" | "release_requested" | "released" | "failed",

@@ -9,7 +9,14 @@ import { xtermThemeFromTokens } from "./terminal-theme";
 import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
 import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
 import { convergeTerminalStart, waitForTerminalStart } from "./task-terminal-start";
-import { terminalSurfaceState, terminalTransportEnabled, type TerminalIntentAction } from "./task-terminal-state";
+import type { TaskCommandFence } from "./task-conversation-state";
+import {
+  terminalSurfaceState,
+  terminalTransportEnabled,
+  type CanonicalTerminalObservation,
+  type TerminalIntentAction,
+  type TerminalIntentState
+} from "./task-terminal-state";
 
 type TerminalState = "connecting" | "ready" | "closed" | "error";
 const AUTO_RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
@@ -22,37 +29,67 @@ function formatTerminalState(value: string): string {
 export function TaskTerminalPanel({
   taskId,
   presentation,
-  transportRequested,
+  canonicalEpoch,
+  intent,
   activeSandboxesHref,
   canManagePolicy,
   policyHref,
   onIntent,
-  onPresentationChange
+  captureCommandFence,
+  acceptCanonicalMutation,
+  requestCanonicalRefresh
 }: {
   taskId: string;
   presentation: TaskDetail;
-  transportRequested: boolean;
+  canonicalEpoch: number;
+  intent: TerminalIntentState;
   activeSandboxesHref: string;
   canManagePolicy: boolean;
   policyHref: string;
   onIntent: Dispatch<TerminalIntentAction>;
-  onPresentationChange: (presentation: TaskDetail) => void;
+  captureCommandFence: () => TaskCommandFence;
+  acceptCanonicalMutation: (
+    kind: "terminal_start",
+    fence: TaskCommandFence,
+    options: { targetRunId: string }
+  ) => unknown;
+  requestCanonicalRefresh: (quiet?: boolean) => Promise<unknown>;
 }) {
   const operation = useRef<AbortController | null>(null);
   const [explicitStartPending, setExplicitStartPending] = useState(false);
   const [startError, setStartError] = useState("");
   const [capacityRecovery, setCapacityRecovery] = useState<SandboxCapacityRecovery | null>(null);
   const surface = terminalSurfaceState(presentation, explicitStartPending);
+  const observation: CanonicalTerminalObservation = {
+    taskId,
+    canonicalEpoch,
+    runId: presentation.sandboxState.runId,
+    sandboxState: presentation.sandboxState.state,
+    openTerminal: presentation.capabilities.openTerminal
+  };
   const handleAccessTerminated = useCallback(() => {
     onIntent({ type: "transport_terminated" });
   }, [onIntent]);
 
   useEffect(() => {
     onIntent({
-      type: "sandbox_observed",
-      sandboxState: presentation.sandboxState.state
+      type: "canonical_observed",
+      observation: {
+        taskId,
+        canonicalEpoch,
+        runId: presentation.sandboxState.runId,
+        sandboxState: presentation.sandboxState.state,
+        openTerminal: presentation.capabilities.openTerminal
+      }
     });
-  }, [onIntent, presentation.sandboxState.state]);
+  }, [
+    onIntent,
+    presentation.capabilities.openTerminal,
+    presentation.sandboxState.runId,
+    presentation.sandboxState.state,
+    canonicalEpoch,
+    taskId
+  ]);
 
   useEffect(() => () => {
     operation.current?.abort();
@@ -64,32 +101,34 @@ export function TaskTerminalPanel({
     operation.current?.abort();
     const controller = new AbortController();
     operation.current = controller;
+    const commandFence = captureCommandFence();
     const key = newIdempotencyKey("task-terminal-start");
     setExplicitStartPending(true);
     setStartError("");
     setCapacityRecovery(null);
     onIntent({ type: "start_progressed" });
     try {
-      const receipt = await convergeTerminalStart({
+      await convergeTerminalStart({
         taskId,
         idempotencyKey: key,
         signal: controller.signal,
         start: (id, idempotencyKey, signal) => apiClient.startTaskTerminal(id, idempotencyKey, signal),
         wait: waitForTerminalStart,
         onReceipt: (next) => {
-          onPresentationChange(next.presentation);
-          if (next.status === "in_progress") onIntent({ type: "start_progressed" });
+          acceptCanonicalMutation("terminal_start", commandFence, {
+            targetRunId: next.runId
+          });
+          onIntent({
+            type: "start_target_recorded",
+            fence: commandFence,
+            targetRunId: next.runId
+          });
         }
-      });
-      onIntent({
-        type: "start_completed",
-        receiptStatus: receipt.status,
-        sandboxState: receipt.presentation.sandboxState.state
       });
     } catch (reason) {
       if (controller.signal.aborted) return;
       if (reason instanceof ApiError && reason.presentation) {
-        onPresentationChange(reason.presentation);
+        void requestCanonicalRefresh(true);
       }
       const recovery = sandboxCapacityRecovery(reason);
       setCapacityRecovery(recovery);
@@ -105,7 +144,7 @@ export function TaskTerminalPanel({
     }
   }
 
-  if (terminalTransportEnabled(surface, transportRequested)) {
+  if (terminalTransportEnabled(surface, intent)) {
     return <TerminalTransport
       taskId={taskId}
       onAccessTerminated={handleAccessTerminated}
@@ -138,7 +177,7 @@ export function TaskTerminalPanel({
       </> : null}
       {surface.kind === "active" ? <>
         <Text as="p" display="block" className="mt-3" weight="semibold">Terminal is active</Text>
-        <Button className="mt-4" label="Connect Terminal" variant="primary" icon={<Play size={15} />} onClick={() => onIntent({ type: "connect_requested" })} />
+        <Button className="mt-4" label="Connect Terminal" variant="primary" icon={<Play size={15} />} onClick={() => onIntent({ type: "connect_requested", observation })} />
       </> : null}
       {capacityRecovery ? <SandboxCapacityRecoveryNotice className="mt-4 text-left" recovery={capacityRecovery} activeSandboxesHref={activeSandboxesHref} canManagePolicy={canManagePolicy} policyHref={policyHref} title="Sandbox could not be started" /> : null}
       {startError && !capacityRecovery ? <Banner className="mt-4 text-left" status="error" title="Sandbox could not be started" description={startError} /> : null}

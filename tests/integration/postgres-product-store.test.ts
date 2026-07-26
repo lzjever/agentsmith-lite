@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
+import type { PoolClient } from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createCredentialCrypto, credentialAad } from "../../packages/application/src/credentialCrypto.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
@@ -787,6 +788,124 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     if(resumed.kind==="resume")assert.equal(resumed.task.id,task.id);
     assert.equal(await store.findTask(replacement.id),null);
     assert.equal(await store.findFileLibrary(replacement.fileLibraryId!),null);
+  });
+
+  it("reads Task interaction changes and suppression from one repeatable-read snapshot",async()=>{
+    const task={...taskRecord("task_change_snapshot","library_change_snapshot","unused"),currentRunId:null};
+    const pending=message("message_change_snapshot",task.id);
+    const interactionId="interaction_change_snapshot";
+    assert.equal((await store.createTaskAtomically({
+      task,
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Change snapshot"),
+      initialMessage:pending,
+      initialInteractionChange:{
+        sourceKind:"product",
+        sourceId:`message:${pending.id}`,
+        sourceRevision:0,
+        interaction:{
+          id:interactionId,
+          revision:1,
+          taskId:task.id,
+          kind:"user_message",
+          title:"You",
+          body:pending.content,
+          contentMode:"full",
+          position:0,
+          occurredAt:at,
+          updatedAt:at,
+          actorId:"user_atomic",
+          status:"pending"
+        }
+      }
+    })).kind,"created");
+
+    const pool=(store as unknown as {pool:{connect:()=>Promise<PoolClient>}}).pool;
+    const connect=pool.connect.bind(pool);
+    let changesRead!:()=>void;
+    let resumeRead!:()=>void;
+    const reachedChanges=new Promise<void>((resolve)=>{changesRead=resolve;});
+    const resume=new Promise<void>((resolve)=>{resumeRead=resolve;});
+    const statements:string[]=[];
+    pool.connect=async()=>{
+      const client=await connect();
+      const query=client.query.bind(client);
+      client.query=(async(statement:unknown,values?:unknown[])=>{
+        const sql=typeof statement==="string"?statement:(statement as {text?:string}).text??"";
+        statements.push(sql);
+        const result=await query(statement as never,values as never);
+        if(sql.startsWith("select * from task_interaction_changes where task_id=$1 and change_seq>$2")){
+          changesRead();
+          await resume;
+        }
+        return result;
+      }) as typeof client.query;
+      return client;
+    };
+
+    const writer=new PostgresProductStore(postgresUrl);
+    try{
+      const read=store.readTaskInteractionChangePage(task.id,0,20);
+      await reachedChanges;
+      const claimedAt="2026-07-23T00:01:00.000Z";
+      const claimToken="claim_change_snapshot";
+      assert.ok(await writer.claimTaskMessage({
+        id:pending.id,
+        claimToken,
+        claimedAt,
+        leaseExpiresAt:"2026-07-23T00:06:00.000Z"
+      }));
+      assert.ok(await writer.recordTaskMessageReceipt({
+        id:pending.id,
+        claimToken,
+        receipt:{accepted:true,deliveryKey:pending.deliveryKey!,requestHash:pending.requestHash!,messageId:pending.id,cursor:"accepted-cursor"},
+        timelineCursor:"accepted-cursor",
+        updatedAt:"2026-07-23T00:02:00.000Z"
+      }));
+      await writer.persistTaskInteractionMutation({
+        taskId:task.id,
+        changes:[{
+          sourceKind:"product",
+          sourceId:`message:${pending.id}`,
+          sourceRevision:1,
+          interaction:{
+            id:interactionId,
+            revision:2,
+            taskId:task.id,
+            kind:"user_message",
+            title:"You",
+            body:pending.content,
+            contentMode:"full",
+            position:0,
+            occurredAt:pending.createdAt,
+            updatedAt:"2026-07-23T00:02:00.000Z",
+            actorId:"user_atomic",
+            status:"accepted"
+          }
+        }]
+      });
+      resumeRead();
+
+      const page=await read;
+      assert.ok(page);
+      assert.equal(statements[0],"begin isolation level repeatable read");
+      assert.deepEqual(page.changes.map((change)=>change.changeSeq),[1]);
+      assert.equal(page.latestChangeSeq,1);
+      assert.equal(page.upperChangeSeq,1);
+      assert.deepEqual(page.suppressedInteractionIds,[interactionId]);
+      assert.deepEqual(page.queuedMessages.map((queued)=>queued.id),[pending.id]);
+    }finally{
+      resumeRead();
+      pool.connect=connect;
+      await writer.close();
+    }
+
+    const accepted=await store.readTaskInteractionChangePage(task.id,1,20);
+    assert.ok(accepted);
+    assert.deepEqual(accepted.changes.map((change)=>[change.changeSeq,change.interaction.revision]),[[2,2]]);
+    assert.deepEqual(accepted.suppressedInteractionIds,[]);
+    assert.deepEqual(accepted.queuedMessages,[]);
   });
 
   it("returns the owning PostgreSQL claim with deterministic create rejections",async()=>{

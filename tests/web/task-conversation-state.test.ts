@@ -9,12 +9,18 @@ import type {
   TaskQueuedMessage
 } from "../../src/lib/api/client.js";
 import {
+  captureTaskCommandFence as captureFence,
+  convergeRequiredTaskRefresh,
+  createSingleFlightTaskRefresh,
+  createSerialTaskRefreshTail,
   createTaskPresentationState,
   isNearHistoryTop,
   reduceTaskAssistantPreview,
   reduceTaskPresentationState,
   retainedHistoryScrollTop,
-  taskMessageReceiptError
+  taskMessageReceiptError,
+  type TaskPresentationAction,
+  type TaskPresentationState
 } from "../../src/components/tasks/task-conversation-state.js";
 
 const capabilities: TaskCapabilities = {
@@ -114,6 +120,640 @@ const preview = (body: string) => ({
 });
 
 describe("task presentation reducer", () => {
+  it("does not admit a later active state frame after Release is accepted", () => {
+    const active = presentationFor("run_1", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: {
+        ...snapshotWith(active),
+        queuedMessages: [queued("newer queue", "2026-07-13T00:02:00.000Z")]
+      }
+    });
+    const fence = commandFence(state, "run_1", "active");
+
+    state = applyExpectedAction(state, {
+      type: "canonical_mutation_accepted",
+      taskId: "task_1",
+      kind: "release",
+      fence
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_refresh_started",
+      taskId: "task_1"
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      runId: "run_1",
+      queuedMessages: [],
+      presentation: active
+    });
+
+    assert.equal(state.runFence.lifecycle, "release_requested");
+    assert.equal(state.queuedMessages[0]?.content, "newer queue");
+    assert.equal(stateRefreshRequired(state), true);
+  });
+
+  it("uses a current-fence full GET to rebuild Run-B over a missed active Run-A", () => {
+    const activeA = presentationFor("run_1", "active");
+    const activeB = presentationFor("run_2", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(activeA)
+    });
+    const base = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base,
+      snapshot: snapshotWith(activeB)
+    });
+
+    assert.equal(state.presentation?.sandboxState.runId, "run_2");
+    assert.equal(state.runFence.lifecycle, "active");
+    assert.equal(stateRetiredRunIds(state).has("run_1"), true);
+
+    state = applyExpectedAction(state, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      runId: "run_1",
+      queuedMessages: [],
+      presentation: activeA
+    });
+    assert.equal(state.presentation?.sandboxState.runId, "run_2");
+  });
+
+  it("uses a current-generation reset to rebuild Run-B and reject late Run-A deltas", () => {
+    const activeA = presentationFor("run_1", "active");
+    const activeB = presentationFor("run_2", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(activeA)
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_snapshot_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      snapshot: snapshotWith(activeB)
+    });
+
+    assert.equal(state.presentation?.sandboxState.runId, "run_2");
+    assert.equal(stateRetiredRunIds(state).has("run_1"), true);
+
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 2,
+      runId: "run_1",
+      queuedMessages: [],
+      presentation: activeA
+    });
+    assert.equal(state.presentation?.sandboxState.runId, "run_2");
+  });
+
+  it("retires Run-A after Run-B and permits a new Run only from released state", () => {
+    const releasedA = presentationFor("run_1", "released");
+    const startingB = presentationFor("run_2", "starting");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(releasedA)
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      runId: "run_2",
+      queuedMessages: [],
+      presentation: startingB
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 2,
+      runId: "run_1",
+      queuedMessages: [],
+      presentation: releasedA
+    });
+
+    assert.equal(state.presentation?.sandboxState.runId, "run_2");
+    assert.equal(stateRetiredRunIds(state).has("run_1"), true);
+
+    const activeA = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(presentationFor("run_1", "active"))
+    });
+    const rejectedB = applyExpectedAction(
+      applyExpectedAction(activeA, {
+        type: "stream_started",
+        taskId: "task_1",
+        streamGeneration: 1
+      }),
+      {
+        type: "stream_state_received",
+        taskId: "task_1",
+        streamGeneration: 1,
+        streamSequence: 1,
+        runId: "run_2",
+        queuedMessages: [],
+        presentation: startingB
+      }
+    );
+    assert.equal(rejectedB.presentation?.sandboxState.runId, "run_1");
+    assert.equal(stateRefreshRequired(rejectedB), true);
+
+    let releasedNull = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(presentationFor(null, "released"))
+    });
+    releasedNull = applyExpectedAction(releasedNull, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: stateCanonicalEpoch(releasedNull)
+    });
+    releasedNull = applyExpectedAction(releasedNull, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: stateCanonicalEpoch(releasedNull),
+      snapshot: snapshotWith(startingB)
+    });
+    assert.equal(releasedNull.presentation?.sandboxState.runId, "run_2");
+  });
+
+  it("fences full reads by latest read id and base canonical epoch", () => {
+    const active = presentationFor("run_1", "active");
+    const failed = presentationFor("run_1", "failed");
+    const releaseRequested = presentationFor("run_1", "release_requested");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(active)
+    });
+    const base = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 2,
+      baseCanonicalEpoch: base
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base,
+      snapshot: snapshotWith(failed)
+    });
+    assert.equal(state.presentation?.sandboxState.state, "active");
+
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 2,
+      baseCanonicalEpoch: base,
+      snapshot: snapshotWith(failed)
+    });
+    assert.equal(state.presentation?.sandboxState.state, "failed");
+
+    const stateEventBase = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 3,
+      baseCanonicalEpoch: stateEventBase
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    state = applyExpectedAction(state, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      runId: "run_1",
+      queuedMessages: [queued("newer state", "2026-07-13T00:05:00.000Z")],
+      presentation: releaseRequested
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 3,
+      baseCanonicalEpoch: stateEventBase,
+      snapshot: snapshotWith(failed)
+    });
+
+    assert.equal(state.presentation?.sandboxState.state, "release_requested");
+    assert.equal(state.queuedMessages[0]?.content, "newer state");
+  });
+
+  it("invalidates an in-flight full read when a command is accepted", () => {
+    const active = presentationFor("run_1", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(active)
+    });
+    const fence = commandFence(state, "run_1", "active");
+    const base = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_mutation_accepted",
+      taskId: "task_1",
+      kind: "abort",
+      fence
+    });
+    const accepted = state;
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base,
+      snapshot: snapshotWith(presentationFor("run_1", "failed"))
+    });
+
+    assert.strictEqual(state, accepted);
+    assert.equal(state.presentation?.sandboxState.state, "active");
+  });
+
+  it("keeps refresh pending across failure or stale completion and clears it only on applied snapshot", () => {
+    const active = presentationFor("run_1", "active");
+    const createPending = () => {
+      let pending = createTaskPresentationState({
+        taskId: "task_1",
+        snapshot: snapshotWith(active)
+      });
+      pending = applyExpectedAction(pending, {
+        type: "canonical_mutation_accepted",
+        taskId: "task_1",
+        kind: "abort",
+        fence: commandFence(pending, "run_1", "active")
+      });
+      return pending;
+    };
+
+    let failed = applyExpectedAction(createPending(), {
+      type: "canonical_refresh_started",
+      taskId: "task_1"
+    });
+    assert.equal(stateRefreshRequired(failed), true);
+    assert.equal(stateRefreshInFlight(failed), true);
+    failed = applyExpectedAction(failed, {
+      type: "canonical_refresh_finished",
+      taskId: "task_1"
+    });
+    assert.equal(stateRefreshRequired(failed), true);
+    assert.equal(stateRefreshInFlight(failed), false);
+
+    let stale = applyExpectedAction(createPending(), {
+      type: "canonical_refresh_started",
+      taskId: "task_1"
+    });
+    const staleBase = stateCanonicalEpoch(stale);
+    stale = applyExpectedAction(stale, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: staleBase
+    });
+    stale = applyExpectedAction(stale, {
+      type: "stream_started",
+      taskId: "task_1",
+      streamGeneration: 1
+    });
+    stale = applyExpectedAction(stale, {
+      type: "stream_state_received",
+      taskId: "task_1",
+      streamGeneration: 1,
+      streamSequence: 1,
+      runId: "run_1",
+      queuedMessages: [],
+      presentation: active
+    });
+    stale = applyExpectedAction(stale, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: staleBase,
+      snapshot: snapshotWith(active)
+    });
+    stale = applyExpectedAction(stale, {
+      type: "canonical_refresh_finished",
+      taskId: "task_1"
+    });
+    assert.equal(stateRefreshRequired(stale), true);
+    assert.equal(stateRefreshInFlight(stale), false);
+
+    let applied = applyExpectedAction(createPending(), {
+      type: "canonical_refresh_started",
+      taskId: "task_1"
+    });
+    const appliedBase = stateCanonicalEpoch(applied);
+    applied = applyExpectedAction(applied, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: appliedBase
+    });
+    applied = applyExpectedAction(applied, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: appliedBase,
+      snapshot: snapshotWith(active)
+    });
+    assert.equal(stateRefreshRequired(applied), false);
+    assert.equal(stateRefreshInFlight(applied), false);
+  });
+
+  it("merges history interactions without invalidating an in-flight full read", () => {
+    const active = presentationFor("run_1", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(active)
+    });
+    const base = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base
+    });
+    state = applyExpectedAction(state, {
+      type: "history_prepend_received",
+      taskId: "task_1",
+      items: [interaction("history_1", 2, 1, "history")],
+      nextPageCursor: null,
+      hasMoreBefore: false
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: base,
+      snapshot: snapshotWith(active, [
+        interaction("history_1", 1, 1, "stale history"),
+        interaction("tail_1", 1, 2, "tail")
+      ])
+    });
+
+    assert.equal(state.items.find((item) => item.id === "history_1")?.revision, 2);
+    assert.equal(state.items.some((item) => item.id === "tail_1"), true);
+  });
+
+  it("accepts Release after intervening interaction and state events but never applies stale rejection payload", () => {
+    const active = presentationFor("run_1", "active");
+    let state = createTaskPresentationState({
+      taskId: "task_1",
+      snapshot: snapshotWith(active)
+    });
+    const fence = commandFence(state, "run_1", "active");
+    state = applyExpectedAction(state, {
+      type: "interaction_received",
+      taskId: "task_1",
+      item: interaction("during_command", 1, 1, "during command")
+    });
+    state = applyExpectedAction(
+      applyExpectedAction(state, {
+        type: "stream_started",
+        taskId: "task_1",
+        streamGeneration: 1
+      }),
+      {
+        type: "stream_state_received",
+        taskId: "task_1",
+        streamGeneration: 1,
+        streamSequence: 1,
+        runId: "run_1",
+        queuedMessages: [],
+        presentation: active
+      }
+    );
+    const beforeAcceptance = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_mutation_accepted",
+      taskId: "task_1",
+      kind: "release",
+      fence
+    });
+    assert.ok(stateCanonicalEpoch(state) > beforeAcceptance);
+    assert.equal(stateRefreshRequired(state), true);
+
+    const accepted = state;
+    state = applyExpectedAction(state, {
+      type: "canonical_mutation_rejected",
+      taskId: "task_1",
+      fence,
+      presentation: presentationFor("run_1", "starting")
+    });
+    assert.strictEqual(state, accepted);
+
+    state = applyExpectedAction(state, {
+      type: "canonical_refresh_started",
+      taskId: "task_1"
+    });
+    const refreshBase = stateCanonicalEpoch(state);
+    state = applyExpectedAction(state, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: refreshBase
+    });
+    state = applyExpectedAction(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch: refreshBase,
+      snapshot: snapshotWith(presentationFor("run_1", "released"))
+    });
+    assert.equal(state.presentation?.sandboxState.state, "released");
+    assert.equal(state.items.some((item) => item.id === "during_command"), true);
+  });
+
+  it("serializes post-message canonical refreshes and keeps the newer result", async () => {
+    const enqueue = createSerialTaskRefreshTail();
+    const firstGate = deferred<void>();
+    const secondGate = deferred<void>();
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    let canonical = "";
+
+    const first = enqueue(async () => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await firstGate.promise;
+      canonical = "older";
+      active -= 1;
+    });
+    const second = enqueue(async () => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await secondGate.promise;
+      canonical = "newer";
+      active -= 1;
+    });
+
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    assert.equal(active, 1);
+    firstGate.resolve();
+    await first;
+    await Promise.resolve();
+    assert.equal(calls, 2);
+    assert.equal(active, 1);
+    secondGate.resolve();
+    await second;
+
+    assert.equal(maxActive, 1);
+    assert.equal(canonical, "newer");
+  });
+
+  it("continues the serial refresh tail after the first refresh rejects", async () => {
+    const enqueue = createSerialTaskRefreshTail();
+    const calls: string[] = [];
+    const first = enqueue(async () => {
+      calls.push("first");
+      throw new Error("first failed");
+    });
+    const second = enqueue(async () => {
+      calls.push("second");
+    });
+
+    await assert.rejects(first, /first failed/);
+    await second;
+    assert.deepEqual(calls, ["first", "second"]);
+  });
+
+  it("shares one required refresh flight and permits a later retry", async () => {
+    const run = createSingleFlightTaskRefresh();
+    const gate = deferred<void>();
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+
+    const first = run(async () => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await gate.promise;
+      active -= 1;
+      return false;
+    });
+    const duplicate = run(async () => {
+      calls += 1;
+      return true;
+    });
+
+    assert.strictEqual(duplicate, first);
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    gate.resolve();
+    assert.equal(await first, false);
+
+    assert.equal(await run(async () => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      active -= 1;
+      return true;
+    }), true);
+    assert.equal(calls, 2);
+    assert.equal(maxActive, 1);
+  });
+
+  it("starts a trailing flight when a new obligation appears before the shared flight settles", async () => {
+    const runSingle = createSingleFlightTaskRefresh();
+    const firstSnapshotApplied = deferred<void>();
+    const firstSettle = deferred<void>();
+    const delays: number[] = [];
+    let pending = true;
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+
+    const refresh = () => runSingle(async () => {
+      calls += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      if (calls === 1) {
+        pending = false;
+        firstSnapshotApplied.resolve();
+        await firstSettle.promise;
+      } else {
+        pending = false;
+      }
+      active -= 1;
+      return true;
+    });
+    const converge = () => convergeRequiredTaskRefresh(
+      refresh,
+      () => pending,
+      async (delay) => {
+        delays.push(delay);
+      }
+    );
+
+    const first = converge();
+    await firstSnapshotApplied.promise;
+    pending = true;
+    const second = converge();
+    firstSettle.resolve();
+    await Promise.all([first, second]);
+
+    assert.equal(calls, 2);
+    assert.equal(maxActive, 1);
+    assert.ok(delays.length >= 1);
+    assert.equal(delays.every((delay) => delay === 1_000), true);
+  });
+
   it("initializes the complete presentation state from the Task detail snapshot", () => {
     const first = interaction("interaction_1", 2, 10, "First");
     const queuedMessage = queued("Continue after this turn", "2026-07-13T00:03:00.000Z");
@@ -152,10 +792,11 @@ describe("task presentation reducer", () => {
   it("preserves stale revisions and keeps ordinary interactions ordered with a rebuilt index", () => {
     const first = interaction("interaction_1", 2, 10, "First");
     const second = interaction("interaction_2", 4, 30, "Second");
-    const initial = createTaskPresentationState({ items: [first, second] });
+    const initial = createTaskPresentationState({ items: [first, second], canonicalEpoch: 1 });
 
     const equal = reduceTaskPresentationState(initial, {
       type: "interaction_received",
+      taskId: "task_1",
       item: { ...first, body: "Equal revision must not replace" }
     });
     assert.strictEqual(equal, initial);
@@ -163,6 +804,7 @@ describe("task presentation reducer", () => {
 
     const stale = reduceTaskPresentationState(initial, {
       type: "interaction_received",
+      taskId: "task_1",
       item: { ...first, revision: 1, body: "Stale" }
     });
     assert.strictEqual(stale, initial);
@@ -171,6 +813,7 @@ describe("task presentation reducer", () => {
     const inserted = interaction("interaction_3", 1, 20, "Inserted");
     const afterInsert = reduceTaskPresentationState(initial, {
       type: "interaction_received",
+      taskId: "task_1",
       item: inserted
     });
     assert.deepEqual(afterInsert.items.map((item) => item.id), [
@@ -188,6 +831,7 @@ describe("task presentation reducer", () => {
     const replacement = { ...second, revision: 5, position: 5, body: "Revised second" };
     const afterReplace = reduceTaskPresentationState(afterInsert, {
       type: "interaction_received",
+      taskId: "task_1",
       item: replacement
     });
     assert.deepEqual(afterReplace.items.map((item) => item.id), [
@@ -219,18 +863,21 @@ describe("task presentation reducer", () => {
     const tail = interaction("interaction_2", 1, 20, "New tail");
     state = reduceTaskPresentationState(state, {
       type: "interaction_received",
+      taskId: "task_1",
       item: tail
     });
     assert.equal(state.newActivityCount, 1);
 
     const equal = reduceTaskPresentationState(state, {
       type: "interaction_received",
+      taskId: "task_1",
       item: { ...tail, body: "Equal revision" }
     });
     assert.strictEqual(equal, state);
 
     state = reduceTaskPresentationState(state, {
       type: "interaction_received",
+      taskId: "task_1",
       item: { ...settled, revision: 3, body: "Revised settled row" }
     });
     assert.equal(state.newActivityCount, 1);
@@ -238,11 +885,13 @@ describe("task presentation reducer", () => {
 
   it("changes no conversation state before acceptance, then follows the accepted receipt", () => {
     const initial = createTaskPresentationState({
-      items: [interaction("interaction_1", 1, 10, "First")]
+      items: [interaction("interaction_1", 1, 10, "First")],
+      presentation: presentation()
     });
     const reading = reduceTaskPresentationState(initial, { type: "reading_started" });
     const active = reduceTaskPresentationState(reading, {
       type: "interaction_received",
+      taskId: "task_1",
       item: interaction("interaction_2", 1, 20, "Second")
     });
     assert.equal(active.newActivityCount, 1);
@@ -254,30 +903,30 @@ describe("task presentation reducer", () => {
     const readingAgain = reduceTaskPresentationState(jumped, { type: "reading_started" });
     const activeAgain = reduceTaskPresentationState(readingAgain, {
       type: "interaction_received",
+      taskId: "task_1",
       item: interaction("interaction_3", 1, 30, "Third")
     });
-    const requested = reduceTaskPresentationState(activeAgain, { type: "message_send_requested" });
+    const requested = activeAgain;
     assert.strictEqual(requested, activeAgain);
     const acceptedInteraction = interaction("interaction_accepted", 1, 40, "Accepted");
     const sent = reduceTaskPresentationState(requested, {
-      type: "message_accepted",
-      receipt: {
-        messageId: "message_accepted",
-        disposition: "accepted_by_active_run",
-        duplicate: false,
-        queuedMessage: null,
-        interaction: acceptedInteraction,
-        presentation: presentation()
-      }
+      type: "canonical_mutation_accepted",
+      taskId: "task_1",
+      kind: "message",
+      fence: captureFence(requested),
+      interaction: acceptedInteraction
     });
     assert.equal(sent.followMode, "following");
     assert.equal(sent.newActivityCount, 0);
     assert.strictEqual(sent.items.at(-1), acceptedInteraction);
   });
 
-  it("applies a canonical capacity rejection presentation without changing reading state", () => {
+  it("keeps a rejection presentation out of canonical conversation state", () => {
     const initial = reduceTaskPresentationState(
-      createTaskPresentationState({ items: [interaction("interaction_1", 1, 10, "First")] }),
+      createTaskPresentationState({
+        items: [interaction("interaction_1", 1, 10, "First")],
+        presentation: presentation()
+      }),
       { type: "reading_started" }
     );
     const rejectedPresentation = {
@@ -285,13 +934,15 @@ describe("task presentation reducer", () => {
       sandboxState: { state: "released", runId: "run_1", cause: null }
     } satisfies TaskDetail;
     const rejected = reduceTaskPresentationState(initial, {
-      type: "message_rejected",
+      type: "canonical_mutation_rejected",
+      taskId: "task_1",
+      fence: captureFence(initial),
       presentation: rejectedPresentation
     });
     assert.equal(rejected.followMode, "reading");
     assert.equal(rejected.newActivityCount, 0);
     assert.strictEqual(rejected.items, initial.items);
-    assert.strictEqual(rejected.presentation, rejectedPresentation);
+    assert.strictEqual(rejected.presentation, initial.presentation);
   });
 
   it("treats a message receipt as admission without replacing authoritative queue or presentation state", () => {
@@ -302,54 +953,17 @@ describe("task presentation reducer", () => {
       queuedMessages:[dispatching],
       presentation:activePresentation
     });
-    const startingPresentation={
-      ...presentation(),
-      currentTurn:{state:"starting" as const},
-      sandboxState:{state:"starting" as const,runId:"run_1",cause:null}
-    };
-
     const accepted=reduceTaskPresentationState(streamed,{
-      type:"message_accepted",
-      receipt:{
-        messageId:"message_1",
-        disposition:"queued_for_active_run",
-        duplicate:false,
-        queuedMessage:queued("Continue","2026-07-13T00:01:00.000Z"),
-        interaction:null,
-        presentation:startingPresentation
-      }
+      type:"canonical_mutation_accepted",
+      taskId:"task_1",
+      kind:"message",
+      fence:captureFence(streamed),
+      interaction:null
     });
 
     assert.deepEqual(accepted.queuedMessages,[dispatching]);
     assert.strictEqual(accepted.presentation,activePresentation);
     assert.deepEqual(accepted.items,streamed.items);
-  });
-
-  it("applies parent mutation presentations independently", () => {
-    const initial = createTaskPresentationState({
-      items: [],
-      presentation: presentation()
-    });
-    const releasedPresentation: TaskDetail = {
-      ...presentation({ abortTurn: false }),
-      currentTurn: { state: "ready" },
-      sandboxState: { state: "released", runId: "run_1", cause: null },
-      capabilities: {
-        ...capabilities,
-        abortTurn: false,
-        stopWork: false,
-        openTerminal: true,
-        releaseSandbox: false
-      }
-    };
-    const afterRelease = reduceTaskPresentationState(initial, {
-      type: "presentation_received",
-      presentation: releasedPresentation
-    });
-
-    assert.strictEqual(afterRelease.presentation, releasedPresentation);
-    assert.equal(afterRelease.presentation?.sandboxState.state, "released");
-    assert.equal(afterRelease.presentation?.capabilities.releaseSandbox, false);
   });
 
   it("applies authoritative snapshot state wholesale without replacing a newer interaction revision", () => {
@@ -363,8 +977,18 @@ describe("task presentation reducer", () => {
     const authoritativeQueue = [queued("Authoritative queue", "2026-07-13T00:02:00.000Z")];
     const authoritativePresentation = presentation({ abortTurn: false });
 
-    const afterReset = reduceTaskPresentationState(initial, {
-      type: "snapshot_reset",
+    const baseCanonicalEpoch = initial.canonicalEpoch;
+    const reading = reduceTaskPresentationState(initial, {
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch
+    });
+    const afterReset = reduceTaskPresentationState(reading, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch,
       snapshot: {
         ...snapshot([
           interaction("interaction_shared", 2, 10, "Older snapshot revision"),
@@ -388,7 +1012,8 @@ describe("task presentation reducer", () => {
 
     const oldest = interaction("interaction_oldest", 1, 1, "Oldest");
     const afterPrepend = reduceTaskPresentationState(afterReset, {
-      type: "earlier_prepend",
+      type: "history_prepend_received",
+      taskId: "task_1",
       items: [
         oldest,
         interaction("interaction_shared", 1, 10, "Stale earlier revision")
@@ -406,7 +1031,7 @@ describe("task presentation reducer", () => {
   });
 
   it("does not revive a queued preview after clear, final assistant, or reset", () => {
-    let state = createTaskPresentationState({ items: [] });
+    let state = createTaskPresentationState({ taskId: "task_1", items: [] });
 
     state = reduceTaskPresentationState(state, {
       type: "assistant_preview_received",
@@ -436,6 +1061,7 @@ describe("task presentation reducer", () => {
     });
     state = reduceTaskPresentationState(state, {
       type: "interaction_received",
+      taskId: "task_1",
       item: assistantInteraction("assistant_1", 1, 20, "Final answer")
     });
     state = reduceTaskPresentationState(state, { type: "assistant_preview_flushed" });
@@ -446,8 +1072,18 @@ describe("task presentation reducer", () => {
       type: "assistant_preview_received",
       preview: preview("Frame before reset")
     });
+    const baseCanonicalEpoch = state.canonicalEpoch;
     state = reduceTaskPresentationState(state, {
-      type: "snapshot_reset",
+      type: "canonical_read_started",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch
+    });
+    state = reduceTaskPresentationState(state, {
+      type: "canonical_snapshot_received",
+      taskId: "task_1",
+      readId: 1,
+      baseCanonicalEpoch,
       snapshot: snapshot([assistantInteraction("assistant_1", 2, 20, "Reset answer")])
     });
     state = reduceTaskPresentationState(state, { type: "assistant_preview_flushed" });
@@ -455,6 +1091,94 @@ describe("task presentation reducer", () => {
     assert.equal(state.pendingPreview, null);
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function applyExpectedAction(
+  state: TaskPresentationState,
+  action: unknown
+): TaskPresentationState {
+  return reduceTaskPresentationState(state, action as TaskPresentationAction);
+}
+
+function stateCanonicalEpoch(state: TaskPresentationState): number {
+  return (state as TaskPresentationState & { canonicalEpoch: number }).canonicalEpoch;
+}
+
+function stateRetiredRunIds(state: TaskPresentationState): ReadonlySet<string> {
+  return state.runFence.retiredRunIds;
+}
+
+function stateRefreshRequired(state: TaskPresentationState): boolean {
+  return (state as TaskPresentationState & {
+    canonicalRefreshRequired: boolean;
+  }).canonicalRefreshRequired;
+}
+
+function stateRefreshInFlight(state: TaskPresentationState): boolean {
+  return (state as TaskPresentationState & {
+    canonicalRefreshInFlight: boolean;
+  }).canonicalRefreshInFlight;
+}
+
+function commandFence(
+  state: TaskPresentationState,
+  expectedRunId: string | null,
+  expectedSandboxState: TaskDetail["sandboxState"]["state"]
+) {
+  return {
+    taskId: "task_1",
+    startedAtCanonicalEpoch: stateCanonicalEpoch(state),
+    expectedRunId,
+    expectedSandboxState
+  };
+}
+
+function presentationFor(
+  runId: string | null,
+  sandboxState: TaskDetail["sandboxState"]["state"]
+): TaskDetail {
+  return {
+    ...presentation(),
+    currentTurn: {
+      state: sandboxState === "starting"
+        ? "starting"
+        : sandboxState === "active"
+          ? "running"
+          : "ready"
+    },
+    sandboxState: {
+      state: sandboxState,
+      runId,
+      cause: sandboxState === "failed"
+        ? { code: "runtime_unreachable", message: "Runtime unavailable" }
+        : null
+    },
+    capabilities: {
+      ...capabilities,
+      openTerminal: sandboxState === "active",
+      releaseSandbox: sandboxState !== "released"
+    }
+  };
+}
+
+function snapshotWith(
+  taskPresentation: TaskDetail,
+  items: TaskInteractionItem[] = []
+): TaskInteractionSnapshot {
+  return {
+    ...snapshot(items),
+    presentation: taskPresentation
+  };
+}
 
 describe("existing task conversation helpers", () => {
   it("exposes only the receipt safe error", () => {

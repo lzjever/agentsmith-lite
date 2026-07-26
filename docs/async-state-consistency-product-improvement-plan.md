@@ -216,19 +216,44 @@ Task sources may write only these fields:
 
 | Source | Permitted update |
 |---|---|
-| current initial GET/reset | full canonical Task state |
-| interaction SSE | interaction item with matching Task and newer item revision |
-| state SSE | canonical Run, queue, lifecycle, and capability for the current Run |
-| command receipt | command outcome and stable result identities only |
+| authoritative full GET/reset | full canonical Task state when its read fence is current |
+| ordered state SSE | same-Run monotonic lifecycle plus queue, turn, and capabilities, or an admissible new Run |
+| interaction SSE/history | matching-Task interaction item with newer item revision |
+| accepted mutation | a new canonical acceptance epoch, read invalidation, stable result identities, and one serialized refresh |
+| rejected mutation | command feedback and canonical refresh only; no stale presentation replacement |
 | Terminal socket | local transport state only |
 
-Every Task read carries `(taskId, readEpoch)`. Run-related updates also carry
-the exact public `runId`. A stream update, accepted mutation, or newer read
-invalidates older reads. A command rejection may update command feedback, but
-cannot replace canonical Task state after its starting epoch has advanced.
+Task ordering uses separate fences instead of one arrival epoch:
+
+- `canonicalEpoch` advances only when canonical presentation is accepted;
+- `latestCanonicalReadId` identifies the newest full GET started for the Task;
+- `CommandFence` captures `taskId`, `startedAtCanonicalEpoch`,
+  `expectedRunId`, and `expectedSandboxState`;
+- `RunFence` holds `currentRunId`, lifecycle, and `retiredRunIds`.
+
+A full GET allocates `readId` and captures its base `canonicalEpoch` without
+advancing the epoch. It applies only when it is still the latest read and its
+base epoch is unchanged, then advances `canonicalEpoch`. Interaction history
+prepend is not a full read and merges only by stable `id` and monotonic
+`revision`.
+
+Ordered state SSE is accepted only in the current stream generation. For one
+Run, lifecycle may stay equal or advance through `starting < active < failed <
+release_requested < released`; same-stage queue, turn, and capability changes
+remain valid. A different non-retired Run may be established only from
+`released` state, including a released presentation with `runId = null`.
+Establishing it retires the prior non-null Run. Rejected Run transitions request
+one serialized canonical refresh and never revive a retired Run.
+
+Command start only captures its fence. An accepted outcome allocates a fresh
+canonical acceptance epoch, invalidates in-flight reads, and schedules the
+shared serialized refresh tail. A receipt does not unconditionally replace
+queue, lifecycle, or capability; message admission may merge its stable
+interaction identity. Rejections retain user feedback but do not apply stale
+payload presentation.
 
 Do not add a database-wide presentation revision unless a focused failing test
-proves that Task ID, read epoch, Run fence, and interaction revision are
+proves that Task ID, canonical/read/command/Run fences, and interaction revision are
 insufficient.
 
 ### 5.4 Files state ownership
@@ -392,16 +417,20 @@ item returns target conflict.
 
 ### 7.4 Terminal transport
 
-Close code `1009` means the current transport attempt is over:
+Public `openTerminal` means canonical authorization plus Run/runtime
+eligibility. It deliberately excludes process-local
+`occupiedTerminalTaskIds`; `openTaskTerminal` keeps that admission mutex and
+rejects a second concurrent transport.
 
-- disable socket intent for that attempt;
-- retain a safe user-facing reason;
-- dispose the socket and reconnect timer once;
-- show Connect again only when canonical Task capability permits it.
+The Web observes `taskId`, exact public `runId`, Sandbox lifecycle, and
+`openTerminal`. Task change, Run change, non-active lifecycle, or
+`openTerminal = false` terminates old transport intent. Terminal Start records
+only its target Run intent and waits for canonical observation of that exact Run
+as active and capable before connecting; a third Run cannot inherit the intent.
 
-Do not add heartbeat, distributed occupancy, or a general connection manager in
-this milestone. Those are separate problems unless a focused reproduction
-shows they are required to fix the confirmed oscillation.
+WebSocket exact-Run periodic recheck and close-code `1009` handling remain Slice
+3. Do not add distributed occupancy or a general connection manager in this
+milestone.
 
 ## 8. Implementation Slices
 
@@ -445,8 +474,13 @@ User result: no false definitive failure and no duplicate action after Retry.
 Implement:
 
 - the field ownership table in the Task and Terminal reducers;
-- Task read epochs and exact Run fencing;
+- separate canonical epoch, latest full-read identity, command fence, and
+  monotonic exact-Run lifecycle fence;
+- current-generation ordered state SSE and revision-only interaction merging;
 - one serialized canonical refresh after message admission;
+- public Terminal capability without process-local occupancy, while retaining
+  the admission mutex;
+- exact target-Run Terminal intent gated by canonical active capability;
 - per-scope Files mutation intent ordering;
 - stale list/detail response rejection.
 
@@ -457,10 +491,20 @@ skips the revision, add the smallest snapshot-bound ProductStore read.
 
 Focused behavior checks:
 
-- an older Task GET cannot restore an active Run after Release state arrived;
+- an older Task GET or later-arriving same-Run active SSE cannot undo accepted
+  Release;
+- Run-B retirement prevents late Run-A revival, while released/null admits one
+  legal new Run;
+- only the latest full GET with an unchanged base epoch applies; interaction
+  history merge does not invalidate it;
+- command acceptance remains valid across intervening SSE/interaction events,
+  while stale rejection cannot replace canonical state;
 - reverse-order post-message reads cannot remove the newer queue/interaction;
-- Terminal local state cannot restore Connect or shell against canonical
-  capability;
+- the refresh tail stays single-flight and continues after one failed refresh;
+- Terminal target intent waits for canonical exact-Run active capability, and
+  capability loss, non-active state, Run change, or Task change terminates it;
+- occupancy leaves public `openTerminal` true while the admission mutex rejects
+  a second connection;
 - an older directory response cannot undo a completed file mutation.
 
 User result: visible Task, Terminal, and Files state does not jump backward.
@@ -477,7 +521,12 @@ Implement:
 - persistent drain barrier plus process-local startup cancellation;
 - exact Botified target identities for Abort and Stop;
 - separate start-new-work and control-existing-work predicates;
+- WebSocket admission capture of exact public `runId` plus periodic canonical
+  recheck that closes exact-Run mismatch with `1008`;
 - Terminal `1009` transport-intent termination.
+
+Slice 3, not Slice 2, owns public `expectedRunId`, durable lifecycle/startup
+recovery, Release drain, WebSocket Run-bound recheck, and `1009` handling.
 
 Focused behavior checks:
 

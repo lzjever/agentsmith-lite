@@ -1494,20 +1494,18 @@ export class TaskService {
     const task = await this.requireTaskRecordForUser(userId, taskId, "view");
     const decoded = this.decodeInteractionCursor(task, cursor, "stream");
     if (!task.deletedAt) await this.ensureTaskConversation(task);
-    const snapshot = await this.store.readTaskInteractionSnapshot(task.id, null, 1);
-    if (!snapshot) throw new ProductError("Task not found", 404);
-    if (decoded.changeSeq > snapshot.latestChangeSeq) throw new ProductError("Task interaction cursor is invalid for this task", 400);
-    const changes = await this.store.listTaskInteractionChanges(task.id, decoded.changeSeq, Math.min(INTERACTION_SYNC_PAGE_LIMIT, Math.max(1, limit)));
-    const suppressedInteractionIds = new Set(snapshot.suppressedInteractionIds);
-    const lastSeq = changes.at(-1)?.changeSeq ?? decoded.changeSeq;
+    const page = await this.store.readTaskInteractionChangePage(task.id, decoded.changeSeq, Math.min(INTERACTION_SYNC_PAGE_LIMIT, Math.max(1, limit)));
+    if (!page) throw new ProductError("Task not found", 404);
+    if (decoded.changeSeq > page.latestChangeSeq) throw new ProductError("Task interaction cursor is invalid for this task", 400);
+    const suppressedInteractionIds = new Set(page.suppressedInteractionIds);
     const current = await this.store.findTask(task.id) ?? task;
-    const visibleChanges=changes.filter((change)=>!suppressedInteractionIds.has(change.interaction.id));
+    const visibleChanges=page.changes.filter((change)=>!suppressedInteractionIds.has(change.interaction.id));
     const presented=await this.presentTaskInteractions(userId,task.projectId,visibleChanges.map((change)=>change.interaction));
     return {
       changes: visibleChanges.map((change,index) => ({ cursor:this.encodeInteractionCursor(task,"stream",change.changeSeq), item:presented[index]! })),
-      streamCursor: this.encodeInteractionCursor(task, "stream", lastSeq),
+      streamCursor: this.encodeInteractionCursor(task, "stream", page.upperChangeSeq),
       done: Boolean(current.deletedAt),
-      state: await this.taskInteractionState(userId, current, snapshot)
+      state: await this.taskInteractionState(userId, current, page)
     };
   }
 
@@ -2690,7 +2688,7 @@ export class TaskService {
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn: canInteract && turn === "running",
       stopWork:canInteract&&turn==="running",
-      openTerminal: canWrite&&retained&&executionEligible&&!cleanupPending&&(releaseConfirmed||(run?.state==="active"&&(turn==="running"||turn==="ready")))&&!this.occupiedTerminalTaskIds.has(task.id),
+      openTerminal: canWrite&&retained&&executionEligible&&!cleanupPending&&(releaseConfirmed||(run?.state==="active"&&(turn==="running"||turn==="ready"))),
       editTask: canWrite && retained,
       releaseSandbox: canWrite && !task.deletedAt && Boolean(run&&run.state!=="released"),
       archiveTask: canWrite && retained && releaseConfirmed,

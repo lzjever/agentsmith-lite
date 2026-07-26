@@ -240,6 +240,17 @@ describe("file browser bounded presentation", () => {
 });
 
 describe("file browser refresh continuity", () => {
+  it("settles loading without replacing the snapshot when a mutation invalidates refresh", () => {
+    const entries = numberedEntries(3);
+    let state = createFileBrowserState(entries);
+    state = reduceFileBrowserState(state, { type: "refresh_started" });
+    state = reduceFileBrowserState(state, { type: "refresh_invalidated" });
+
+    assert.deepEqual(state.entries, entries);
+    assert.equal(state.loadState, "ready");
+    assert.equal(state.message, "");
+  });
+
   it("retains the last successful snapshot and selection when refresh fails", () => {
     const entries = numberedEntries(60);
     let state = createFileBrowserState(entries);

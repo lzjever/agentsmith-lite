@@ -40,6 +40,14 @@ import {
   nearestSurvivingLibrary,
   shouldResetFileLibraryContext
 } from "./fileLibraryPresentation";
+import {
+  createFileStateOwnership,
+  fileDetailScope,
+  fileDirectoryScope,
+  fileLibraryCollectionScope,
+  type FileStateMutationIntent,
+  type FileStateReadToken
+} from "./fileStateOwnership";
 
 type LoadState = "loading" | "ready" | "error";
 type LibraryLoadOptions = { repairFocus?: boolean };
@@ -75,9 +83,9 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const librariesRef = useRef<FileLibrary[]>([]);
   const selectedLibraryRef = useRef<string | null>(null);
   const pathRef = useRef("");
-  const libraryLoadVersion = useRef(0);
-  const fileLoadVersion = useRef(0);
-  const previewVersion = useRef(0);
+  const stateOwnership = useRef(createFileStateOwnership()).current;
+  const libraryScope = useMemo(() => fileLibraryCollectionScope(projectId), [projectId]);
+  const previewRead = useRef<FileStateReadToken | undefined>(undefined);
   const previewRequest = useRef<InlinePreviewRequest | undefined>(undefined);
   const input = useRef<HTMLInputElement>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
@@ -128,8 +136,15 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   const deleteLibraryTargetRef = useRef(deleteLibraryTarget);
   deleteLibraryTargetRef.current = deleteLibraryTarget;
 
-  const invalidateFileReads = useCallback(() => {
-    fileLoadVersion.current += 1;
+  const settleDirectoryLoading = useCallback((libraryId: string, directoryPath: string) => {
+    if (
+      selectedLibraryRef.current !== libraryId
+      || pathRef.current !== directoryPath
+      || browserRef.current.loadState !== "loading"
+    ) return;
+    const action = { type: "refresh_invalidated" } as const;
+    browserRef.current = reduceFileBrowserState(browserRef.current, action);
+    dispatchBrowser(action);
   }, []);
 
   const scheduleLibraryFocus = useCallback((libraryId: string | null) => {
@@ -157,19 +172,31 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   }, []);
 
   const clearPreview = useCallback(() => {
-    previewVersion.current += 1;
+    if (previewRead.current) {
+      stateOwnership.invalidateReads([previewRead.current.scope]);
+      previewRead.current = undefined;
+    }
     previewRequest.current?.dispose();
     previewRequest.current = undefined;
     setPreviewState({ status: "idle" });
-  }, []);
+  }, [stateOwnership]);
 
   const removeKnownEntryFromPresentation = useCallback((entryPath: string) => {
+    const libraryId = selectedLibraryRef.current;
+    if (!libraryId) return;
+    const directoryPath = pathRef.current;
+    const intent = stateOwnership.beginMutation([
+      fileDirectoryScope(projectId, libraryId, directoryPath),
+      fileDetailScope(projectId, libraryId, entryPath)
+    ]);
+    settleDirectoryLoading(libraryId, directoryPath);
+    clearPreview();
+    if (!stateOwnership.finishMutation(intent)) return;
     const action = { type: "entry_removed", path: entryPath } as const;
     browserRef.current = reduceFileBrowserState(browserRef.current, action);
     dispatchBrowser(action);
-    clearPreview();
     setMobileDetailsOpen(false);
-  }, [clearPreview]);
+  }, [clearPreview, projectId, settleDirectoryLoading, stateOwnership]);
 
   const resetFileContext = useCallback(() => {
     focusRestoreVersion.current += 1;
@@ -190,7 +217,12 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     }
     if (changed) {
       libraryFocusVersion.current += 1;
-      invalidateFileReads();
+      const previousLibraryId = selectedLibraryRef.current;
+      if (previousLibraryId) {
+        stateOwnership.invalidateReads([
+          fileDirectoryScope(projectId, previousLibraryId, pathRef.current)
+        ]);
+      }
       resetFileContext();
       setLibraryRetryError("");
     }
@@ -200,17 +232,24 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setPath(nextPath);
     setUploadFailure(undefined);
     setReplaceTarget(undefined);
-  }, [invalidateFileReads, resetFileContext]);
+  }, [projectId, resetFileContext, stateOwnership]);
 
   const loadLibraries = useCallback(async (options: LibraryLoadOptions = {}) => {
-    const version = ++libraryLoadVersion.current;
+    const read = stateOwnership.beginRead(libraryScope);
     setLibrariesState("loading");
     setLibrariesMessage("");
     const [libraryResult, capabilityResult] = await Promise.allSettled([
       apiClient.fileLibraries(projectId),
       apiClient.projectCapabilities(projectId)
     ]);
-    if (!mounted.current || version !== libraryLoadVersion.current) return;
+    const settlement = stateOwnership.finishRead(read);
+    if (!settlement.apply) {
+      if (!settlement.loadingReadRemains && mounted.current) {
+        setLibrariesState((state) => state === "loading" ? "ready" : state);
+      }
+      return;
+    }
+    if (!mounted.current) return;
     if (capabilityResult.status === "fulfilled") {
       setCanCreateLibrary(capabilityResult.value.canWriteFiles);
     }
@@ -252,7 +291,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     applyLocation(nextId, nextPath, resetCurrentContext);
     writeFileBrowserLocation(nextId, nextPath, true);
     if (options.repairFocus || deleteTargetClosed || selectedLibraryRemoved) scheduleLibraryFocus(nextId);
-  }, [applyLocation, projectId, scheduleLibraryFocus]);
+  }, [applyLocation, libraryScope, projectId, scheduleLibraryFocus, stateOwnership]);
 
   useEffect(() => {
     mounted.current = true;
@@ -273,9 +312,6 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     void loadLibraries();
     return () => {
       mounted.current = false;
-      libraryLoadVersion.current += 1;
-      fileLoadVersion.current += 1;
-      previewVersion.current += 1;
       previewRequest.current?.dispose();
       previewRequest.current = undefined;
     };
@@ -314,7 +350,9 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
 
   const loadFiles = useCallback(async (options: { preserveOperationMessage?: boolean } = {}) => {
     if (!selectedLibraryId) {
-      dispatchBrowser({ type: "refresh_succeeded", entries: [] });
+      const action: FileBrowserAction = { type: "refresh_succeeded", entries: [] };
+      browserRef.current = reduceFileBrowserState(browserRef.current, action);
+      dispatchBrowser(action);
       return [];
     }
     const requestedLibraryId = selectedLibraryId;
@@ -324,13 +362,28 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       return [];
     }
     const requestedPath = path;
-    const version = ++fileLoadVersion.current;
-    dispatchBrowser({ type: "refresh_started" });
+    const read = stateOwnership.beginRead(
+      fileDirectoryScope(projectId, requestedLibraryId, requestedPath)
+    );
+    const refreshStarted = { type: "refresh_started" } as const;
+    browserRef.current = reduceFileBrowserState(browserRef.current, refreshStarted);
+    dispatchBrowser(refreshStarted);
     if (!options.preserveOperationMessage) setOperationMessage("");
     setUploadFailure(undefined);
     try {
       const result = await apiClient.libraryFiles(projectId, requestedLibraryId, requestedPath);
-      if (!mounted.current || version !== fileLoadVersion.current || selectedLibraryRef.current !== requestedLibraryId || pathRef.current !== requestedPath) return;
+      const settlement = stateOwnership.finishRead(read);
+      if (!settlement.apply) {
+        if (!settlement.loadingReadRemains && mounted.current) {
+          settleDirectoryLoading(requestedLibraryId, requestedPath);
+        }
+        return;
+      }
+      if (
+        !mounted.current
+        || selectedLibraryRef.current !== requestedLibraryId
+        || pathRef.current !== requestedPath
+      ) return;
       const selectedPath = browserRef.current.selectedPath;
       if (selectedPath) {
         const currentSelected = browserRef.current.entries.find((entry) => entry.path === selectedPath);
@@ -343,22 +396,37 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
           clearPreview();
         }
       }
-      dispatchBrowser({ type: "refresh_succeeded", entries: result.entries });
+      const action = { type: "refresh_succeeded", entries: result.entries } as const;
+      browserRef.current = reduceFileBrowserState(browserRef.current, action);
+      dispatchBrowser(action);
       return result.entries;
     } catch (error) {
-      if (!mounted.current || version !== fileLoadVersion.current || selectedLibraryRef.current !== requestedLibraryId || pathRef.current !== requestedPath) return;
+      const settlement = stateOwnership.finishRead(read);
+      if (!settlement.apply) {
+        if (!settlement.loadingReadRemains && mounted.current) {
+          settleDirectoryLoading(requestedLibraryId, requestedPath);
+        }
+        return;
+      }
+      if (
+        !mounted.current
+        || selectedLibraryRef.current !== requestedLibraryId
+        || pathRef.current !== requestedPath
+      ) return;
       if (requestedPath && isFilePathNotFound(error)) {
         setFilesNotice("The previous folder was removed. Returned to the File Library root.");
         applyLocation(requestedLibraryId, "");
         writeFileBrowserLocation(requestedLibraryId, "", true);
         return;
       }
-      dispatchBrowser({
+      const action = {
         type: "refresh_failed",
         message: errorMessage(error, "Files could not be loaded.")
-      });
+      } as const;
+      browserRef.current = reduceFileBrowserState(browserRef.current, action);
+      dispatchBrowser(action);
     }
-  }, [applyLocation, clearPreview, path, projectId, selectedLibraryId]);
+  }, [applyLocation, clearPreview, path, projectId, selectedLibraryId, settleDirectoryLoading, stateOwnership]);
 
   const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId);
   const selectedLibraryPresentation = selectedLibrary ? fileLibraryPresentation(selectedLibrary) : undefined;
@@ -408,8 +476,37 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setDeleteFileTarget({ libraryId: selectedLibrary.id, entry });
   }
 
-  async function revokeWriteAccess(error: unknown, libraryId: string) {
+  function beginLibraryMutation(): FileStateMutationIntent {
+    const intent = stateOwnership.beginMutation([libraryScope], "library-mutation");
+    setLibrariesState((state) => state === "loading" ? "ready" : state);
+    return intent;
+  }
+
+  function beginFileMutation(
+    libraryId: string,
+    directoryPath: string,
+    filePath: string,
+    attemptGroup: string
+  ): FileStateMutationIntent {
+    const intent = stateOwnership.beginMutation([
+      fileDirectoryScope(projectId, libraryId, directoryPath),
+      fileDetailScope(projectId, libraryId, filePath)
+    ], attemptGroup);
+    settleDirectoryLoading(libraryId, directoryPath);
+    if (activePreviewPath === filePath) clearPreview();
+    return intent;
+  }
+
+  function revokeWriteAccess(error: unknown, libraryId: string) {
     if (!isReadOnlyMutationError(error)) return false;
+    const scopes = [libraryScope];
+    if (selectedLibraryRef.current === libraryId) {
+      scopes.push(fileDirectoryScope(projectId, libraryId, pathRef.current));
+    }
+    const intent = stateOwnership.beginMutation(scopes);
+    setLibrariesState((state) => state === "loading" ? "ready" : state);
+    settleDirectoryLoading(libraryId, pathRef.current);
+    if (!stateOwnership.finishMutation(intent)) return true;
     const next = librariesRef.current.map((library) => library.id === libraryId ? { ...library, capabilities: { ...library.capabilities, canRename: false, canDelete: false, canWriteFiles: false } } : library);
     librariesRef.current = next;
     setLibraries(next);
@@ -425,6 +522,15 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   }
 
   function removeStaleLibraryMutationAccess() {
+    const scopes = [libraryScope];
+    const libraryId = selectedLibraryRef.current;
+    if (libraryId) {
+      scopes.push(fileDirectoryScope(projectId, libraryId, pathRef.current));
+    }
+    const intent = stateOwnership.beginMutation(scopes);
+    setLibrariesState((state) => state === "loading" ? "ready" : state);
+    if (libraryId) settleDirectoryLoading(libraryId, pathRef.current);
+    if (!stateOwnership.finishMutation(intent)) return;
     const next = librariesRef.current.map((library) => ({
       ...library,
       capabilities: { canRename: false, canDelete: false, canWriteFiles: false }
@@ -449,29 +555,35 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       setReplaceTarget(undefined);
       return;
     }
+    const filePath = childLibraryPath(uploadPath, file.name);
+    const intent = beginFileMutation(libraryId, uploadPath, filePath, "file-upload");
+    const requestIdentity = `${libraryId}:${filePath}:${overwrite}:${file.size}:${file.lastModified}`;
+    let appliesPresentation = false;
     setUploading(true);
     setUploadFailure(undefined);
     setOperationMessage("");
-    const filePath = childLibraryPath(uploadPath, file.name);
-    const requestIdentity = `${libraryId}:${filePath}:${overwrite}:${file.size}:${file.lastModified}`;
     try {
-      const written = await apiClient.uploadLibraryFile(projectId, libraryId, filePath, file, { overwrite, idempotencyKey: mutationKeys.key("library-file.upload", requestIdentity) });
+      await apiClient.uploadLibraryFile(projectId, libraryId, filePath, file, { overwrite, idempotencyKey: mutationKeys.key("library-file.upload", requestIdentity) });
       mutationKeys.complete("library-file.upload", requestIdentity);
-      if (!mounted.current) return;
-      if (selectedLibraryRef.current === libraryId && pathRef.current === uploadPath) {
-        invalidateFileReads();
-        if (overwrite && browserRef.current.selectedPath === written.path) clearPreview();
-        await loadFiles();
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation) {
+        if (mounted.current) scheduleFileReconciliation(libraryId, uploadPath);
+        return;
       }
+      if (!mounted.current) return;
       if (overwrite) {
         setReplaceTarget(undefined);
         setReplaceError("");
       }
       showToast({ body: overwrite ? "File replaced" : "File uploaded", type: "info" });
+      if (selectedLibraryRef.current === libraryId && pathRef.current === uploadPath) {
+        await loadFiles();
+      }
     } catch (error) {
-      if (!mounted.current) return;
       if (error instanceof ApiError) mutationKeys.complete("library-file.upload", requestIdentity);
-      if (await revokeWriteAccess(error, libraryId)) return;
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation || !mounted.current) return;
+      if (revokeWriteAccess(error, libraryId)) return;
       if (selectedLibraryRef.current !== libraryId) return;
       if (!overwrite && error instanceof ApiError && error.status === 409 && error.message === "Project file already exists") {
         setReplaceError("");
@@ -482,7 +594,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
         setUploadFailure({ libraryId, file, path: uploadPath, message: errorMessage(error, "File could not be uploaded."), ...(error instanceof ApiError && error.code ? { code: error.code } : {}) });
       }
     } finally {
-      if (mounted.current) setUploading(false);
+      const attempt = stateOwnership.finishAttempt(intent);
+      if (mounted.current && !attempt.attemptsRemain) setUploading(false);
     }
   }
 
@@ -494,7 +607,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
   async function openPreview(entry: ProjectFile) {
     if (entry.type !== "file" || !selectedLibrary) return;
     const libraryId = selectedLibrary.id;
-    const version = ++previewVersion.current;
+    const read = stateOwnership.beginRead(
+      fileDetailScope(projectId, libraryId, entry.path)
+    );
+    previewRead.current = read;
     previewRequest.current?.dispose();
     setPreviewState({ status: "loading", path: entry.path });
     const request = createInlinePreviewRequest({
@@ -506,10 +622,40 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     previewRequest.current = request;
     try {
       const preview = await request.result;
-      if (!mounted.current || version !== previewVersion.current || selectedLibraryRef.current !== libraryId) return;
+      const settlement = stateOwnership.finishRead(read);
+      if (!settlement.apply) {
+        if (
+          !settlement.loadingReadRemains
+          && mounted.current
+          && previewRead.current === read
+        ) {
+          previewRead.current = undefined;
+          if (previewRequest.current === request) previewRequest.current = undefined;
+          request.dispose();
+          setPreviewState({ status: "idle" });
+        }
+        return;
+      }
+      if (!mounted.current || selectedLibraryRef.current !== libraryId) return;
+      if (previewRead.current === read) previewRead.current = undefined;
       setPreviewState({ status: "ready", preview: { ...preview, name: entry.name, path: entry.path } });
     } catch (error) {
-      if (!mounted.current || version !== previewVersion.current) return;
+      const settlement = stateOwnership.finishRead(read);
+      if (!settlement.apply) {
+        if (
+          !settlement.loadingReadRemains
+          && mounted.current
+          && previewRead.current === read
+        ) {
+          previewRead.current = undefined;
+          if (previewRequest.current === request) previewRequest.current = undefined;
+          request.dispose();
+          setPreviewState({ status: "idle" });
+        }
+        return;
+      }
+      if (!mounted.current) return;
+      if (previewRead.current === read) previewRead.current = undefined;
       if (isMissingFile(error)) {
         const focusCandidates = fileBrowserDeletionFocusCandidates(browserRef.current, entry.path);
         request.dispose();
@@ -548,6 +694,13 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     const requestIdentity = `${libraryId}:${target.entry.path}`;
     const focusCandidates = fileBrowserDeletionFocusCandidates(browserRef.current, target.entry.path);
     const objectLabel = target.entry.type === "directory" ? "Folder" : "File";
+    const intent = beginFileMutation(
+      libraryId,
+      parentLibraryPath(target.entry.path) ?? "",
+      target.entry.path,
+      "file-delete"
+    );
+    let appliesPresentation = false;
     setDeletingFile(true);
     try {
       let alreadyMissing = false;
@@ -556,6 +709,16 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
         alreadyMissing = true;
       });
       mutationKeys.complete("library-file.delete", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation) {
+        if (mounted.current) {
+          scheduleFileReconciliation(
+            libraryId,
+            parentLibraryPath(target.entry.path) ?? ""
+          );
+        }
+        return;
+      }
       if (!mounted.current) return;
       const targetIsCurrent = selectedLibraryRef.current === libraryId && pathRef.current === parentLibraryPath(target.entry.path);
       setDeleteFileTarget(undefined);
@@ -572,7 +735,9 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       }
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("library-file.delete", requestIdentity);
-      const accessChanged = await revokeWriteAccess(error, libraryId);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation || !mounted.current) return;
+      const accessChanged = revokeWriteAccess(error, libraryId);
       if (accessChanged) {
         setDeleteFileTarget(undefined);
         if (selectedLibraryRef.current === libraryId) {
@@ -582,7 +747,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       }
       throw new Error(errorMessage(error, `${objectLabel} could not be deleted.`));
     } finally {
-      if (mounted.current) setDeletingFile(false);
+      const attempt = stateOwnership.finishAttempt(intent);
+      if (mounted.current && !attempt.attemptsRemain) setDeletingFile(false);
     }
   }
 
@@ -608,7 +774,6 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         if (selectedLibraryRef.current !== libraryId || pathRef.current !== folderPath) return;
-        invalidateFileReads();
         void loadFiles();
       });
     });
@@ -648,11 +813,19 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     const name = libraryName.trim();
     if (!name || libraryMutationPending) return;
     const requestIdentity = name;
+    const intent = beginLibraryMutation();
+    let appliesPresentation = false;
     setLibraryMutationPending(true);
     setLibraryDialogError("");
     try {
       const created = await apiClient.createFileLibrary(projectId, name, mutationKeys.key("file-library.create", requestIdentity));
       mutationKeys.complete("file-library.create", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation) {
+        if (mounted.current) void loadLibraries();
+        return;
+      }
+      if (!mounted.current) return;
       const next = [...librariesRef.current, created];
       librariesRef.current = next;
       setLibraries(next);
@@ -661,9 +834,17 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       showToast({ body: "File Library created", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("file-library.create", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation || !mounted.current) return;
+      if (isReadOnlyMutationError(error)) {
+        removeStaleLibraryMutationAccess();
+        setCreateOpen(false);
+        return;
+      }
       setLibraryDialogError(errorMessage(error, "File Library could not be created."));
     } finally {
-      if (mounted.current) setLibraryMutationPending(false);
+      const attempt = stateOwnership.finishAttempt(intent);
+      if (mounted.current && !attempt.attemptsRemain) setLibraryMutationPending(false);
     }
   }
 
@@ -674,11 +855,19 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     if (!name) return;
     const target = renameTarget;
     const requestIdentity = `${target.id}:${target.updatedAt}:${name}`;
+    const intent = beginLibraryMutation();
+    let appliesPresentation = false;
     setLibraryMutationPending(true);
     setLibraryDialogError("");
     try {
       const renamed = await apiClient.renameFileLibrary(projectId, target.id, { name, expectedUpdatedAt: target.updatedAt }, mutationKeys.key("file-library.rename", requestIdentity));
       mutationKeys.complete("file-library.rename", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation) {
+        if (mounted.current) void loadLibraries();
+        return;
+      }
+      if (!mounted.current) return;
       const next = librariesRef.current.map((library) => library.id === renamed.id ? renamed : library);
       librariesRef.current = next;
       setLibraries(next);
@@ -686,9 +875,16 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       showToast({ body: "File Library renamed", type: "info" });
     } catch (error) {
       if (error instanceof ApiError) mutationKeys.complete("file-library.rename", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation || !mounted.current) return;
+      if (isReadOnlyMutationError(error)) {
+        removeStaleLibraryMutationAccess();
+        return;
+      }
       setLibraryDialogError(errorMessage(error, "File Library could not be renamed."));
     } finally {
-      if (mounted.current) setLibraryMutationPending(false);
+      const attempt = stateOwnership.finishAttempt(intent);
+      if (mounted.current && !attempt.attemptsRemain) setLibraryMutationPending(false);
     }
   }
 
@@ -704,14 +900,20 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     const presentation = fileLibraryPresentation(currentTarget);
     if ((retry && presentation.action !== "retry") || (!retry && presentation.action !== "delete")) return;
     const requestIdentity = currentTarget.id;
+    const intent = beginLibraryMutation();
+    let appliesPresentation = false;
     setLibraryMutationPending(true);
     setLibraryDeleteError("");
     setLibraryRetryError("");
     try {
       await apiClient.deleteFileLibrary(projectId, currentTarget.id, mutationKeys.key("file-library.delete", requestIdentity));
       mutationKeys.complete("file-library.delete", requestIdentity);
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation) {
+        if (mounted.current) void loadLibraries();
+        return;
+      }
       if (!mounted.current) return;
-      libraryLoadVersion.current += 1;
       setLibrariesState("ready");
       setLibrariesMessage("");
       const current = librariesRef.current;
@@ -734,6 +936,10 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     } catch (error) {
       if (error instanceof ApiError) {
         mutationKeys.complete("file-library.delete", requestIdentity);
+      }
+      appliesPresentation = stateOwnership.finishMutation(intent);
+      if (!appliesPresentation || !mounted.current) return;
+      if (error instanceof ApiError) {
         if (isCanonicalFileLibraryDeletionError(error.code)) {
           const previous = librariesRef.current;
           const targetStillSelected = selectedLibraryRef.current === currentTarget.id;
@@ -781,7 +987,8 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       if (retry) setLibraryRetryError(message);
       else setLibraryDeleteError(message);
     } finally {
-      if (mounted.current) setLibraryMutationPending(false);
+      const attempt = stateOwnership.finishAttempt(intent);
+      if (mounted.current && !attempt.attemptsRemain) setLibraryMutationPending(false);
     }
   }
 

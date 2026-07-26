@@ -374,7 +374,7 @@ describe("task interactions API", () => {
     assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
     const first = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
     await once(first, "open");
-    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, false);
+    assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
 
     const secondStatus = await rejectedWebSocketStatus(terminalUrl, auth.cookie);
     assert.equal(secondStatus, 403);

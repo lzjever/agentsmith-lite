@@ -6,7 +6,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useReducer,
   useRef,
   useState,
   type Dispatch,
@@ -14,7 +13,7 @@ import {
   type SetStateAction
 } from "react";
 import type {
-  TaskDetail,
+  TaskInteractionItem,
   TaskInteractionSnapshot,
   TaskInteractionStreamEvent,
   TaskMessageReceipt
@@ -23,11 +22,13 @@ import { ApiError, apiClient, taskCommandOutcomeError } from "../../lib/api/clie
 import { TaskComposer } from "./TaskComposer";
 import { TaskInteractionList } from "./TaskInteractionList";
 import {
-  createTaskPresentationState,
-  reduceTaskPresentationState,
+  convergeRequiredTaskRefresh,
+  createSingleFlightTaskRefresh,
   taskMessageReceiptError,
   type TaskAssistantPreview,
+  type TaskCommandFence,
   type TaskPresentationAction,
+  type TaskPresentationDispatch,
   type TaskPresentationState
 } from "./task-conversation-state";
 import { useTaskMutationKeys } from "./task-mutation-key";
@@ -48,7 +49,6 @@ import {
 } from "./task-draft-snapshot";
 
 type WorkspaceHandlers = {
-  onPresentationChange: (presentation: TaskDetail) => void;
   onUnavailable: ((reason: ApiError) => void) | undefined;
   onArtifactPublished: () => void;
 };
@@ -62,10 +62,12 @@ export function TaskConversationWorkspace({
   activeSandboxesHref,
   canManagePolicy,
   policyHref,
-  initialSnapshot,
-  presentation,
+  state,
+  dispatch,
+  captureCommandFence,
+  acceptCanonicalMutation,
+  requestCanonicalRefresh,
   commandBusy = false,
-  onPresentationChange,
   onUnavailable,
   onArtifactPublished
 }: {
@@ -75,10 +77,19 @@ export function TaskConversationWorkspace({
   activeSandboxesHref: string;
   canManagePolicy: boolean;
   policyHref: string;
-  initialSnapshot: TaskInteractionSnapshot;
-  presentation: TaskDetail;
+  state: TaskPresentationState;
+  dispatch: TaskPresentationDispatch;
+  captureCommandFence: () => TaskCommandFence;
+  acceptCanonicalMutation: (
+    kind: Extract<TaskPresentationAction, { type: "canonical_mutation_accepted" }>["kind"],
+    fence: TaskCommandFence,
+    options?: { targetRunId?: string; interaction?: TaskInteractionItem | null }
+  ) => TaskPresentationState;
+  requestCanonicalRefresh: (quiet?: boolean) => Promise<{
+    snapshot: TaskInteractionSnapshot;
+    applied: boolean;
+  } | undefined>;
   commandBusy?: boolean;
-  onPresentationChange: (presentation: TaskDetail) => void;
   onUnavailable?: (reason: ApiError) => void;
   onArtifactPublished: () => void;
 }) {
@@ -87,37 +98,37 @@ export function TaskConversationWorkspace({
   mutationKeysRef.current = mutationKeys;
 
   const handlers = useRef<WorkspaceHandlers>({
-    onPresentationChange,
     onUnavailable,
     onArtifactPublished
   });
   handlers.current = {
-    onPresentationChange,
     onUnavailable,
     onArtifactPublished
   };
 
   const viewport = useRef<HTMLDivElement>(null);
-  const streamCursor = useRef<string | undefined>(initialSnapshot.streamCursor);
+  const streamCursor = useRef<string | undefined>(state.streamCursor);
   const streamController = useRef<AbortController | undefined>(undefined);
   const streamGeneration = useRef(0);
+  const streamEventSequence = useRef(0);
   const reconnectTimer = useRef<number | undefined>(undefined);
   const reconnectCount = useRef(0);
+  const singleFlightCanonicalRefresh = useRef<ReturnType<
+    typeof createSingleFlightTaskRefresh
+  > | null>(null);
+  singleFlightCanonicalRefresh.current ??= createSingleFlightTaskRefresh();
   const badCursorRecoveryUsed = useRef(false);
-  const appliedSnapshot = useRef(initialSnapshot);
   const initialScrollPending = useRef(true);
   const loadingEarlierRef = useRef(false);
   const historyAnchor = useRef<HistoryAnchor | undefined>(undefined);
   const previewTimer = useRef<number | undefined>(undefined);
   const latestPreview = useRef<TaskAssistantPreview>(null);
-  const stateRef = useRef<TaskPresentationState>(
-    createTaskPresentationState({ snapshot: initialSnapshot })
-  );
-  const [state, dispatch] = useReducer(
-    reduceTaskPresentationState,
-    stateRef.current
-  );
+  const stateRef = useRef<TaskPresentationState>(state);
   stateRef.current = state;
+
+  useEffect(() => {
+    streamCursor.current = state.streamCursor;
+  }, [state.streamCursor]);
 
   const [error, setError] = useState("");
   const [previewUnavailable, setPreviewUnavailable] = useState("");
@@ -233,40 +244,19 @@ export function TaskConversationWorkspace({
     }
   }, []);
 
-  const applySnapshot = useCallback((next: TaskInteractionSnapshot) => {
+  const applyCanonicalRefreshResult = useCallback((next: TaskInteractionSnapshot) => {
     preserveReadingAnchor();
     clearPreviewTimer();
     streamCursor.current = next.streamCursor;
-    dispatch({ type: "snapshot_reset", snapshot: next });
-    handlers.current.onPresentationChange(next.presentation);
     setPreviewUnavailable("");
     if (stateRef.current.followMode === "following") scrollToLatest();
   }, [clearPreviewTimer, preserveReadingAnchor, scrollToLatest]);
 
-  useEffect(() => {
-    if (appliedSnapshot.current === initialSnapshot) return;
-    appliedSnapshot.current = initialSnapshot;
-    const controller = streamController.current;
-    streamController.current = undefined;
-    streamGeneration.current += 1;
-    controller?.abort();
-    badCursorRecoveryUsed.current = false;
-    reconnectCount.current = 0;
-    setError("");
-    applySnapshot(initialSnapshot);
-    setRefreshGeneration((value) => value + 1);
-  }, [applySnapshot, initialSnapshot]);
-
-  useLayoutEffect(() => {
-    if (stateRef.current.presentation === presentation) return;
-    dispatch({ type: "presentation_received", presentation });
-  }, [presentation]);
-
   const recoverFreshSnapshot = useCallback(async () => {
-    const next = await apiClient.getTaskInteractions(taskId);
-    applySnapshot(next);
-    return next;
-  }, [applySnapshot, taskId]);
+    const result = await requestCanonicalRefresh(true);
+    if (result?.applied) applyCanonicalRefreshResult(result.snapshot);
+    return result;
+  }, [applyCanonicalRefreshResult, requestCanonicalRefresh]);
 
   useLayoutEffect(() => {
     const anchor = historyAnchor.current;
@@ -295,8 +285,14 @@ export function TaskConversationWorkspace({
       const nextController = new AbortController();
       const generation = streamGeneration.current + 1;
       streamGeneration.current = generation;
+      streamEventSequence.current = 0;
       controller = nextController;
       streamController.current = nextController;
+      dispatch({
+        type: "stream_started",
+        taskId,
+        streamGeneration: generation
+      });
       dispatch({
         type: "connection_changed",
         connection: reconnectCount.current > 0 ? "reconnecting" : "connecting"
@@ -314,14 +310,17 @@ export function TaskConversationWorkspace({
               || streamController.current !== nextController
             ) return;
             if (event.type === "done") done = true;
+            const streamSequence = ++streamEventSequence.current;
             applyStreamEvent(event, {
+              taskId,
               dispatch,
+              streamGeneration: generation,
+              streamSequence,
               clearPreviewTimer,
               queuePreview,
               setError,
               setPreviewUnavailable,
               handlers,
-              applySnapshot,
               streamCursor,
               reconnectCount,
               badCursorRecoveryUsed,
@@ -394,7 +393,7 @@ export function TaskConversationWorkspace({
       if (streamController.current === controller) streamController.current = undefined;
       if (reconnectTimer.current !== undefined) window.clearTimeout(reconnectTimer.current);
     };
-  }, [applySnapshot, clearPreviewTimer, queuePreview, recoverFreshSnapshot, refreshGeneration, scrollToLatest, taskId]);
+  }, [clearPreviewTimer, dispatch, queuePreview, recoverFreshSnapshot, refreshGeneration, scrollToLatest, taskId]);
 
   useEffect(() => () => clearPreviewTimer(), [clearPreviewTimer]);
 
@@ -412,7 +411,8 @@ export function TaskConversationWorkspace({
         setAnchorGeneration((value) => value + 1);
       }
       dispatch({
-        type: "earlier_prepend",
+        type: "history_prepend_received",
+        taskId,
         items: older.items,
         nextPageCursor: older.nextPageCursor,
         hasMoreBefore: older.hasMoreBefore
@@ -485,7 +485,7 @@ export function TaskConversationWorkspace({
     }
     setMessageStorageUnavailable(false);
     setMessagePayloadLocked(true);
-    dispatch({ type: "message_send_requested" });
+    const commandFence = captureCommandFence();
     const outcome = await apiClient.sendTaskMessage(taskId, content, attempt.key);
     const retireRejection = outcome.outcome === "rejected_before_acceptance"
       && outcome.keyDisposition === "retire";
@@ -523,8 +523,12 @@ export function TaskConversationWorkspace({
       }
       const reason = taskCommandOutcomeError(outcome);
       const canonical = reason instanceof ApiError ? reason.presentation ?? undefined : undefined;
-      dispatch({ type: "message_rejected", ...(canonical ? { presentation: canonical } : {}) });
-      if (canonical) handlers.current.onPresentationChange(canonical);
+      dispatch({
+        type: "canonical_mutation_rejected",
+        taskId,
+        fence: commandFence,
+        ...(canonical ? { presentation: canonical } : {})
+      });
       if (
         reason instanceof ApiError
         && (
@@ -539,8 +543,9 @@ export function TaskConversationWorkspace({
 
     const receipt: TaskMessageReceipt = outcome;
     const safeError = taskMessageReceiptError(receipt);
-    dispatch({ type: "message_accepted", receipt });
-    handlers.current.onPresentationChange(receipt.presentation);
+    stateRef.current = acceptCanonicalMutation("message", commandFence, {
+      interaction: receipt.interaction
+    });
     if (
       !clearTaskMessageCommandAttempt(
         storage,
@@ -563,6 +568,7 @@ export function TaskConversationWorkspace({
   async function updateQueued(messageId: string, content: string) {
     const identity = `${messageId}:${content}`;
     let receipt: TaskMessageReceipt;
+    const commandFence = captureCommandFence();
     try {
       receipt = await apiClient.updateTaskMessage(
         taskId,
@@ -571,6 +577,7 @@ export function TaskConversationWorkspace({
         mutationKeysRef.current.key("task-message-edit", identity)
       );
       mutationKeysRef.current.complete("task-message-edit", identity);
+      stateRef.current = acceptCanonicalMutation("message_edit", commandFence);
     } catch (reason) {
       mutationKeysRef.current.completeApiFailure(reason, "task-message-edit", identity);
       const recovered = await recoverMutation(reason);
@@ -584,6 +591,7 @@ export function TaskConversationWorkspace({
 
   async function deleteQueued(messageId: string) {
     let receipt: TaskMessageReceipt;
+    const commandFence = captureCommandFence();
     try {
       receipt = await apiClient.deleteTaskMessage(
         taskId,
@@ -591,6 +599,7 @@ export function TaskConversationWorkspace({
         mutationKeysRef.current.key("task-message-delete", messageId)
       );
       mutationKeysRef.current.complete("task-message-delete", messageId);
+      stateRef.current = acceptCanonicalMutation("message_delete", commandFence);
     } catch (reason) {
       mutationKeysRef.current.completeApiFailure(reason, "task-message-delete", messageId);
       const recovered = await recoverMutation(reason);
@@ -602,7 +611,7 @@ export function TaskConversationWorkspace({
     if (safeError) throw new Error(safeError);
   }
 
-  const refreshAfterMessageMutation = useCallback(async () => {
+  const performCanonicalRefresh = useCallback(async () => {
     const controller = streamController.current;
     streamController.current = undefined;
     streamGeneration.current += 1;
@@ -613,9 +622,11 @@ export function TaskConversationWorkspace({
       reconnectTimer.current = undefined;
     }
 
+    let applied = false;
     try {
-      const next = await apiClient.getTaskInteractions(taskId);
-      applySnapshot(next);
+      const result = await requestCanonicalRefresh(true);
+      applied = result?.applied === true;
+      if (result?.applied) applyCanonicalRefreshResult(result.snapshot);
       badCursorRecoveryUsed.current = false;
       reconnectCount.current = 0;
       setError("");
@@ -629,7 +640,65 @@ export function TaskConversationWorkspace({
     } finally {
       setRefreshGeneration((value) => value + 1);
     }
-  }, [applySnapshot, clearPreviewTimer, taskId]);
+    return applied;
+  }, [applyCanonicalRefreshResult, clearPreviewTimer, requestCanonicalRefresh]);
+
+  const runRequiredCanonicalRefresh = useCallback(
+    () => singleFlightCanonicalRefresh.current!(async () => {
+      const before = stateRef.current;
+      const started = dispatch({
+        type: "canonical_refresh_started",
+        taskId
+      });
+      stateRef.current = started;
+      if (started === before || !started.canonicalRefreshInFlight) return false;
+      try {
+        return await performCanonicalRefresh();
+      } finally {
+        stateRef.current = dispatch({
+          type: "canonical_refresh_finished",
+          taskId
+        });
+      }
+    }),
+    [dispatch, performCanonicalRefresh, taskId]
+  );
+
+  const refreshAfterMessageMutation = useCallback(
+    () => runRequiredCanonicalRefresh().then(() => undefined),
+    [runRequiredCanonicalRefresh]
+  );
+
+  useEffect(() => {
+    if (!state.canonicalRefreshRequired) return;
+    let disposed = false;
+    let retryTimer: number | undefined;
+    let resolveRetry: (() => void) | undefined;
+
+    void convergeRequiredTaskRefresh(
+      runRequiredCanonicalRefresh,
+      () => !disposed && stateRef.current.canonicalRefreshRequired,
+      (delay) => new Promise((resolve) => {
+        if (disposed) {
+          resolve();
+          return;
+        }
+        resolveRetry = resolve;
+        retryTimer = window.setTimeout(() => {
+          retryTimer = undefined;
+          resolveRetry = undefined;
+          resolve();
+        }, delay);
+      })
+    );
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+      resolveRetry?.();
+      resolveRetry = undefined;
+    };
+  }, [runRequiredCanonicalRefresh, state.canonicalRefreshRequired]);
 
   const recoverMutation = useCallback(async (reason: unknown): Promise<boolean> => {
     if (
@@ -649,6 +718,7 @@ export function TaskConversationWorkspace({
   }, [recoverFreshSnapshot]);
 
   const stopWork = useCallback(async (interactionId: string) => {
+    const commandFence = captureCommandFence();
     try {
       await apiClient.stopTaskWork(
         taskId,
@@ -656,12 +726,13 @@ export function TaskConversationWorkspace({
         mutationKeysRef.current.key("task-work-stop", interactionId)
       );
       mutationKeysRef.current.complete("task-work-stop", interactionId);
+      stateRef.current = acceptCanonicalMutation("stop", commandFence);
     } catch (reason) {
       mutationKeysRef.current.completeApiFailure(reason, "task-work-stop", interactionId);
       await recoverMutation(reason);
       throw reason;
     }
-  }, [recoverMutation, taskId]);
+  }, [acceptCanonicalMutation, captureCommandFence, recoverMutation, taskId]);
 
   function retry() {
     reconnectCount.current = 0;
@@ -682,9 +753,10 @@ export function TaskConversationWorkspace({
     scrollToLatest("smooth");
   }
 
-  if (!state.initialized) {
-    const canRetryRuntime = initialSnapshot.presentation.sandboxState.state === "starting"
-      || initialSnapshot.presentation.sandboxState.state === "active";
+  const currentPresentation = state.presentation;
+  if (!state.initialized || !currentPresentation) {
+    const canRetryRuntime = currentPresentation?.sandboxState.state === "starting"
+      || currentPresentation?.sandboxState.state === "active";
     return (
       <section className="grid h-full min-h-0 flex-1 place-items-center border border-border bg-muted px-5">
         {error ? (
@@ -713,7 +785,6 @@ export function TaskConversationWorkspace({
     );
   }
 
-  const currentPresentation = state.presentation ?? initialSnapshot.presentation;
   const { currentTurn, sandboxState, capabilities } = currentPresentation;
   const runtimeAvailable = sandboxState.state === "starting" || sandboxState.state === "active";
   const unavailableMessage = sandboxState.state === "released"
@@ -812,13 +883,15 @@ export function TaskConversationWorkspace({
 function applyStreamEvent(
   event: TaskInteractionStreamEvent,
   context: {
-    dispatch: Dispatch<TaskPresentationAction>;
+    taskId: string;
+    dispatch: TaskPresentationDispatch;
+    streamGeneration: number;
+    streamSequence: number;
     clearPreviewTimer: (interactionId?: string) => void;
     queuePreview: (preview: Exclude<TaskAssistantPreview, null>) => void;
     setError: Dispatch<SetStateAction<string>>;
     setPreviewUnavailable: Dispatch<SetStateAction<string>>;
     handlers: MutableRefObject<WorkspaceHandlers>;
-    applySnapshot: (snapshot: TaskInteractionSnapshot) => void;
     streamCursor: MutableRefObject<string | undefined>;
     reconnectCount: MutableRefObject<number>;
     badCursorRecoveryUsed: MutableRefObject<boolean>;
@@ -827,14 +900,19 @@ function applyStreamEvent(
   }
 ) {
   switch (event.type) {
-    case "interaction":
+    case "interaction": {
       context.streamCursor.current = event.cursor;
       if (event.item.kind === "assistant_message") context.clearPreviewTimer();
-      context.dispatch({ type: "interaction_received", item: event.item });
+      context.dispatch({
+        type: "interaction_received",
+        taskId: context.taskId,
+        item: event.item
+      });
       context.dispatch({ type: "stream_cursor_changed", streamCursor: event.cursor });
       if (context.followMode === "following") context.scrollToLatest();
       if (event.item.kind === "file") context.handlers.current.onArtifactPublished();
       return;
+    }
     case "assistant_preview":
       context.queuePreview(event);
       return;
@@ -845,14 +923,18 @@ function applyStreamEvent(
         interactionId: event.interactionId
       });
       return;
-    case "state":
+    case "state": {
       context.dispatch({
-        type: "state_received",
+        type: "stream_state_received",
+        taskId: context.taskId,
+        streamGeneration: context.streamGeneration,
+        streamSequence: context.streamSequence,
+        runId: event.presentation.sandboxState.runId,
         queuedMessages: event.queuedMessages,
         presentation: event.presentation
       });
-      context.handlers.current.onPresentationChange(event.presentation);
       return;
+    }
     case "connection":
       if (event.connectionState === "connected" || event.connectionState === "recovered") {
         context.reconnectCount.current = 0;
@@ -875,9 +957,17 @@ function applyStreamEvent(
           : ""
       );
       return;
-    case "reset":
-      context.applySnapshot(event.snapshot);
+    case "reset": {
+      context.streamCursor.current = event.snapshot.streamCursor;
+      context.dispatch({
+        type: "stream_snapshot_received",
+        taskId: context.taskId,
+        streamGeneration: context.streamGeneration,
+        streamSequence: context.streamSequence,
+        snapshot: event.snapshot
+      });
       return;
+    }
     case "reconnect":
       context.dispatch({ type: "connection_changed", connection: "reconnecting" });
       return;

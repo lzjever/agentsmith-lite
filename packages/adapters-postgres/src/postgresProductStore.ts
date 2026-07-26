@@ -116,6 +116,7 @@ import type {
   ProjectMembershipCandidateStoreQuery,
   ProjectMembershipCandidateStoreItem,
   TaskInteractionChangeInput,
+  TaskInteractionChangeStorePage,
   TaskInteractionCorrelation,
   TaskInteractionPageAnchor,
   TaskInteractionStoreSnapshot
@@ -1828,9 +1829,30 @@ export class PostgresProductStore implements ProductStore {
     }, "repeatable read");
   }
 
+  async readTaskInteractionChangePage(taskId: string, afterChangeSeq: number, limit: number): Promise<TaskInteractionChangeStorePage | null> {
+    return transaction(this.pool, async (client) => {
+      const task = await client.query<AgentTaskRow>("select * from agent_tasks where id=$1", [taskId]);
+      if (!task.rows[0]) return null;
+      const maximum = Number((await client.query<{ maximum: string }>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1", [taskId])).rows[0]?.maximum ?? 0);
+      const changeRows = await client.query<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and change_seq>$2 order by change_seq limit $3", [taskId,afterChangeSeq,boundedInteractionLimit(limit)]);
+      const messages = await client.query<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null and delivery_status in ('pending','dispatching','failed') order by created_at,id", [taskId]);
+      const suppressed = await client.query<{interaction_id:string}>(`select distinct c.interaction_id from task_messages m join task_interaction_changes c on c.task_id=m.task_id and c.source_kind='product' and c.source_id='message:'||m.id where m.task_id=$1 and (m.deleted_at is not null or m.delivery_status in ('pending','dispatching','failed'))`,[taskId]);
+      const changes = changeRows.rows.map(mapTaskInteractionChange);
+      const row = task.rows[0];
+      return {
+        changes,
+        upperChangeSeq: changes.at(-1)?.changeSeq ?? afterChangeSeq,
+        latestChangeSeq: maximum,
+        queuedMessages: messages.rows.map(mapPersistedTaskMessage),
+        suppressedInteractionIds: suppressed.rows.map((value)=>value.interaction_id),
+        historyStatus: row.interaction_history_status,
+        lastSyncedAt: row.interaction_last_synced_at ? toIso(row.interaction_last_synced_at) : null
+      };
+    }, "repeatable read");
+  }
+
   async listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]> {
-    const rows = await this.queryRows<TaskInteractionChangeRow>("select * from task_interaction_changes where task_id=$1 and change_seq>$2 order by change_seq limit $3", [taskId,afterChangeSeq,Math.max(1,limit)]);
-    return rows.map(mapTaskInteractionChange);
+    return (await this.readTaskInteractionChangePage(taskId, afterChangeSeq, limit))?.changes ?? [];
   }
 
   async findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null> {
@@ -2110,6 +2132,10 @@ async function transaction<T>(pool: PgPool, callback: (client: PoolClient) => Pr
   } finally {
     client.release();
   }
+}
+
+function boundedInteractionLimit(limit: number): number {
+  return Math.max(1, Math.floor(limit));
 }
 
 async function lockCredentialVersion(client: PoolClient, projectId: string, credentialId: string, expectedVersion: number): Promise<void> {

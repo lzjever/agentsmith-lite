@@ -107,6 +107,7 @@ import type {
   PersistTaskInteractionMutationResult,
   PersistedTaskInteractionChange,
   TaskInteractionChangeInput,
+  TaskInteractionChangeStorePage,
   TaskInteractionCorrelation,
   TaskInteractionPageAnchor,
   TaskInteractionStoreSnapshot
@@ -1497,20 +1498,39 @@ export class InMemoryProductStore implements ProductStore {
 
   async readTaskInteractionSnapshot(taskId: string, before: TaskInteractionPageAnchor | null, limit: number): Promise<TaskInteractionStoreSnapshot | null> {
     if (!this.tasks.has(taskId)) return null;
-    const maximum = this.interactionChanges.filter((change) => change.interaction.taskId === taskId).reduce((value, change) => Math.max(value, change.changeSeq), 0);
-    const latest = latestInteractions(this.interactionChanges.filter((change) => change.interaction.taskId === taskId && change.changeSeq <= maximum));
+    const taskChanges = this.interactionChanges.filter((change) => change.interaction.taskId === taskId).map(clone);
+    const taskMessages = this.messages.filter((message) => message.taskId === taskId).map(clone);
+    const maximum = taskChanges.reduce((value, change) => Math.max(value, change.changeSeq), 0);
+    const latest = latestInteractions(taskChanges.filter((change) => change.changeSeq <= maximum));
     const eligible = before ? latest.filter((item) => item.position < before.position || item.position === before.position && item.id < before.interactionId) : latest;
     const page = eligible.slice(Math.max(0, eligible.length - Math.max(1, limit)));
     const hasMoreBefore = eligible.length > page.length;
     const sync = this.interactionSync.get(taskId) ?? { sourceCursor: null, historyStatus: "gap" as const, lastSyncedAt: null };
-    const queuedMessages = this.messages.filter((message) => message.taskId === taskId && !message.deletedAt && ["pending","dispatching","failed"].includes(message.deliveryStatus ?? "pending")).sort((left,right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).map(clone);
-    const suppressedMessageIds = new Set(this.messages.filter((message) => message.taskId === taskId && (Boolean(message.deletedAt) || ["pending","dispatching","failed"].includes(message.deliveryStatus ?? "pending"))).map((message) => message.id));
-    const suppressedInteractionIds = [...new Set(this.interactionChanges.filter((change) => change.interaction.taskId === taskId && change.sourceKind === "product" && change.sourceId.startsWith("message:") && !change.sourceId.endsWith(":boundary") && suppressedMessageIds.has(change.sourceId.slice("message:".length))).map((change) => change.interaction.id))];
+    const { queuedMessages, suppressedInteractionIds } = taskInteractionMessageFacts(taskMessages, taskChanges);
     return { items: page.map(clone), queuedMessages, suppressedInteractionIds, nextPageAnchor: hasMoreBefore && page[0] ? { position: page[0].position, interactionId: page[0].id } : null, hasMoreBefore, latestChangeSeq: maximum, sourceCursor: sync.sourceCursor, historyStatus: sync.historyStatus, lastSyncedAt: sync.lastSyncedAt };
   }
 
+  async readTaskInteractionChangePage(taskId: string, afterChangeSeq: number, limit: number): Promise<TaskInteractionChangeStorePage | null> {
+    if (!this.tasks.has(taskId)) return null;
+    const taskChanges = this.interactionChanges.filter((change) => change.interaction.taskId === taskId).sort((left,right) => left.changeSeq - right.changeSeq).map(clone);
+    const taskMessages = this.messages.filter((message) => message.taskId === taskId).map(clone);
+    const boundedChanges = taskChanges.filter((change) => change.changeSeq > afterChangeSeq).slice(0, boundedInteractionLimit(limit));
+    const latestChangeSeq = taskChanges.at(-1)?.changeSeq ?? 0;
+    const sync = clone(this.interactionSync.get(taskId)) ?? { sourceCursor: null, historyStatus: "gap" as const, lastSyncedAt: null };
+    const { queuedMessages, suppressedInteractionIds } = taskInteractionMessageFacts(taskMessages, taskChanges);
+    return {
+      changes: boundedChanges,
+      upperChangeSeq: boundedChanges.at(-1)?.changeSeq ?? afterChangeSeq,
+      latestChangeSeq,
+      queuedMessages,
+      suppressedInteractionIds,
+      historyStatus: sync.historyStatus,
+      lastSyncedAt: sync.lastSyncedAt
+    };
+  }
+
   async listTaskInteractionChanges(taskId: string, afterChangeSeq: number, limit: number): Promise<PersistedTaskInteractionChange[]> {
-    return this.interactionChanges.filter((change) => change.interaction.taskId === taskId && change.changeSeq > afterChangeSeq).sort((left,right) => left.changeSeq - right.changeSeq).slice(0, Math.max(1, limit)).map(clone);
+    return (await this.readTaskInteractionChangePage(taskId, afterChangeSeq, limit))?.changes ?? [];
   }
 
   async findLatestTaskInteractionChange(taskId: string, interactionId: string): Promise<PersistedTaskInteractionChange | null> {
@@ -2229,6 +2249,37 @@ function latestInteractions(changes: PersistedTaskInteractionChange[]): TaskInte
     if (!current || change.interaction.revision > current.interaction.revision || change.interaction.revision === current.interaction.revision && change.changeSeq > current.changeSeq) latest.set(change.interaction.id, change);
   }
   return [...latest.values()].map((change) => change.interaction).sort((left,right) => left.position - right.position || left.id.localeCompare(right.id));
+}
+
+function taskInteractionMessageFacts(
+  messages: PersistedTaskMessage[],
+  changes: PersistedTaskInteractionChange[]
+): { queuedMessages: PersistedTaskMessage[]; suppressedInteractionIds: string[] } {
+  const unresolved = new Set(["pending", "dispatching", "failed"]);
+  const queuedMessages = messages
+    .filter((message) => !message.deletedAt && unresolved.has(message.deliveryStatus ?? "pending"))
+    .sort((left,right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map(clone);
+  const suppressedMessageIds = new Set(
+    messages
+      .filter((message) => Boolean(message.deletedAt) || unresolved.has(message.deliveryStatus ?? "pending"))
+      .map((message) => message.id)
+  );
+  const suppressedInteractionIds = [...new Set(
+    changes
+      .filter((change) =>
+        change.sourceKind === "product" &&
+        change.sourceId.startsWith("message:") &&
+        !change.sourceId.endsWith(":boundary") &&
+        suppressedMessageIds.has(change.sourceId.slice("message:".length))
+      )
+      .map((change) => change.interaction.id)
+  )];
+  return { queuedMessages, suppressedInteractionIds };
+}
+
+function boundedInteractionLimit(limit: number): number {
+  return Math.max(1, Math.floor(limit));
 }
 
 function hasOlderUnresolvedMessage(messages:PersistedTaskMessage[],changes:PersistedTaskInteractionChange[],target:PersistedTaskMessage):boolean{
