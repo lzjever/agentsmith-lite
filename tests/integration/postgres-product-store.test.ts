@@ -10,7 +10,7 @@ import { createCredentialCrypto, credentialAad } from "../../packages/applicatio
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import type { ProjectAlertRule } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
-import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskArtifact, PersistedTaskMessage } from "../../packages/ports/src/store.js";
+import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, BeginTerminalStartInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskArtifact, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 import { readPostgresTestUrl } from "./postgres-test-database.js";
 
 const postgresUrl=readPostgresTestUrl();
@@ -1161,6 +1161,426 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,2);
   });
 
+  it("converges concurrent Terminal and message restarts without PostgreSQL deadlock",async()=>{
+    const terminalStore=fixtureStore("terminal-message-terminal");
+    const messageStore=fixtureStore("terminal-message-message");
+    const task=taskRecord("task_terminal_message_race","library_terminal_message_race","run_terminal_message_released");
+    const released=run(task,task.currentRunId!,"released");
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Terminal message race"),sandboxRun:released
+    })).kind,"created");
+    const terminalTask={...task,currentRunId:"run_terminal_race",updatedAt:"2026-07-23T00:01:10.000Z"};
+    const terminalRun=run(terminalTask,terminalTask.currentRunId!,"starting");
+    const terminalInput:BeginTerminalStartInput={
+      taskId:task.id,
+      idempotency:{
+        actorId:"user_atomic",projectId:task.projectId,operation:"terminal-start",
+        key:"terminal-message-race-terminal",requestHash:"terminal-message-race-terminal-hash",
+        resourceId:terminalRun.runId,claimToken:"terminal-message-race-terminal-claim",
+        now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+      },
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      restart:{
+        expectedReleasedRunId:released.runId,task:terminalTask,
+        runtimeState:{botifiedBaseUrl:"http://terminal-race"},
+        sandboxRun:terminalRun,reservedAt:terminalTask.updatedAt
+      },
+      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+      rejectedAuditEvent:{
+        id:"audit_terminal_message_race_terminal_rejected",projectId:task.projectId,
+        actorId:"user_atomic",action:"sandbox.started",status:"rejected",
+        resourceKind:"sandbox",resourceId:task.id,
+        detail:{taskId:task.id,trigger:"terminal"},createdAt:at
+      }
+    };
+    const messageInput=atomicMessage(task,released,"tmrace","run_message_race");
+    const blocker=fixtureClient("terminal-message-blocker");
+    const observer=fixtureClient("terminal-message-observer");
+    await blocker.connect();
+    await observer.connect();
+    const pending:Promise<unknown>[]=[];
+    let blockerCommitted=false;
+    let terminalResult:Awaited<ReturnType<typeof store.beginTerminalStart>>;
+    let messageResult:Awaited<ReturnType<typeof store.createTaskMessageAtomically>>;
+    try{
+      await blocker.query("begin");
+      const blockerPid=(await blocker.query<{pid:number}>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      await blocker.query("select pg_advisory_xact_lock(hashtextextended($1,0))",["agentsmith-lite:sandbox:agentsmith"]);
+      const messageOperation=messageStore.createTaskMessageAtomically(messageInput);
+      pending.push(messageOperation);
+      const messagePid=await waitForBlockedOperation(observer,{
+        expectedBlockers:[{pid:blockerPid,state:"idle in transaction",waitEventType:"Client"}],
+        applicationName:"terminal-message-message",waitEvent:"advisory",
+        queryFragment:"pg_advisory_xact_lock",name:"message restart",operation:messageOperation
+      });
+      const terminalOperation=terminalStore.beginTerminalStart(terminalInput);
+      pending.push(terminalOperation);
+      await waitForBlockedOperation(observer,{
+        expectedBlockers:[
+          {pid:blockerPid,state:"idle in transaction",waitEventType:"Client"},
+          {pid:messagePid,state:"active",waitEventType:"Lock"}
+        ],
+        applicationName:"terminal-message-terminal",waitEvent:"advisory",
+        queryFragment:"pg_advisory_xact_lock",name:"Terminal restart",operation:terminalOperation
+      });
+      await blocker.query("commit");
+      blockerCommitted=true;
+      [terminalResult,messageResult]=await completesWithoutDeadlock(
+        Promise.all([terminalOperation,messageOperation]),
+        5_000
+      );
+    }finally{
+      if(!blockerCommitted)await blocker.query("rollback").catch(()=>undefined);
+      await Promise.allSettled(pending);
+      await blocker.end();
+      await observer.end();
+      await terminalStore.close();
+      await messageStore.close();
+    }
+
+    assert.ok(terminalResult.kind==="claimed"||terminalResult.kind==="replay");
+    if(terminalResult.kind==="replay")assert.equal(terminalResult.responseStatus,409);
+    assert.equal(messageResult.kind,"created");
+    const liveRuns=(await store.sandboxRuns.list()).filter((candidate)=>candidate.taskId===task.id&&candidate.state!=="released");
+    assert.equal(liveRuns.length,1);
+    assert.equal((await store.findTask(task.id))?.currentRunId,liveRuns[0]?.runId);
+    const terminalReceipt=await store.findTaskIdempotency({
+      actorId:terminalInput.idempotency.actorId,
+      projectId:terminalInput.idempotency.projectId,
+      operation:terminalInput.idempotency.operation,
+      key:terminalInput.idempotency.key,
+      requestHash:terminalInput.idempotency.requestHash
+    });
+    assert.equal(terminalReceipt?.kind,terminalResult.kind==="claimed"?"in_progress":"replay");
+    assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeSandboxes,1);
+  });
+
+  it("redirects concurrent same-key Terminal starts to the persisted exact owner",async()=>{
+    const firstStore=fixtureStore("terminal-same-key-first");
+    const secondStore=fixtureStore("terminal-same-key-second");
+    const task=taskRecord("task_terminal_same_key","library_terminal_same_key","run_terminal_same_key_released");
+    const released=run(task,task.currentRunId!,"released");
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Terminal same key"),sandboxRun:released
+    })).kind,"created");
+    const terminalInput=(label:string):BeginTerminalStartInput=>{
+      const replacement={...task,currentRunId:`run_terminal_same_key_${label}`,updatedAt:"2026-07-23T00:01:10.000Z"};
+      const replacementRun=run(replacement,replacement.currentRunId!,"starting");
+      return{
+        taskId:task.id,
+        idempotency:{
+          actorId:"user_atomic",projectId:task.projectId,operation:"terminal-start",
+          key:"terminal-same-key",requestHash:"terminal-same-key-hash",
+          resourceId:replacementRun.runId,claimToken:`terminal-same-key-${label}-claim`,
+          now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+        },
+        admission:{namespace:"agentsmith",namespaceLimit:100},
+        restart:{
+          expectedReleasedRunId:released.runId,task:replacement,
+          runtimeState:{botifiedBaseUrl:"http://terminal-same-key"},
+          sandboxRun:replacementRun,reservedAt:replacement.updatedAt
+        },
+        rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+        rejectedAuditEvent:{
+          id:`audit_terminal_same_key_${label}_rejected`,projectId:task.projectId,
+          actorId:"user_atomic",action:"sandbox.started",status:"rejected",
+          resourceKind:"sandbox",resourceId:task.id,
+          detail:{taskId:task.id,trigger:"terminal"},createdAt:at
+        }
+      };
+    };
+    const firstInput=terminalInput("first");
+    const secondInput=terminalInput("second");
+    const blocker=fixtureClient("terminal-same-key-blocker");
+    const observer=fixtureClient("terminal-same-key-observer");
+    await blocker.connect();
+    await observer.connect();
+    const pending:Promise<unknown>[]=[];
+    let blockerCommitted=false;
+    let firstResult:Awaited<ReturnType<typeof store.beginTerminalStart>>;
+    let secondResult:Awaited<ReturnType<typeof store.beginTerminalStart>>;
+    try{
+      await blocker.query("begin");
+      const blockerPid=(await blocker.query<{pid:number}>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      await blocker.query("select pg_advisory_xact_lock(hashtextextended($1,0))",["agentsmith-lite:sandbox:agentsmith"]);
+      const firstOperation=firstStore.beginTerminalStart(firstInput);
+      pending.push(firstOperation);
+      const firstPid=await waitForBlockedOperation(observer,{
+        expectedBlockers:[{pid:blockerPid,state:"idle in transaction",waitEventType:"Client"}],
+        applicationName:"terminal-same-key-first",waitEvent:"advisory",
+        queryFragment:"pg_advisory_xact_lock",name:"first same-key Terminal start",operation:firstOperation
+      });
+      const secondOperation=secondStore.beginTerminalStart(secondInput);
+      pending.push(secondOperation);
+      await waitForBlockedOperation(observer,{
+        expectedBlockers:[
+          {pid:blockerPid,state:"idle in transaction",waitEventType:"Client"},
+          {pid:firstPid,state:"active",waitEventType:"Lock"}
+        ],
+        applicationName:"terminal-same-key-second",waitEvent:"advisory",
+        queryFragment:"pg_advisory_xact_lock",name:"second same-key Terminal start",operation:secondOperation
+      });
+      await blocker.query("commit");
+      blockerCommitted=true;
+      [firstResult,secondResult]=await completesWithoutDeadlock(Promise.all([firstOperation,secondOperation]),5_000);
+    }finally{
+      if(!blockerCommitted)await blocker.query("rollback").catch(()=>undefined);
+      await Promise.allSettled(pending);
+      await blocker.end();
+      await observer.end();
+      await firstStore.close();
+      await secondStore.close();
+    }
+
+    assert.deepEqual([firstResult.kind,secondResult.kind],["claimed","in_progress"]);
+    if(firstResult.kind!=="claimed"||secondResult.kind!=="in_progress")assert.fail("Expected one claimed owner and one in-progress replay");
+    assert.equal(secondResult.run.runId,firstResult.run.runId);
+    const liveRuns=(await store.sandboxRuns.list()).filter((candidate)=>candidate.taskId===task.id&&candidate.state!=="released");
+    assert.deepEqual(liveRuns.map((candidate)=>candidate.runId),[firstResult.run.runId]);
+    const receipt=await store.findTaskIdempotency({
+      actorId:firstInput.idempotency.actorId,
+      projectId:firstInput.idempotency.projectId,
+      operation:firstInput.idempotency.operation,
+      key:firstInput.idempotency.key,
+      requestHash:firstInput.idempotency.requestHash
+    });
+    assert.equal(receipt?.kind,"in_progress");
+    if(receipt?.kind==="in_progress")assert.equal(receipt.resourceId,firstResult.run.runId);
+  });
+
+  it("does not deadlock activation Task-to-Run locks against restart admission",async()=>{
+    const activationStore=fixtureStore("activation-admission-activation");
+    const messageStore=fixtureStore("activation-admission-message");
+    const task=taskRecord("task_activation_admission","library_activation_admission","run_activation_admission");
+    const starting=run(task,task.currentRunId!,"starting");
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...createAdmissionReceipt(task,"activation-admission"),
+      newFileLibrary:library(task.fileLibraryId!,"Activation admission"),sandboxRun:starting
+    })).kind,"created");
+    assert.ok(await store.markTaskSandboxStartupReady({
+      taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,readyAt:at
+    }));
+    const startupClaimToken="activation-admission-startup-claim";
+    assert.equal((await store.claimSandboxStartup({
+      taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,
+      claimToken:startupClaimToken,claimedAt:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+    })).kind,"claimed");
+    const actionDeadlineAt="2026-07-23T00:04:00.000Z";
+    assert.ok(await store.beginSandboxStartupAction({
+      taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,
+      claimToken:startupClaimToken,actionDeadlineAt,startedAt:"2026-07-23T00:01:00.000Z"
+    }));
+    const blocker=fixtureClient("activation-admission-blocker");
+    const observer=fixtureClient("activation-admission-observer");
+    await blocker.connect();
+    await observer.connect();
+    const pending:Promise<unknown>[]=[];
+    let blockerCommitted=false;
+    let activationResult:Awaited<ReturnType<typeof store.activateTaskSandboxRun>>;
+    let messageResult:Awaited<ReturnType<typeof store.createTaskMessageAtomically>>;
+    try{
+      await blocker.query("begin");
+      const blockerPid=(await blocker.query<{pid:number}>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      await blocker.query("select id from agent_tasks where id=$1 for update",[task.id]);
+      const activationOperation=activationStore.activateTaskSandboxRun({
+        taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,
+        startupClaimToken,actionDeadlineAt,activatedAt:"2026-07-23T00:02:00.000Z",
+        auditEvent:{
+          id:"audit_activation_admission_started",projectId:task.projectId,actorId:null,
+          subjectUserId:"user_atomic",action:"sandbox.started",status:"accepted",
+          resourceKind:"sandbox",resourceId:task.id,
+          detail:{taskId:task.id,runId:starting.runId},createdAt:"2026-07-23T00:02:00.000Z"
+        }
+      });
+      pending.push(activationOperation);
+      const activationPid=await waitForBlockedOperation(observer,{
+        expectedBlockers:[{pid:blockerPid,state:"idle in transaction",waitEventType:"Client"}],
+        applicationName:"activation-admission-activation",waitEvent:"transactionid",
+        queryFragment:"agent_tasks",name:"Run activation",operation:activationOperation
+      });
+      const messageOperation=messageStore.createTaskMessageAtomically(
+        atomicMessage(task,starting,"activate","run_activation_admission_restart")
+      );
+      pending.push(messageOperation);
+      await waitForBlockedOperation(observer,{
+        expectedBlockers:[{pid:activationPid,state:"active",waitEventType:"Lock"}],
+        applicationName:"activation-admission-message",waitEvent:"tuple",
+        queryFragment:"agent_tasks",name:"message restart admission",operation:messageOperation
+      });
+      await blocker.query("commit");
+      blockerCommitted=true;
+      [activationResult,messageResult]=await completesWithoutDeadlock(
+        Promise.all([activationOperation,messageOperation]),
+        5_000
+      );
+    }finally{
+      if(!blockerCommitted)await blocker.query("rollback").catch(()=>undefined);
+      await Promise.allSettled(pending);
+      await blocker.end();
+      await observer.end();
+      await activationStore.close();
+      await messageStore.close();
+    }
+
+    assert.equal(activationResult.kind,"activated");
+    assert.equal(messageResult.kind,"created");
+    if(messageResult.kind==="created")assert.equal(messageResult.restarted,false);
+    assert.equal((await store.findTask(task.id))?.currentRunId,starting.runId);
+    assert.deepEqual(
+      (await store.sandboxRuns.list()).filter((candidate)=>candidate.taskId===task.id&&candidate.state!=="released").map((candidate)=>candidate.runId),
+      [starting.runId]
+    );
+  });
+
+  it("terminalizes a PostgreSQL Terminal owner through Release before admitting a new key",async()=>{
+    const task=taskRecord("task_terminal_release_owner","library_terminal_release_owner","run_terminal_release_base");
+    const releasedBase=run(task,task.currentRunId!,"released");
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Terminal release owner"),sandboxRun:releasedBase
+    })).kind,"created");
+    const terminalInput=(label:string,released:PersistedSandboxRunState,newRunId:string):BeginTerminalStartInput=>{
+      const replacement={...task,currentRunId:newRunId,updatedAt:`2026-07-23T00:0${label==="first"?1:4}:00.000Z`};
+      const replacementRun=run(replacement,newRunId,"starting");
+      return{
+        taskId:task.id,
+        idempotency:{
+          actorId:"user_atomic",projectId:task.projectId,operation:"terminal-start",
+          key:`terminal-release-${label}`,requestHash:`terminal-release-${label}-hash`,
+          resourceId:newRunId,claimToken:`terminal-release-${label}-claim`,
+          now:replacement.updatedAt,leaseExpiresAt:"2026-07-23T00:10:00.000Z"
+        },
+        admission:{namespace:"agentsmith",namespaceLimit:100},
+        restart:{
+          expectedReleasedRunId:released.runId,task:replacement,
+          runtimeState:{botifiedBaseUrl:`http://terminal-release-${label}`},
+          sandboxRun:replacementRun,reservedAt:replacement.updatedAt
+        },
+        rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+        rejectedAuditEvent:{
+          id:`audit_terminal_release_${label}_rejected`,projectId:task.projectId,
+          actorId:"user_atomic",action:"sandbox.started",status:"rejected",
+          resourceKind:"sandbox",resourceId:task.id,
+          detail:{taskId:task.id,trigger:"terminal"},createdAt:replacement.updatedAt
+        }
+      };
+    };
+    const firstInput=terminalInput("first",releasedBase,"run_terminal_release_first");
+    const first=await store.beginTerminalStart(firstInput);
+    assert.equal(first.kind,"claimed");
+    if(first.kind!=="claimed")return;
+    const releaseClaim={
+      actorId:"user_atomic",projectId:task.projectId,operation:"release-sandbox" as const,
+      key:"terminal-owner-release",requestHash:"terminal-owner-release-hash",
+      resourceId:first.run.runId,claimToken:"terminal-owner-release-claim",
+      now:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:10:00.000Z"
+    };
+    assert.equal((await store.beginTaskIdempotency(releaseClaim)).kind,"claimed");
+    const requested={...first.run,state:"release_requested" as const,releaseReason:"requested" as const,releaseRequestedAt:releaseClaim.now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,fencingToken:first.run.fencingToken+1,updatedAt:releaseClaim.now};
+    assert.equal(await store.requestTaskSandboxRelease({
+      runId:first.run.runId,taskId:task.id,expectedFencingToken:first.run.fencingToken,run:requested,
+      idempotency:{
+        actorId:releaseClaim.actorId,projectId:releaseClaim.projectId,operation:releaseClaim.operation,
+        key:releaseClaim.key,requestHash:releaseClaim.requestHash,claimToken:releaseClaim.claimToken,
+        responseStatus:200,responseBody:{released:true},updatedAt:releaseClaim.now
+      }
+    }),"applied");
+    const terminalReceipt=await store.findTaskIdempotency({
+      actorId:firstInput.idempotency.actorId,projectId:firstInput.idempotency.projectId,
+      operation:firstInput.idempotency.operation,key:firstInput.idempotency.key,
+      requestHash:firstInput.idempotency.requestHash
+    });
+    assert.equal(terminalReceipt?.kind,"replay");
+    if(terminalReceipt?.kind==="replay")assert.equal(terminalReceipt.responseStatus,502);
+
+    const releasedAt="2026-07-23T00:03:00.000Z";
+    const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+    assert.equal(await store.completeSandboxRunRelease({
+      runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
+      settlement:{
+        runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
+        taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
+        startedAt:requested.startedAt,releasedAt,durationSeconds:0,resources:requested.resourceSnapshot,
+        releaseReason:"requested"
+      },
+      auditEvent:{
+        id:"audit_terminal_release_owner_released",projectId:requested.projectId,actorId:null,
+        subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
+        resourceKind:"sandbox",resourceId:requested.taskId,
+        detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:"requested"},createdAt:releasedAt
+      }
+    }),"applied");
+    assert.equal((await store.beginTerminalStart(
+      terminalInput("second",released,"run_terminal_release_second")
+    )).kind,"claimed");
+  });
+
+  it("rejects an old released Run when a concurrent PostgreSQL transaction retargets its Task",async()=>{
+    const task=taskRecord("task_release_retarget","library_release_retarget","run_release_retarget_a");
+    const runA=run(task,task.currentRunId!,"released");
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:false,admission:{namespace:"agentsmith",namespaceLimit:100},
+      newFileLibrary:library(task.fileLibraryId!,"Release retarget"),sandboxRun:runA
+    })).kind,"created");
+    const runBId="run_release_retarget_b";
+    const setup=fixtureClient("release-retarget-setup");
+    await setup.connect();
+    try{await cloneReleasedSandboxRun(setup,runA.runId,runBId);}finally{await setup.end();}
+    const claim={
+      actorId:"user_atomic",projectId:task.projectId,operation:"release-sandbox" as const,
+      key:"release-retarget",requestHash:"release-retarget-hash",resourceId:runA.runId,
+      claimToken:"release-retarget-claim",now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+    };
+    assert.equal((await store.beginTaskIdempotency(claim)).kind,"claimed");
+    const releaseStore=fixtureStore("release-retarget-operation");
+    const blocker=fixtureClient("release-retarget-blocker");
+    const observer=fixtureClient("release-retarget-observer");
+    await blocker.connect();
+    await observer.connect();
+    const pending:Promise<unknown>[]=[];
+    let committed=false;
+    let result:Awaited<ReturnType<typeof store.requestTaskSandboxRelease>>;
+    try{
+      await blocker.query("begin");
+      const blockerPid=(await blocker.query<{pid:number}>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      await blocker.query("select id from agent_tasks where id=$1 for update",[task.id]);
+      await blocker.query(
+        "select 1 from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",
+        [claim.actorId,claim.projectId,claim.operation,claim.key]
+      );
+      const operation=releaseStore.requestTaskSandboxRelease({
+        runId:runA.runId,taskId:task.id,expectedFencingToken:runA.fencingToken,run:runA,
+        idempotency:{
+          actorId:claim.actorId,projectId:claim.projectId,operation:claim.operation,key:claim.key,
+          requestHash:claim.requestHash,claimToken:claim.claimToken,responseStatus:200,
+          responseBody:{outcome:"completed",runId:runA.runId},updatedAt:at
+        }
+      });
+      pending.push(operation);
+      await waitForBlockedOperation(observer,{
+        expectedBlockers:[{pid:blockerPid,state:"idle in transaction",waitEventType:"Client"}],
+        applicationName:"release-retarget-operation",waitEvent:"transactionid",
+        queryFragment:"agent_tasks",name:"exact Release fence",operation
+      });
+      await blocker.query("update agent_tasks set current_run_id=$2 where id=$1",[task.id,runBId]);
+      await blocker.query("commit");
+      committed=true;
+      result=await completesWithoutDeadlock(operation,5_000);
+    }finally{
+      if(!committed)await blocker.query("rollback").catch(()=>undefined);
+      await Promise.allSettled(pending);
+      await blocker.end();
+      await observer.end();
+      await releaseStore.close();
+    }
+    assert.equal(result,"conflict");
+    assert.equal((await store.findTask(task.id))?.currentRunId,runBId);
+    assert.equal((await store.sandboxRuns.get(runBId))?.state,"released");
+  });
+
   it("reclaims an expired message lease without changing its persisted identity",async()=>{
     const task={...taskRecord("task_reclaim","library_reclaim","unused"),currentRunId:null};
     assert.equal((await store.createTaskAtomically({task,reserveActive:false, admission:{namespace:"agentsmith",namespaceLimit:100},newFileLibrary:library(task.fileLibraryId!,"Reclaim")})).kind,"created");
@@ -1721,6 +2141,114 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     }
   }
 
+  async function waitForBlockedOperation(
+    client:pg.Client,
+    target:{
+      expectedBlockers:Array<{
+        pid:number;
+        state:"idle in transaction"|"active";
+        waitEventType:"Client"|"Lock";
+      }>;
+      applicationName:string;
+      waitEvent:"advisory"|"transactionid"|"tuple";
+      queryFragment:string;
+      name:string;
+      operation:Promise<unknown>;
+    }
+  ):Promise<number>{
+    const observe=async()=>{
+      const deadline=Date.now()+5_000;
+      while(Date.now()<deadline){
+        const result=await client.query<{pid:number;blockers:number[]}>(
+          `select activity.pid,pg_blocking_pids(activity.pid) as blockers
+             from pg_stat_activity activity
+            where activity.datname=current_database()
+              and activity.pid<>pg_backend_pid()
+              and activity.application_name=$1
+              and activity.wait_event_type='Lock'
+              and lower(activity.wait_event)=$2
+              and position(lower($3) in lower(activity.query))>0`,
+          [target.applicationName,target.waitEvent,target.queryFragment]
+        );
+        if(result.rows.length===1){
+          const expectedPids=target.expectedBlockers.map((blocker)=>blocker.pid).sort((left,right)=>left-right);
+          assert.deepEqual([...result.rows[0]!.blockers].sort((left,right)=>left-right),expectedPids);
+          const blockerStates=await client.query<{pid:number;state:string;wait_event_type:string|null}>(
+            "select pid,state,wait_event_type from pg_stat_activity where pid=any($1::integer[]) order by pid",
+            [expectedPids]
+          );
+          assert.deepEqual(
+            blockerStates.rows.map((blocker)=>({
+              pid:blocker.pid,state:blocker.state,waitEventType:blocker.wait_event_type
+            })),
+            [...target.expectedBlockers].sort((left,right)=>left.pid-right.pid)
+          );
+          return result.rows[0]!.pid;
+        }
+        if(result.rows.length>1){
+          assert.fail(`Expected one blocked ${target.name} backend, found ${result.rows.length}`);
+        }
+        await new Promise<void>((resolve)=>setImmediate(resolve));
+      }
+      const observed=await client.query<{
+        pid:number;application_name:string;state:string;wait_event_type:string|null;wait_event:string|null;blockers:number[];query:string
+      }>(
+        `select pid,application_name,state,wait_event_type,wait_event,pg_blocking_pids(pid) as blockers,left(query,300) as query
+           from pg_stat_activity
+          where datname=current_database()
+            and (application_name=$1 or pid=any($2::integer[]) or pid=pg_backend_pid())
+          order by pid`
+        ,[target.applicationName,target.expectedBlockers.map((blocker)=>blocker.pid)]
+      );
+      assert.fail(`Expected one blocked ${target.name} backend with exact blockers ${JSON.stringify(target.expectedBlockers.map((blocker)=>blocker.pid).sort((left,right)=>left-right))}; observed ${JSON.stringify(observed.rows)}`);
+    };
+    return Promise.race([
+      observe(),
+      target.operation.then(
+        (value)=>{throw new Error(`${target.name} completed before blocking on ${target.waitEvent}: ${JSON.stringify(value)}`);},
+        (error)=>{throw error;}
+      )
+    ]);
+  }
+
+  function fixtureStore(applicationName:string):PostgresProductStore{
+    return new PostgresProductStore(fixturePostgresUrl(applicationName));
+  }
+
+  function fixtureClient(applicationName:string):pg.Client{
+    return new pg.Client({connectionString:fixturePostgresUrl(applicationName)});
+  }
+
+  function fixturePostgresUrl(applicationName:string):string{
+    if(!postgresUrl)throw new Error("POSTGRES_TEST_URL is required");
+    const url=new URL(postgresUrl);
+    url.searchParams.set("application_name",applicationName);
+    return url.toString();
+  }
+
+  async function cloneReleasedSandboxRun(client:pg.Client,sourceRunId:string,targetRunId:string):Promise<void>{
+    await client.query(
+      `insert into sandbox_runs (
+         run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,state,
+         namespace,image,pvc_name,project_sub_path,file_library_root_sub_path,botified_port,
+         resource_names,service_key_secret_ref,directories,resource_limits,resource_snapshot,
+         model_ca,timeline_cursor,terminal_failure,failure_code,failure_cause,fencing_token,
+         resume_unfinished,startup_ready_at,startup_action_deadline_at,startup_claim_token,
+         startup_lease_expires_at,cleanup_claimed_at,cleanup_attempts,last_cleanup_at,last_cleanup_error,
+         release_reason,started_at,release_requested_at,failed_at,released_at,created_at,updated_at
+       )
+       select $2,workspace_id,project_id,task_id,file_library_id,started_by_user_id,'released',
+              namespace,image,pvc_name,project_sub_path,file_library_root_sub_path,botified_port,
+              resource_names,service_key_secret_ref,directories,resource_limits,resource_snapshot,
+              model_ca,timeline_cursor,terminal_failure,null,null,1,
+              false,startup_ready_at,null,null,null,null,0,null,null,
+              'requested',started_at,updated_at,null,updated_at,created_at,updated_at
+         from sandbox_runs
+        where run_id=$1`,
+      [sourceRunId,targetRunId]
+    );
+  }
+
   async function waitForBlockedQuery(client:pg.Client,query:string):Promise<void>{
     const deadline=Date.now()+5_000;
     while(Date.now()<deadline){
@@ -1749,6 +2277,15 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       ]);
     }finally{
       if(timeout)clearTimeout(timeout);
+    }
+  }
+
+  async function completesWithoutDeadlock<T>(operation:Promise<T>,timeoutMs:number):Promise<T>{
+    try{
+      return await completesWithin(operation,timeoutMs);
+    }catch(error){
+      assert.notEqual((error as {code?:string}).code,"40P01","PostgreSQL reported a deadlock");
+      throw error;
     }
   }
 

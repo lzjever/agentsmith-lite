@@ -288,6 +288,56 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
     });
   });
 
+  it("recovers only the canonical starting Terminal owner in migration 077",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"077_terminal_start_owner",async(client,migrationSql)=>{
+      const fixture=await insertMigration077TerminalReceipts(client);
+      await client.query(migrationSql);
+      await client.query(migrationSql);
+
+      const receipts=await client.query<{
+        idempotency_key:string;resource_id:string;status:string;response_status:number|null;response_body:Record<string,unknown>|null;terminal_task_id:string|null
+      }>(
+        `select idempotency_key,resource_id,status,response_status,response_body,terminal_task_id
+           from task_idempotency_records
+          where project_id=$1 and operation='terminal-start'
+          order by idempotency_key`,
+        [fixture.projectId]
+      );
+      const byKey=new Map(receipts.rows.map((receipt)=>[receipt.idempotency_key,receipt]));
+      assert.deepEqual(
+        {
+          status:byKey.get(fixture.startingOwnerKey)?.status,
+          resourceId:byKey.get(fixture.startingOwnerKey)?.resource_id,
+          terminalTaskId:byKey.get(fixture.startingOwnerKey)?.terminal_task_id
+        },
+        {status:"in_progress",resourceId:fixture.startingRunId,terminalTaskId:fixture.startingTaskId}
+      );
+      for(const key of [fixture.startingDuplicateKey,fixture.loserKey]){
+        const receipt=byKey.get(key);
+        assert.equal(receipt?.status,"completed");
+        assert.equal(receipt?.response_status,409);
+        assert.equal(receipt?.response_body?.outcome,"rejected_before_acceptance");
+      }
+      const active=byKey.get(fixture.activeKey);
+      assert.equal(active?.status,"completed");
+      assert.equal(active?.response_status,200);
+      assert.deepEqual(active?.response_body,{
+        outcome:"completed",keyDisposition:"retire",runId:fixture.activeRunId
+      });
+      const released=byKey.get(fixture.releasedKey);
+      assert.equal(released?.status,"completed");
+      assert.equal(released?.response_status,502);
+      assert.equal(released?.response_body?.outcome,"completed");
+      assert.equal(released?.response_body?.runId,fixture.releasedRunId);
+      assert.equal((released?.response_body?.error as {code?:string}|undefined)?.code,"sandbox_start_failed");
+      const ownerIndex=await client.query<{indexdef:string}>(
+        "select indexdef from pg_indexes where schemaname=current_schema() and indexname='task_idempotency_terminal_start_owner_unique'"
+      );
+      assert.equal(ownerIndex.rowCount,1);
+    });
+  });
+
   it("upgrades an applied migration 069 with actor-scoped Alerts and orphan cleanup in migration 070",async()=>{
     assert.ok(postgresUrl);
     await withPendingMigrationDatabase(postgresUrl,"070_actor_scoped_alerts_and_orphan_cleanup",async(client,migrationSql)=>{
@@ -948,6 +998,106 @@ async function insertProjectFixture(client: pg.Client, prefix: string) {
     [projectId, workspaceId, userId, `workspaces/${workspaceId}/projects/${projectId}`, timestamp]
   );
   return { suffix, userId, workspaceId, projectId };
+}
+
+async function insertMigration077TerminalReceipts(client:pg.Client){
+  const ids=await insertProjectFixture(client,"terminal_077");
+  const timestamp=new Date().toISOString();
+  const credentialId=`credential_${ids.suffix}`,endpointId=`endpoint_${ids.suffix}`;
+  await client.query(
+    `insert into project_credentials (
+       id,project_id,name,type,base_url,key_id,nonce,ciphertext,auth_tag,fingerprint,
+       version,created_at,last_rotated_at,updated_at
+     ) values ($1,$2,'Provider','api_key','https://api.example.test','test',$3,$4,$5,'migration',1,$6,null,$6)`,
+    [credentialId,ids.projectId,Buffer.alloc(12),Buffer.from("ciphertext"),Buffer.alloc(16),timestamp]
+  );
+  await client.query(
+    `insert into model_endpoints (
+       id,project_id,name,protocol,base_url,model,credential_id,capabilities,
+       request_timeout_secs,health_status,created_at,updated_at
+     ) values ($1,$2,'Provider endpoint','openai_chat_completions','https://api.example.test','model',$3,'[]'::jsonb,30,'healthy',$4,$4)`,
+    [endpointId,ids.projectId,credentialId,timestamp]
+  );
+  const createTask=async(label:string,currentState:"starting"|"active"|"released")=>{
+    const taskId=`task_${label}_${ids.suffix}`,libraryId=`library_${label}_${ids.suffix}`,runId=`run_${label}_${ids.suffix}`;
+    await client.query(
+      `insert into file_libraries (
+         id,workspace_id,project_id,name,root_sub_path,lifecycle_status,created_by_user_id,created_at,updated_at
+       ) values ($1,$2,$3,$4,$5,'active',$6,$7,$7)`,
+      [libraryId,ids.workspaceId,ids.projectId,`Library ${label}`,`libraries/${libraryId}/home`,ids.userId,timestamp]
+    );
+    await client.query(
+      `insert into agent_tasks (
+         id,workspace_id,project_id,endpoint_id,file_library_id,created_by_user_id,title,prompt,
+         agent_context,current_run_id,interaction_history_status,created_at,updated_at
+       ) values ($1,$2,$3,$4,$5,$6,$7,'Work','',null,'complete',$8,$8)`,
+      [taskId,ids.workspaceId,ids.projectId,endpointId,libraryId,ids.userId,`Task ${label}`,timestamp]
+    );
+    const insertRun=async(candidateRunId:string,state:"starting"|"active"|"released")=>{
+      const active=state==="active",released=state==="released";
+      await client.query(
+        `insert into sandbox_runs (
+           run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,state,
+           namespace,image,pvc_name,project_sub_path,file_library_root_sub_path,botified_port,
+           resource_names,service_key_secret_ref,directories,resource_limits,resource_snapshot,
+           failure_code,failure_cause,fencing_token,startup_ready_at,release_reason,started_at,
+           release_requested_at,failed_at,released_at,created_at,updated_at
+         ) values (
+           $1,$2,$3,$4,$5,$6,$7,'agentsmith','fixture:test','files',$8,$9,3099,
+           $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,
+           null,null,1,$15,$16,$17,$18,null,$19,$20,$20
+         )`,
+        [
+          candidateRunId,ids.workspaceId,ids.projectId,taskId,libraryId,ids.userId,state,
+          `workspaces/${ids.workspaceId}/projects/${ids.projectId}`,`libraries/${libraryId}/home`,
+          JSON.stringify({pod:`pod-${candidateRunId}`,service:`service-${candidateRunId}`,configMap:`config-${candidateRunId}`,secret:`secret-${candidateRunId}`}),
+          JSON.stringify({name:`secret-${candidateRunId}`,key:"BOTIFIED_SERVICE_KEY"}),
+          JSON.stringify({libraryHome:"/workspace/library",botified:"/workspace/botified"}),
+          JSON.stringify({cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"}),
+          JSON.stringify({cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"}),
+          state==="starting"?timestamp:null,
+          released?"requested":null,
+          active?timestamp:null,
+          released?timestamp:null,
+          released?timestamp:null,
+          timestamp
+        ]
+      );
+    };
+    await insertRun(runId,currentState);
+    await client.query("update agent_tasks set current_run_id=$2 where id=$1",[taskId,runId]);
+    return{taskId,runId,insertRun};
+  };
+  const starting=await createTask("starting","starting");
+  const loserRunId=`run_loser_${ids.suffix}`;
+  await starting.insertRun(loserRunId,"released");
+  const active=await createTask("active","active");
+  const released=await createTask("released","released");
+  const receipt=async(key:string,resourceId:string,createdOffset:number)=>{
+    const createdAt=new Date(Date.parse(timestamp)+createdOffset).toISOString();
+    await client.query(
+      `insert into task_idempotency_records (
+         actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,
+         claim_token,lease_expires_at,created_at,updated_at
+       ) values ($1,$2,'terminal-start',$3,$4,$5,'in_progress',$6,$7,$8,$8)`,
+      [ids.userId,ids.projectId,key,`${key}-hash`,resourceId,`${key}-claim`,new Date(Date.parse(timestamp)+60_000).toISOString(),createdAt]
+    );
+  };
+  const startingOwnerKey=`terminal-owner-${ids.suffix}`;
+  const startingDuplicateKey=`terminal-duplicate-${ids.suffix}`;
+  const loserKey=`terminal-loser-${ids.suffix}`;
+  const activeKey=`terminal-active-${ids.suffix}`;
+  const releasedKey=`terminal-released-${ids.suffix}`;
+  await receipt(startingOwnerKey,starting.runId,0);
+  await receipt(startingDuplicateKey,starting.runId,1);
+  await receipt(loserKey,loserRunId,-1);
+  await receipt(activeKey,active.runId,3);
+  await receipt(releasedKey,released.runId,4);
+  return{
+    projectId:ids.projectId,
+    startingTaskId:starting.taskId,startingRunId:starting.runId,startingOwnerKey,startingDuplicateKey,
+    loserKey,activeRunId:active.runId,activeKey,releasedRunId:released.runId,releasedKey
+  };
 }
 
 function isCheckViolation(error: unknown): boolean {

@@ -369,7 +369,9 @@ describe("task interactions API", () => {
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal occupancy", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
     await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
-    const terminalUrl = `${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`;
+    const terminalRunId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(terminalRunId);
+    const terminalUrl = `${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(terminalRunId)}`;
 
     assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
     const first = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
@@ -395,6 +397,67 @@ describe("task interactions API", () => {
     const replacementClosed = once(replacement, "close");
     replacement.close();
     await replacementClosed;
+  });
+
+  it("closes a terminal connection when the canonical Task changes to another active Run", async () => {
+    terminalUpstream = new WebSocketServer({ port:0 });
+    await once(terminalUpstream, "listening");
+    const upstreamAddress = terminalUpstream.address();
+    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+
+    const store = createLocalInMemoryProductStore();
+    api = await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalAccessRecheckMs:200,
+      store
+    });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+      prompt:"exact terminal Run",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Exact terminal files"}
+    });
+    const task = await store.findTask(created.task.id as string);
+    assert.ok(task);
+    const upstreamBaseUrl=`http://127.0.0.1:${upstreamAddress.port}`;
+    await makeTaskRunActive(store, task, upstreamBaseUrl);
+    const runA=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runA);
+    assert.equal(
+      await rejectedWebSocketStatus(
+        `${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=run_stale`,
+        auth.cookie
+      ),
+      403
+    );
+
+    const client = new WebSocket(
+      `${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runA)}`,
+      { headers:{ cookie:auth.cookie } }
+    );
+    await once(client, "open");
+    const closed=once(client,"close");
+
+    const activeA=await store.findTask(task.id);
+    assert.ok(activeA);
+    await releaseTaskRunFixture(store,activeA);
+    const releasedA=await store.findTask(task.id);
+    assert.ok(releasedA);
+    const runB=`run_fixture_replacement_${task.id}`;
+    await makeTaskRunActive(store,releasedA,upstreamBaseUrl,runB);
+    assert.deepEqual(
+      {currentRunId:(await store.findTask(task.id))?.currentRunId,state:(await store.sandboxRuns.get(runB))?.state},
+      {currentRunId:runB,state:"active"}
+    );
+
+    const [code,reason]=await within(closed,1_000,"Terminal stayed open after its exact Run changed");
+    assert.equal(code,1008);
+    assert.equal(String(reason),"Task terminal access changed");
   });
 
   it("advertises the terminal start command for a released Task while WebSocket remains transport-only",async()=>{
@@ -426,7 +489,9 @@ describe("task interactions API", () => {
     const task = await store.findTask(created.task.id as string); assert.ok(task);
     await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
-    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`, { headers:{ cookie:auth.cookie } });
     await once(client, "open");
     const frame = JSON.stringify({ op:"stdin", data:"ZWNobyByZWFkeQo=" });
     client.send(frame);
@@ -454,7 +519,9 @@ describe("task interactions API", () => {
     const task = await store.findTask(created.task.id as string); assert.ok(task);
     await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
-    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`, { headers:{ cookie:auth.cookie } });
     await once(client, "open");
     await upstreamConnected;
     const closeCode = new Promise<number>((resolve, reject) => {
@@ -479,7 +546,9 @@ describe("task interactions API", () => {
     const task = await store.findTask(created.task.id as string); assert.ok(task);
     await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
 
-    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws`, { headers:{ cookie:auth.cookie } });
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`, { headers:{ cookie:auth.cookie } });
     const closeCode = new Promise<number>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("Oversized terminal output did not close the proxy connection")), 1_000);
       client.once("close", (code) => { clearTimeout(timeout); resolve(code); });
@@ -506,7 +575,7 @@ describe("task interactions API", () => {
     await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
     const endpointDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(endpointDisabled.items.length,initial.items.length);
-    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
+    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
     const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
@@ -521,7 +590,7 @@ describe("task interactions API", () => {
     const credentialDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(credentialDisabled.items.length,initial.items.length);
     assert.equal(credentialDisabled.presentation.capabilities.sendMessage,false);
-    assert.equal(credentialDisabled.presentation.capabilities.openTerminal,false);
+    assert.equal(credentialDisabled.presentation.capabilities.openTerminal,true);
   });
 
   it("replays the fixed accepted message receipt after background and capability changes",async()=>{
@@ -830,123 +899,66 @@ describe("task interactions API", () => {
   it("requires an authorized idempotent direct sandbox release request",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
+    const store=createLocalInMemoryProductStore();
     try{
-      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store:createLocalInMemoryProductStore(),botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return structuredClone(resources);}}}});
+      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return structuredClone(resources);}}}});
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"release through API",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}})).task;
       assert.equal((await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`)).capabilities.releaseSandbox,true);
       assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).status,401);
       const baseHeaders={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf};
-      assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:baseHeaders,body:"{}"})).status,400);
+      const body=await exactReleaseBody(store,task.id);
+      assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:baseHeaders,body})).status,400);
       const headers={...baseHeaders,"idempotency-key":"release-api-key"};
-      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body:"{}"});const firstBody=await first.json();
-      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body:"{}"});const replayBody=await replay.json();
+      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});const firstBody=await first.json();
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});const replayBody=await replay.json();
       assert.equal(first.status,200);assert.equal(replay.status,200);assert.deepEqual(replayBody,firstBody);assert.equal((firstBody as {presentation:{sandboxState:{state:string}}}).presentation.sandboxState.state,"release_requested");
     }finally{if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;}
   });
 
-  it("starts a terminal only through the JSON command and exactly replays its receipt",async(t)=>{
-    const previousPostgresUrl=process.env.POSTGRES_APP_URL;
-    process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
+  it("requires Release to target the exact canonical Run",async()=>{
     const store=createLocalInMemoryProductStore();
-    const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
-    let startupEntered!:()=>void;
-    let continueStartup!:()=>void;
-    const entered=new Promise<void>((resolve)=>{startupEntered=resolve;});
-    const startupGate=new Promise<void>((resolve)=>{continueStartup=resolve;});
-    try{
-      api=await createApiServer({
-        port:0,
-        dataRoot,
-        builtinAdminPassword:"production-admin-password",
-        sessionSecret:validProductionSessionSecret,
-        sandboxNamespaceLimit:100,
-        store,
-        botifiedClient:new FakeBotifiedClient([]),
-        botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{
-          async applyResource(resource){resources.push(structuredClone(resource));startupEntered();await startupGate;return"applied" as const;},
-          async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
-          async listManagedResources(){return structuredClone(resources);}
-        }}
-      });
-      const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
-      const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"terminal start",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Terminal files"}})).task;
-      const pathName=`/api/v1/tasks/${task.id}/terminal/start`;
-      assert.equal((await fetch(api.baseUrl+pathName,{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).status,401);
-      const baseHeaders={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf};
-      assert.equal((await fetch(api.baseUrl+pathName,{method:"POST",headers:baseHeaders,body:"{}"})).status,400);
-      assert.equal((await fetch(api.baseUrl+pathName,{method:"POST",headers:{...baseHeaders,"idempotency-key":"terminal-start-body"},body:JSON.stringify({unexpected:true})})).status,400);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"exact release target",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Exact release files"}
+    });
+    const initialTask=await store.findTask(created.task.id as string);assert.ok(initialTask);
+    await makeTaskRunActive(store,initialTask,"http://botified.internal");
+    const task=await store.findTask(initialTask.id);assert.ok(task?.currentRunId);
+    const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+    const headers={
+      "content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,
+      "idempotency-key":"exact-release"
+    };
 
-      const runBefore=(await store.sandboxRuns.list()).find((run)=>run.taskId===task.id);
-      assert.equal(runBefore?.state,"starting");
-      assert.equal(await rejectedWebSocketStatus(`${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws`,auth.cookie),403);
-      assert.equal(resources.length,0);
+    const stale=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{
+      method:"POST",headers,body:JSON.stringify({expectedRunId:"run_stale"})
+    });
+    const staleBody=await stale.json() as {outcome:string;keyDisposition:string;code?:string};
 
-      const headers={...baseHeaders,"idempotency-key":"terminal-start-success"};
-      const beginTerminalStart=store.beginTerminalStart.bind(store);
-      let terminalBeginCalls=0;
-      store.beginTerminalStart=async(input)=>{
-        terminalBeginCalls+=1;
-        assert.equal(Date.parse(input.idempotency.leaseExpiresAt)-Date.parse(input.idempotency.now),30_000);
-        return beginTerminalStart(input);
-      };
-      const firstRequest=fetch(api.baseUrl+pathName,{method:"POST",headers,body:"{}"});
-      await entered;
-      t.mock.timers.enable({apis:["Date"],now:Date.now()});
-      t.mock.timers.tick(31_000);
-      const concurrent=await fetch(api.baseUrl+pathName,{method:"POST",headers,body:"{}"});
-      const concurrentBody=await concurrent.json() as {status:string;runId:string;presentation:{sandboxState:{runId:string|null}}};
-      assert.equal(terminalBeginCalls,1);
-      const differentKey=await fetch(api.baseUrl+pathName,{
-        method:"POST",
-        headers:{...baseHeaders,"idempotency-key":"terminal-start-different-operation"},
-        body:"{}"
-      });
-      assert.equal(differentKey.status,202);
-      assert.equal(terminalBeginCalls,2);
-      continueStartup();
-      const first=await firstRequest;
-      assert.equal(concurrent.status,202);
-      assert.equal(concurrentBody.status,"in_progress");
-      assert.equal(concurrentBody.runId,runBefore!.runId);
-      assert.equal(concurrentBody.presentation.sandboxState.runId,runBefore!.runId);
-      const firstBody=await first.json();
-      const replay=await fetch(api.baseUrl+pathName,{method:"POST",headers,body:"{}"});
-      const replayBody=await replay.json();
-      assert.equal(first.status,200);
-      assert.equal(replay.status,200);
-      assert.deepEqual(replayBody,firstBody);
-      assert.equal((firstBody as {status:string}).status,"active");
-      assert.equal((firstBody as {runId:string}).runId,runBefore!.runId);
-      assert.equal((firstBody as {presentation:{sandboxState:{state:string}}}).presentation.sandboxState.state,"active");
-      assert.equal((await store.sandboxRuns.get(runBefore!.runId))?.state,"active");
-      assert.ok(resources.length>0);
-    }finally{
-      if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
-    }
+    assert.equal(stale.status,409);
+    assert.equal(staleBody.outcome,"rejected_before_acceptance");
+    assert.equal(staleBody.keyDisposition,"retire");
+    assert.equal(staleBody.code,"task_run_target_conflict");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,run.state);
   });
 
-  it("returns the Store active receipt while the local startup Promise is still unwinding",async()=>{
+  it("settles a pending Terminal Start through Release before accepting a new key",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
-    let activationStored!:()=>void,finishActivation!:()=>void;
-    const stored=new Promise<void>((resolve)=>{activationStored=resolve;});
-    const activationGate=new Promise<void>((resolve)=>{finishActivation=resolve;});
-    const activate=store.activateTaskSandboxRun.bind(store);
-    store.activateTaskSandboxRun=async(input)=>{
-      const result=await activate(input);
-      activationStored();
-      await activationGate;
-      return result;
-    };
     try{
       api=await createApiServer({
-        port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
-        sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        port:0,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,
+        runtimeTickIntervalMs:60_000,store,botifiedClient:new FakeBotifiedClient([]),
+        botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{port:{
           async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},
           async deleteResource(){return"deleted" as const;},
@@ -955,71 +967,228 @@ describe("task interactions API", () => {
         }}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
-      const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-        prompt:"active receipt during Promise cleanup",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Activation map files"}
-      })).task;
-      const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-activation-map"};
-      const firstRequest=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
-      await stored;
+      const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"release pending terminal",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Release pending terminal files"}
+      });
+      const task=await store.findTask(created.task.id as string);assert.ok(task?.currentRunId);
+      const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+      const baseHeaders={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf};
+      const terminalBody=JSON.stringify({expectedRunId:run.runId,expectedSandboxState:run.state});
+      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",headers:{...baseHeaders,"idempotency-key":"terminal-before-release"},body:terminalBody
+      });
+      assert.equal(first.status,202);
 
-      const converged=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
-      const convergedBody=await converged.json() as {status:string};
-      assert.equal(converged.status,200);
-      assert.equal(convergedBody.status,"active");
+      const release=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{
+        method:"POST",headers:{...baseHeaders,"idempotency-key":"release-pending-terminal"},
+        body:JSON.stringify({expectedRunId:run.runId})
+      });
+      assert.equal(release.status,200);
+      const requested=await store.sandboxRuns.get(run.runId);assert.equal(requested?.state,"release_requested");
+      assert.ok(requested);
+      const releasedAt=new Date(Date.parse(requested.updatedAt)+1).toISOString();
+      const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+      assert.equal(await store.completeSandboxRunRelease({
+        runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
+        settlement:{
+          runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
+          taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
+          startedAt:requested.startedAt,releasedAt,durationSeconds:0,resources:requested.resourceSnapshot,
+          releaseReason:requested.releaseReason!
+        },
+        auditEvent:{
+          id:"audit_api_pending_terminal_released",projectId:requested.projectId,actorId:null,
+          subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
+          resourceKind:"sandbox",resourceId:requested.taskId,
+          detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
+          createdAt:releasedAt
+        }
+      }),"applied");
 
-      finishActivation();
-      assert.equal((await firstRequest).status,200);
+      const next=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",headers:{...baseHeaders,"idempotency-key":"terminal-after-release"},
+        body:JSON.stringify({expectedRunId:run.runId,expectedSandboxState:"released"})
+      });
+      const nextBody=await next.json() as {outcome:string;runId:string};
+      assert.equal(next.status,202);
+      assert.equal(nextBody.outcome,"accepted_in_progress");
+      assert.notEqual(nextBody.runId,run.runId);
+
+      const oldReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",headers:{...baseHeaders,"idempotency-key":"terminal-before-release"},body:terminalBody
+      });
+      const oldReplayBody=await oldReplay.json() as {outcome:string;runId:string;error:{code:string}};
+      assert.equal(oldReplay.status,502);
+      assert.equal(oldReplayBody.outcome,"completed");
+      assert.equal(oldReplayBody.runId,run.runId);
+      assert.equal(oldReplayBody.error.code,"sandbox_start_failed");
     }finally{
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
     }
   });
 
-  it("lets a release race terminalize the bound Terminal receipt instead of returning local 202",async()=>{
+  it("returns Terminal Start after reservation and leaves startup to syncActiveTasksOnce",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
-    let applyEntered!:()=>void,finishApply!:()=>void;
-    const entered=new Promise<void>((resolve)=>{applyEntered=resolve;});
-    const applyGate=new Promise<void>((resolve)=>{finishApply=resolve;});
+    let applyCalls=0;
+    let startupEntered!:()=>void,continueStartup!:()=>void;
+    const entered=new Promise<void>((resolve)=>{startupEntered=resolve;});
+    const startupGate=new Promise<void>((resolve)=>{continueStartup=resolve;});
     try{
       api=await createApiServer({
-        port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
-        sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        port:0,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,
+        runtimeTickIntervalMs:60_000,store,botifiedClient:new FakeBotifiedClient([]),
+        botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{port:{
-          async applyResource(resource){resources.push(structuredClone(resource));applyEntered();await applyGate;return"applied" as const;},
+          async applyResource(resource){applyCalls+=1;resources.push(structuredClone(resource));return"applied" as const;},
           async deleteResource(){return"deleted" as const;},
           async getPodReadiness(){return"ready" as const;},
           async listManagedResources(){return structuredClone(resources);}
         }}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
-      const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-        prompt:"release races Terminal startup",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Release race files"}
-      })).task;
-      const baseHeaders={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf};
-      const terminalHeaders={...baseHeaders,"idempotency-key":"terminal-release-race"};
-      const firstRequest=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers:terminalHeaders,body:"{}"});
-      await entered;
-      const released=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{
-        method:"POST",headers:{...baseHeaders,"idempotency-key":"release-during-terminal"},body:"{}"
+      const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"reconciler-owned terminal",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Reconciler terminal files"}
       });
-      assert.equal(released.status,200);
+      const task=await store.findTask(created.task.id as string);assert.ok(task?.currentRunId);
+      const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+      const requestHeaders={
+        "content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf
+      };
+      const stale=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",
+        headers:{...requestHeaders,"idempotency-key":"reconciler-stale-terminal"},
+        body:JSON.stringify({expectedRunId:"run_stale",expectedSandboxState:run.state})
+      });
+      const staleBody=await stale.json() as {outcome:string;keyDisposition:string;code?:string};
+      assert.equal(stale.status,409);
+      assert.deepEqual(
+        {outcome:staleBody.outcome,keyDisposition:staleBody.keyDisposition,code:staleBody.code},
+        {outcome:"rejected_before_acceptance",keyDisposition:"retire",code:"task_run_target_conflict"}
+      );
+      assert.equal((await store.findTask(task.id))?.currentRunId,run.runId);
+      assert.equal(applyCalls,0);
+      const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",
+        headers:{...requestHeaders,"idempotency-key":"reconciler-owned-terminal"},
+        body:JSON.stringify({expectedRunId:run.runId,expectedSandboxState:run.state})
+      });
+      const receipt=await response.json() as {outcome:string;keyDisposition:string;runId:string};
+      assert.equal(response.status,202);
+      assert.deepEqual(receipt,{
+        outcome:"accepted_in_progress",keyDisposition:"retain",runId:run.runId
+      });
+      assert.equal(applyCalls,0);
 
-      const converged=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers:terminalHeaders,body:"{}"});
-      const convergedBody=await converged.json();
-      assert.equal(converged.status,502);
-      assert.equal((convergedBody as {error:{code:string}}).error.code,"sandbox_start_failed");
-      const run=(await store.sandboxRuns.list()).find((candidate)=>candidate.taskId===task.id);assert.ok(run);
-      assert.equal(run.state,"release_requested");
-      assert.ok(run.startupClaimToken);
-      assert.ok(run.startupActionDeadlineAt);
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,
+        botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{port:{
+          async applyResource(resource){
+            applyCalls+=1;resources.push(structuredClone(resource));
+            if(applyCalls===1){startupEntered();await startupGate;}
+            return"applied" as const;
+          },
+          async deleteResource(){return"deleted" as const;},
+          async getPodReadiness(){return"ready" as const;},
+          async listManagedResources(){return structuredClone(resources);}
+        }},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      const firstSync=background.tasks.syncActiveTasksOnce();
+      await within(entered,500,"Terminal startup did not begin");
+      const overlappingSync=background.tasks.syncActiveTasksOnce();
+      continueStartup();
+      await firstSync;
+      await overlappingSync;
+      assert.equal((await store.sandboxRuns.get(run.runId))?.state,"active");
+      assert.equal(applyCalls,6);
+    }finally{
+      if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
+    }
+  });
 
-      finishApply();
-      const owner=await firstRequest;
-      const ownerBody=await owner.json();
-      assert.equal(owner.status,502);
-      assert.deepEqual(ownerBody,convergedBody);
+  it("aborts the matching local Terminal startup owner after exact Release commits its fence",async()=>{
+    const previousPostgresUrl=process.env.POSTGRES_APP_URL;
+    process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
+    const store=createLocalInMemoryProductStore();
+    let applyEntered!:()=>void;
+    const entered=new Promise<void>((resolve)=>{applyEntered=resolve;});
+    let startupSignal:AbortSignal|undefined;
+    const livePort={
+      async applyResource(
+        _resource:import("../../packages/contracts/src/api.js").KubernetesResource,
+        _labels:Record<string,string>,
+        signal?:AbortSignal
+      ){
+        startupSignal=signal;
+        applyEntered();
+        return new Promise<"applied">((_resolve,reject)=>{
+          const abort=()=>reject(signal?.reason??new Error("Terminal startup aborted"));
+          if(signal?.aborted)abort();
+          else signal?.addEventListener("abort",abort,{once:true});
+        });
+      },
+      async deleteResource(){return"not_found" as const;},
+      async getPodReadiness(){return"not_found" as const;},
+      async listManagedResources(){return[];}
+    };
+    try{
+      api=await createApiServer({
+        port:0,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,
+        runtimeTickIntervalMs:60_000,store,botifiedClient:new FakeBotifiedClient([]),
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:livePort}
+      });
+      const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
+      const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"release aborts exact startup",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Release abort files"}
+      })).task;
+      const task=await store.findTask(created.id as string);assert.ok(task?.currentRunId&&task.createdByUserId);
+      const request={
+        expectedRunId:task.currentRunId,
+        expectedSandboxState:(await store.sandboxRuns.get(task.currentRunId))!.state
+      };
+      const services=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,
+        botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{port:livePort},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      assert.equal(
+        (await services.tasks.startTaskTerminal(task.createdByUserId,task.id,request,"terminal-local-owner")).outcome,
+        "accepted_in_progress"
+      );
+
+      const sync=services.tasks.syncActiveTasksOnce();
+      await within(entered,500,"Terminal startup did not enter its local owner");
+      const release=await services.tasks.releaseTaskSandbox(
+        task.createdByUserId,
+        task.id,
+        {expectedRunId:task.currentRunId},
+        "release-local-owner"
+      );
+      assert.equal(release.outcome,"completed");
+      assert.equal(startupSignal?.aborted,true);
+      await within(sync,500,"Aborted Terminal startup did not converge");
+
+      const fenced=await store.sandboxRuns.get(task.currentRunId);assert.ok(fenced);
+      assert.equal(fenced.state,"release_requested");
+      assert.ok(fenced.startupActionDeadlineAt);
+      const replay=await services.tasks.startTaskTerminal(
+        task.createdByUserId,task.id,request,"terminal-local-owner"
+      );
+      assert.equal(replay.outcome,"completed");
+      assert.equal("error" in replay?replay.error.code:null,"sandbox_start_failed");
+      assert.equal((await store.sandboxRuns.get(task.currentRunId))?.state,"release_requested");
     }finally{
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
     }
@@ -1050,11 +1219,12 @@ describe("task interactions API", () => {
       let begins=0;
       const begin=store.beginTerminalStart.bind(store);
       store.beginTerminalStart=async(input)=>{begins+=1;return begin(input);};
+      const terminalBody=await exactTerminalStartBody(store,task.id);
 
       const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
         method:"POST",
         headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"invalid-endpoint-terminal"},
-        body:"{}"
+        body:terminalBody
       });
 
       assert.equal(response.status,409);
@@ -1095,7 +1265,8 @@ describe("task interactions API", () => {
       })).task;
       const task=await store.findTask(created.id as string);assert.ok(task?.currentRunId);
       const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-pre-map-crash"};
-      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+      const terminalBody=await exactTerminalStartBody(store,task.id);
+      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(first.status,202);
       assert.equal(begins,1);
       t.mock.timers.enable({apis:["Date"],now:Date.now()});
@@ -1105,18 +1276,26 @@ describe("task interactions API", () => {
       const unavailableAt=new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString();
       assert.ok(await store.updateEndpointHealth(endpoint.id,endpoint.projectId,{status:"unavailable",checkedAt:unavailableAt,errorCategory:"network"},unavailableAt,endpoint.updatedAt));
 
-      const recovered=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
-      assert.equal(recovered.status,409);
-      assert.equal(begins,2);
-      assert.doesNotMatch(JSON.stringify(await recovered.json()),/Endpoint is unavailable/);
+      const recovered=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
+      assert.equal(recovered.status,502);
+      assert.equal(begins,1);
+      const replayBody=await recovered.json();
+      assert.deepEqual(replayBody,{
+        outcome:"completed",keyDisposition:"retire",runId:task.currentRunId,
+        error:{
+          code:"sandbox_start_failed",message:"Sandbox could not be started",
+          retryable:true,details:null,presentation:null
+        }
+      });
+      assert.doesNotMatch(JSON.stringify(replayBody),/Endpoint is unavailable/);
       const receipt=await store.findTaskIdempotency({
         actorId:task.createdByUserId!,projectId:auth.projectId,operation:"terminal-start",
         key:"terminal-pre-map-crash",requestHash
       });
       assert.equal(receipt?.kind,"replay");
       if(receipt?.kind==="replay"){
-        const body=receipt.responseBody as {error:{presentation:{sandboxState:{runId:string|null;state:string}}}};
-        assert.deepEqual(body.error.presentation.sandboxState,{runId:task.currentRunId,state:"released",cause:null});
+        assert.equal(receipt.responseStatus,502);
+        assert.deepEqual(receipt.responseBody,replayBody);
       }
     }finally{
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
@@ -1171,7 +1350,8 @@ describe("task interactions API", () => {
       })).task;
       const task=await store.findTask(created.id as string);assert.ok(task?.currentRunId);
       const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-session-mismatch"};
-      const reserved=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+      const terminalBody=await exactTerminalStartBody(store,task.id);
+      const reserved=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(reserved.status,202);
 
       const background=createApplicationServices({
@@ -1190,7 +1370,7 @@ describe("task interactions API", () => {
         key:"terminal-session-mismatch",requestHash
       });
       assert.equal(persisted?.kind,"replay");
-      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(replay.status,502);
       assert.deepEqual(await replay.json(),persisted?.kind==="replay"?persisted.responseBody:null);
     }finally{
@@ -1205,16 +1385,18 @@ describe("task interactions API", () => {
     let applies=0,claims=0;
     const claim=store.claimSandboxStartup.bind(store);
     store.claimSandboxStartup=async(input)=>{claims+=1;return claim(input);};
+    const livePort={
+      async applyResource(){applies+=1;return"applied" as const;},
+      async deleteResource(){return"deleted" as const;},
+      async getPodReadiness(){return"ready" as const;},
+      async listManagedResources(){return[];}
+    };
     try{
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,
         botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{
-          async applyResource(){applies+=1;return"applied" as const;},
-          async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
-          async listManagedResources(){return[];}
-        }}
+        runtimeTickIntervalMs:60_000,
+        liveSandbox:{port:livePort}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
@@ -1226,14 +1408,28 @@ describe("task interactions API", () => {
       const botifiedDirectory=path.join(dataRoot,project.rootPath,"tasks",task.id,"botified");
       await rm(botifiedDirectory,{recursive:true,force:true});
       await writeFile(botifiedDirectory,"not a directory");
+      const terminalBody=await exactTerminalStartBody(store,task.id);
 
       const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
         method:"POST",
         headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"directory-failure-terminal"},
-        body:"{}"
+        body:terminalBody
       });
 
-      assert.equal(response.status,502);
+      assert.equal(response.status,202);
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{port:livePort},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await background.tasks.syncActiveTasksOnce();
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",
+        headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"directory-failure-terminal"},
+        body:terminalBody
+      });
+      assert.equal(replay.status,502);
       assert.equal(claims,1);
       assert.equal(applies,0);
       const failed=await store.sandboxRuns.get(task.currentRunId);
@@ -1250,6 +1446,12 @@ describe("task interactions API", () => {
     const store=createLocalInMemoryProductStore();
     const botified=new FakeBotifiedClient([]);
     botified.healthFailure=new Error("Botified readiness failed definitively");
+    const livePort={
+      async applyResource(){return"applied" as const;},
+      async deleteResource(){return"deleted" as const;},
+      async getPodReadiness(){return"ready" as const;},
+      async listManagedResources(){return[];}
+    };
     try{
       api=await createApiServer({
         port:0,
@@ -1257,15 +1459,11 @@ describe("task interactions API", () => {
         builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,
         sandboxNamespaceLimit:100,
+        runtimeTickIntervalMs:60_000,
         store,
         botifiedClient:botified,
         botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:{
-          async applyResource(){return"applied" as const;},
-          async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
-          async listManagedResources(){return[];}
-        }}
+        liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:livePort}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"terminal failure",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Failure files"}})).task;
@@ -1275,13 +1473,23 @@ describe("task interactions API", () => {
         return complete(input);
       };
       const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-start-failure"};
-      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
-      const firstBody=await first.json();
+      const terminalBody=await exactTerminalStartBody(store,task.id);
+      const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
+      assert.equal(first.status,202);
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:livePort},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await background.tasks.syncActiveTasksOnce();
       store.beginTerminalStart=async()=>{throw new Error("completed Terminal failure replay must not re-enter begin");};
-      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
-      assert.equal(first.status,502,JSON.stringify(firstBody));
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(replay.status,502);
-      assert.deepEqual(await replay.json(),firstBody);
+      const firstBody=await replay.json();
+      const exactReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
+      assert.equal(exactReplay.status,502);
+      assert.deepEqual(await exactReplay.json(),firstBody);
       assert.deepEqual((firstBody as {error:{code:string;message:string;retryable:boolean;details:null}}).error,{
         code:"sandbox_start_failed",
         message:"Sandbox could not be started",
@@ -1339,8 +1547,16 @@ describe("task interactions API", () => {
         prompt:"accepted mutation response lost",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Unknown result files"}
       })).task;
       const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-unknown-kubernetes-result"};
-      const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+      const terminalBody=await exactTerminalStartBody(store,task.id);
+      const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(response.status,202);
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{port,startupActionTimeoutMs:1},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await background.tasks.syncActiveTasksOnce();
       const pending=(await store.sandboxRuns.list()).find((run)=>run.taskId===task.id);assert.ok(pending);
       assert.equal(pending.state,"starting");
       assert.ok(pending.startupClaimToken);
@@ -1358,7 +1574,7 @@ describe("task interactions API", () => {
       assert.equal(failed.startupClaimToken,null);
       assert.equal(failed.startupActionDeadlineAt,null);
 
-      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
       assert.equal(replay.status,502);
       assert.equal((await replay.json() as {error:{code:string}}).error.code,"sandbox_start_failed");
     }finally{
@@ -1391,12 +1607,31 @@ describe("task interactions API", () => {
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"Botified readiness failure",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Readiness failure files"}})).task;
+      const terminalBody=await exactTerminalStartBody(store,task.id);
       const response=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
         method:"POST",
         headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"botified-readiness-failure"},
-        body:"{}"
+        body:terminalBody
       });
-      assert.equal(response.status,502);
+      assert.equal(response.status,202);
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:{
+          async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},
+          async deleteResource(){return"deleted" as const;},
+          async getPodReadiness(){return"ready" as const;},
+          async listManagedResources(){return structuredClone(resources);}
+        }},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await background.tasks.syncActiveTasksOnce();
+      const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
+        method:"POST",
+        headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"botified-readiness-failure"},
+        body:terminalBody
+      });
+      assert.equal(replay.status,502);
       assert.equal(resources.length,6);
       assert.equal(activations,0);
       const run=(await store.sandboxRuns.list()).find((candidate)=>candidate.taskId===task.id);assert.ok(run);
@@ -1424,13 +1659,14 @@ describe("task interactions API", () => {
     store.upsertActiveProjectAlert=async()=>{throw new Error("alert sink unavailable");};
 
     const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-capacity"};
-    const firstResponse=await fetch(`${api.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+    const terminalBody=await exactTerminalStartBody(store,candidate.id);
+    const firstResponse=await fetch(`${api.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
     const firstBody=await firstResponse.json();
     const endpoint=await store.findEndpoint(auth.endpointId);assert.ok(endpoint);
     const unavailableAt=new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString();
     assert.ok(await store.updateEndpointHealth(endpoint.id,endpoint.projectId,{status:"unavailable",checkedAt:unavailableAt,errorCategory:"network"},unavailableAt,endpoint.updatedAt));
     store.beginTerminalStart=async()=>{throw new Error("completed Terminal capacity replay must not re-enter begin");};
-    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
     assert.equal(firstResponse.status,409);
     assert.equal(replay.status,409);
     assert.deepEqual(await replay.json(),firstBody);
@@ -1488,7 +1724,8 @@ describe("task interactions API", () => {
     };
 
     const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"terminal-serialized"};
-    const request=()=>fetch(`${api!.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:"{}"});
+    const terminalBody=await exactTerminalStartBody(store,candidate.id);
+    const request=()=>fetch(`${api!.baseUrl}/api/v1/tasks/${candidate.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
     const [first,second]=await Promise.all([request(),request()]);
     const [firstBody,secondBody]=await Promise.all([first.json(),second.json()]);
     assert.equal(initialLookups,2);
@@ -1587,6 +1824,23 @@ describe("task interactions API", () => {
   });
 });
 
+async function exactTerminalStartBody(
+  store:ReturnType<typeof createLocalInMemoryProductStore>,
+  taskId:string
+):Promise<string>{
+  const task=await store.findTask(taskId);assert.ok(task);
+  const run=task.currentRunId?await store.sandboxRuns.get(task.currentRunId):null;
+  return JSON.stringify({expectedRunId:task.currentRunId,expectedSandboxState:run?.state??"released"});
+}
+
+async function exactReleaseBody(
+  store:ReturnType<typeof createLocalInMemoryProductStore>,
+  taskId:string
+):Promise<string>{
+  const task=await store.findTask(taskId);assert.ok(task?.currentRunId);
+  return JSON.stringify({expectedRunId:task.currentRunId});
+}
+
 async function releaseTaskRunFixture(
   store:ReturnType<typeof createLocalInMemoryProductStore>,
   task:PersistedAgentTask
@@ -1617,11 +1871,12 @@ async function releaseTaskRunFixture(
   }),"applied");
   const releasedAt=new Date(Date.parse(requestedAt)+1).toISOString();
   const released={...requested,state:"released" as const,releasedAt,cleanupClaimedAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+  const durationSeconds=run.startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(run.startedAt))/1_000);
   assert.equal(await store.completeSandboxRunRelease({
     runId:run.runId,
     expectedFencingToken:requested.fencingToken,
     run:released,
-    settlement:{runId:run.runId,workspaceId:run.workspaceId,projectId:run.projectId,taskId:run.taskId,fileLibraryId:run.fileLibraryId,startedByUserId:run.startedByUserId,startedAt:run.startedAt,releasedAt,durationSeconds:0,resources:run.resourceSnapshot,releaseReason:"requested"},
+    settlement:{runId:run.runId,workspaceId:run.workspaceId,projectId:run.projectId,taskId:run.taskId,fileLibraryId:run.fileLibraryId,startedByUserId:run.startedByUserId,startedAt:run.startedAt,releasedAt,durationSeconds,resources:run.resourceSnapshot,releaseReason:"requested"},
     auditEvent:{id:`audit_fixture_released_${run.runId}`,projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:releasedAt}
   }),"applied");
 }
@@ -1629,7 +1884,8 @@ async function releaseTaskRunFixture(
 async function makeTaskRunActive(
   store: ReturnType<typeof createLocalInMemoryProductStore>,
   task: PersistedAgentTask,
-  botifiedBaseUrl: string
+  botifiedBaseUrl: string,
+  runId=`run_fixture_${task.id}`
 ): Promise<void> {
   const timestamp = task.updatedAt;
   const project=await store.findProject(task.projectId);
@@ -1637,8 +1893,8 @@ async function makeTaskRunActive(
   assert.ok(project);
   assert.ok(library);
   assert.ok(task.createdByUserId);
-  assert.equal(task.currentRunId,null);
-  const runId=`run_fixture_${task.id}`;
+  const currentRun=task.currentRunId?await store.sandboxRuns.get(task.currentRunId):null;
+  assert.equal(currentRun?.state??"released","released");
   const run:PersistedSandboxRunState={
     workspaceId:task.workspaceId,
     projectId:task.projectId,
@@ -1683,13 +1939,13 @@ async function makeTaskRunActive(
     updatedAt:timestamp
   };
   const reserved=await store.restartTaskSandboxAtomically({
-    expectedReleasedRunId:null,
+    expectedReleasedRunId:task.currentRunId,
     task:{...task,currentRunId:runId},
     runtimeState:{botifiedBaseUrl},
     sandboxRun:run,
     reservedAt:timestamp,
     admission:{namespace:run.namespace,namespaceLimit:100},
-    idempotency:{actorId:task.createdByUserId!,projectId:task.projectId,operation:"terminal-start",key:`fixture-${task.id}`,requestHash:`fixture-hash-${task.id}`,resourceId:task.id,claimToken:`fixture-claim-${task.id}`,now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+60_000).toISOString()},
+    idempotency:{actorId:task.createdByUserId!,projectId:task.projectId,operation:"terminal-start",key:`fixture-${runId}`,requestHash:`fixture-hash-${runId}`,resourceId:task.id,claimToken:`fixture-claim-${runId}`,now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+60_000).toISOString()},
     rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
     rejectedAuditEvent:{id:`audit_fixture_rejected_${task.id}`,projectId:task.projectId,actorId:task.createdByUserId!,action:"sandbox.started",status:"rejected",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id,trigger:"terminal"},createdAt:timestamp}
   });

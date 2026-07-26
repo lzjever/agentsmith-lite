@@ -4,7 +4,7 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskCreateCommandOutcome, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageCommandOutcome, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskCreateCommandOutcome, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageCommandOutcome, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskSandboxReleaseRequest, TaskTerminalStartReceipt, TaskTerminalStartRequest, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
@@ -183,8 +183,15 @@ export type TaskCreateClientOutcome =
 export type TaskMessageClientOutcome =
   | TaskMessageCommandOutcome
   | TaskCommandUnknownOutcome;
+export type TaskTerminalStartClientOutcome =
+  | TaskTerminalStartReceipt
+  | TaskCommandUnknownOutcome;
+export type TaskSandboxReleaseClientOutcome =
+  | TaskSandboxReleaseReceipt
+  | TaskCommandUnknownOutcome;
 export type TaskCommandFailureOutcome =
   | Extract<TaskCreateCommandOutcome, { outcome: "rejected_before_acceptance" }>
+  | Extract<TaskTerminalStartReceipt, { outcome:"completed";error:unknown }>
   | TaskCommandUnknownOutcome;
 export type ContextScope = ProjectContextScope;
 export type ContextContentType = ProjectContextContentType;
@@ -354,14 +361,16 @@ async function taskCommand<T extends object>(
   path: string,
   idempotencyKey: string,
   body: unknown,
-  parse: (value: unknown) => T | null
+  parse: (value: unknown) => T | null,
+  signal?:AbortSignal
 ): Promise<T | TaskCommandUnknownOutcome> {
   let response: Response;
   try {
     response = await rawApiResponse(path, {
       method: "POST",
       headers: { "idempotency-key": idempotencyKey },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(signal?{signal}:{})
     });
   } catch (reason) {
     return unknownTaskCommandOutcome(
@@ -444,6 +453,34 @@ function parseTaskMessageCommandOutcome(
   return isTaskMessageReceipt(value)
     ? value as unknown as TaskMessageCommandOutcome
     : null;
+}
+
+function parseTaskTerminalStartOutcome(value:unknown):TaskTerminalStartReceipt|null{
+  if(!isRecord(value)||typeof value.runId!=="string"||!value.runId)return isRejectedTaskCommandOutcome(value)
+    ?value as unknown as TaskTerminalStartReceipt
+    :null;
+  if(value.outcome==="accepted_in_progress"&&value.keyDisposition==="retain"&&Object.keys(value).sort().join(",")==="keyDisposition,outcome,runId"){
+    return value as unknown as TaskTerminalStartReceipt;
+  }
+  if(value.outcome!=="completed"||value.keyDisposition!=="retire")return null;
+  if(Object.keys(value).sort().join(",")==="keyDisposition,outcome,runId"){
+    return value as unknown as TaskTerminalStartReceipt;
+  }
+  if(isRecord(value.error)&&typeof value.error.message==="string"&&typeof value.error.code==="string"&&
+    value.error.retryable===true&&Object.hasOwn(value.error,"details")&&
+    (value.error.presentation===null||isTaskPresentation(value.error.presentation))){
+    return value as unknown as TaskTerminalStartReceipt;
+  }
+  return null;
+}
+
+function parseTaskSandboxReleaseOutcome(value:unknown):TaskSandboxReleaseReceipt|null{
+  if(isRejectedTaskCommandOutcome(value))return value as unknown as TaskSandboxReleaseReceipt;
+  return isRecord(value)&&value.outcome==="completed"&&value.keyDisposition==="retire"&&
+    typeof value.taskId==="string"&&typeof value.runId==="string"&&isTaskPresentation(value.presentation)&&
+    value.presentation.task.id===value.taskId&&value.presentation.sandboxState.runId===value.runId
+    ?value as unknown as TaskSandboxReleaseReceipt
+    :null;
 }
 
 function isRejectedTaskCommandOutcome(
@@ -646,27 +683,19 @@ export const apiClient = {
   ),
   task: (taskId: string) => request<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`),
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
-  taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
-  async startTaskTerminal(taskId: string, idempotencyKey: string, signal?: AbortSignal): Promise<TaskTerminalStartReceipt> {
-    const response = await apiResponse(`/tasks/${encodeURIComponent(taskId)}/terminal/start`, {
-      method: "POST",
-      headers: { "idempotency-key": idempotencyKey },
-      body: JSON.stringify({}),
-      ...(signal ? { signal } : {})
-    }, "terminal");
-    const receipt: unknown = await response.json();
-    if (
-      !isRecord(receipt)
-      || typeof receipt.runId !== "string"
-      || !isTaskPresentation(receipt.presentation)
-      || response.status === 202 && receipt.status !== "in_progress"
-      || response.status === 200 && receipt.status !== "active"
-      || response.status === 202 && receipt.presentation.sandboxState.state !== "starting"
-      || response.status === 200 && receipt.presentation.sandboxState.state !== "active"
-      || response.status !== 200 && response.status !== 202
-    ) throw new ApiError(502, "Task terminal start returned an invalid receipt.");
-    return receipt as TaskTerminalStartReceipt;
-  },
+  taskTerminalWebSocketUrl: (taskId:string,expectedRunId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,expectedRunId,window.location.href),
+  startTaskTerminal:(
+    taskId:string,
+    input:TaskTerminalStartRequest,
+    idempotencyKey:string,
+    signal?:AbortSignal
+  ):Promise<TaskTerminalStartClientOutcome>=>taskCommand(
+    `/tasks/${encodeURIComponent(taskId)}/terminal/start`,
+    idempotencyKey,
+    input,
+    parseTaskTerminalStartOutcome,
+    signal
+  ),
   getTaskInteractions: (taskId: string, cursor?: string) => request<TaskInteractionSnapshot>(`/tasks/${encodeURIComponent(taskId)}/interactions${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`),
   async streamTaskInteractions(taskId: string, cursor: string | undefined, signal: AbortSignal, onEvent: (event: TaskInteractionStreamEvent) => void): Promise<void> {
     const response = observeSession(await fetch(`${apiBasePath}/tasks/${encodeURIComponent(taskId)}/interactions/stream${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`, {
@@ -718,7 +747,16 @@ export const apiClient = {
   updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
-  releaseTaskSandbox: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskSandboxReleaseReceipt>(`/tasks/${encodeURIComponent(taskId)}/sandbox/release`, "POST", idempotencyKey, {}),
+  releaseTaskSandbox:(
+    taskId:string,
+    input:TaskSandboxReleaseRequest,
+    idempotencyKey:string
+  ):Promise<TaskSandboxReleaseClientOutcome>=>taskCommand(
+    `/tasks/${encodeURIComponent(taskId)}/sandbox/release`,
+    idempotencyKey,
+    input,
+    parseTaskSandboxReleaseOutcome
+  ),
   stopTaskWork: (taskId: string, interactionId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(interactionId)}/stop`, "POST", idempotencyKey, {}),
   editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
   archiveTask: (taskId: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}/archive`, "POST", idempotencyKey, {}),
@@ -738,11 +776,11 @@ export const apiClient = {
   }
 };
 
-export function taskTerminalWebSocketUrlForApiBase(basePath:string,taskId:string,pageUrl:string):string{
+export function taskTerminalWebSocketUrlForApiBase(basePath:string,taskId:string,expectedRunId:string,pageUrl:string):string{
   const url=new URL(basePath,pageUrl);
   url.protocol=url.protocol==="https:"?"wss:":"ws:";
   url.pathname=`${url.pathname.replace(/\/$/,"")}/tasks/${encodeURIComponent(taskId)}/terminal/ws`;
-  url.search="";
+  url.search=new URLSearchParams({expectedRunId}).toString();
   url.hash="";
   return url.toString();
 }

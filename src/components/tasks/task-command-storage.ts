@@ -34,8 +34,28 @@ export type TaskMessageCommandMetadata = TaskMessageStorageIdentity & {
   createdAt: string;
 };
 
-type TaskCommandKind = "task-create" | "task-message";
-type TaskCommandMetadata = TaskCreateCommandMetadata | TaskMessageCommandMetadata;
+export type TaskTerminalStartCommandMetadata = TaskMessageCommandMetadata & {
+  request:{
+    expectedRunId:string|null;
+    expectedSandboxState:"starting"|"active"|"release_requested"|"released"|"failed";
+  };
+  acceptedRunId:string|null;
+};
+
+export type TaskSandboxReleaseCommandMetadata = TaskMessageCommandMetadata & {
+  request:{expectedRunId:string};
+};
+
+export type TaskCommandKind =
+  | "task-create"
+  | "task-message"
+  | "task-terminal-start"
+  | "task-sandbox-release";
+type TaskCommandMetadata =
+  | TaskCreateCommandMetadata
+  | TaskMessageCommandMetadata
+  | TaskTerminalStartCommandMetadata
+  | TaskSandboxReleaseCommandMetadata;
 type TaskCommandStorageIdentity =
   | TaskCreateStorageIdentity
   | TaskMessageStorageIdentity;
@@ -93,6 +113,10 @@ export function taskCommandMetadataKey(
   identity: TaskMessageStorageIdentity
 ): string;
 export function taskCommandMetadataKey(
+  kind: "task-terminal-start"|"task-sandbox-release",
+  identity: TaskMessageStorageIdentity
+): string;
+export function taskCommandMetadataKey(
   kind: TaskCommandKind,
   identity: TaskCommandStorageIdentity
 ): string {
@@ -102,7 +126,7 @@ export function taskCommandMetadataKey(
     encodeURIComponent(identity.userId),
     encodeURIComponent(identity.projectId)
   ];
-  if (kind === "task-message") {
+  if (kind !== "task-create") {
     parts.push(encodeURIComponent((identity as TaskMessageStorageIdentity).taskId));
   }
   return parts.join(":");
@@ -204,9 +228,27 @@ export function writeTaskCommandMetadata(
 ): "saved" | "too_large" | "unavailable";
 export function writeTaskCommandMetadata(
   storage: Storage | undefined,
+  kind: "task-terminal-start",
+  metadata: TaskTerminalStartCommandMetadata
+): "saved" | "too_large" | "unavailable";
+export function writeTaskCommandMetadata(
+  storage: Storage | undefined,
+  kind: "task-sandbox-release",
+  metadata: TaskSandboxReleaseCommandMetadata
+): "saved" | "too_large" | "unavailable";
+export function writeTaskCommandMetadata(
+  storage: Storage | undefined,
   kind: TaskCommandKind,
   metadata: TaskCommandMetadata
 ): "saved" | "too_large" | "unavailable" {
+  return writeTaskCommandMetadataValue(storage,kind,metadata);
+}
+
+function writeTaskCommandMetadataValue(
+  storage:Storage|undefined,
+  kind:TaskCommandKind,
+  metadata:TaskCommandMetadata
+):"saved"|"too_large"|"unavailable"{
   if (!storage) return "unavailable";
   const identity = metadata as TaskCommandStorageIdentity;
   const key = metadataKey(kind, identity);
@@ -234,9 +276,27 @@ export function readTaskCommandMetadata(
 ): TaskCommandMetadataRead<TaskMessageCommandMetadata>;
 export function readTaskCommandMetadata(
   storage: Storage | undefined,
+  kind: "task-terminal-start",
+  identity: TaskMessageStorageIdentity
+): TaskCommandMetadataRead<TaskTerminalStartCommandMetadata>;
+export function readTaskCommandMetadata(
+  storage: Storage | undefined,
+  kind: "task-sandbox-release",
+  identity: TaskMessageStorageIdentity
+): TaskCommandMetadataRead<TaskSandboxReleaseCommandMetadata>;
+export function readTaskCommandMetadata(
+  storage: Storage | undefined,
   kind: TaskCommandKind,
   identity: TaskCommandStorageIdentity
 ): TaskCommandMetadataRead<TaskCommandMetadata> {
+  return readTaskCommandMetadataValue(storage,kind,identity);
+}
+
+function readTaskCommandMetadataValue(
+  storage:Storage|undefined,
+  kind:TaskCommandKind,
+  identity:TaskCommandStorageIdentity
+):TaskCommandMetadataRead<TaskCommandMetadata>{
   if (!storage) return { status: "unavailable" };
   let raw: string | null;
   try {
@@ -271,16 +331,20 @@ export function restoreTaskCommandMetadata(
 ): TaskMessageCommandMetadata | null;
 export function restoreTaskCommandMetadata(
   storage: Storage | undefined,
+  kind: "task-terminal-start",
+  identity: TaskMessageStorageIdentity
+): TaskTerminalStartCommandMetadata | null;
+export function restoreTaskCommandMetadata(
+  storage: Storage | undefined,
+  kind: "task-sandbox-release",
+  identity: TaskMessageStorageIdentity
+): TaskSandboxReleaseCommandMetadata | null;
+export function restoreTaskCommandMetadata(
+  storage: Storage | undefined,
   kind: TaskCommandKind,
   identity: TaskCommandStorageIdentity
 ): TaskCommandMetadata | null {
-  const result = kind === "task-create"
-    ? readTaskCommandMetadata(storage, kind, identity)
-    : readTaskCommandMetadata(
-        storage,
-        kind,
-        identity as TaskMessageStorageIdentity
-      );
+  const result=readTaskCommandMetadataValue(storage,kind,identity);
   return result.status === "found" ? result.metadata : null;
 }
 
@@ -301,6 +365,15 @@ export function taskCommandRemountDecision<T extends TaskCommandMetadata>(
   return { status: "cleanup" };
 }
 
+export function taskRuntimeCommandRemountDecision<T extends TaskTerminalStartCommandMetadata|TaskSandboxReleaseCommandMetadata>(
+  metadata:TaskCommandMetadataRead<T>
+):TaskCommandRemountDecision<T>{
+  if(metadata.status==="found")return{status:"restore",metadata:metadata.metadata};
+  if(metadata.status==="missing")return{status:"fresh"};
+  if(metadata.status==="corrupt")return{status:"cleanup"};
+  return{status:"locked_unavailable"};
+}
+
 export function clearTaskCommandMetadata(
   storage: Storage | undefined,
   kind: "task-create",
@@ -309,6 +382,11 @@ export function clearTaskCommandMetadata(
 export function clearTaskCommandMetadata(
   storage: Storage | undefined,
   kind: "task-message",
+  identity: TaskMessageStorageIdentity
+): void;
+export function clearTaskCommandMetadata(
+  storage: Storage | undefined,
+  kind: "task-terminal-start"|"task-sandbox-release",
   identity: TaskMessageStorageIdentity
 ): void;
 export function clearTaskCommandMetadata(
@@ -327,6 +405,12 @@ export function retireTaskCommandMetadata(
 ): boolean;
 export function retireTaskCommandMetadata(
   storage: Storage | undefined,
+  kind: "task-terminal-start"|"task-sandbox-release",
+  identity: TaskMessageStorageIdentity,
+  attempt: { key: string; fingerprint: string }
+): boolean;
+export function retireTaskCommandMetadata(
+  storage: Storage | undefined,
   kind: "task-message",
   identity: TaskMessageStorageIdentity,
   attempt: { key: string; fingerprint: string }
@@ -337,13 +421,7 @@ export function retireTaskCommandMetadata(
   identity: TaskCommandStorageIdentity,
   attempt: { key: string; fingerprint: string }
 ): boolean {
-  const metadataRead = kind === "task-create"
-    ? readTaskCommandMetadata(storage, kind, identity)
-    : readTaskCommandMetadata(
-        storage,
-        kind,
-        identity as TaskMessageStorageIdentity
-      );
+  const metadataRead=readTaskCommandMetadataValue(storage,kind,identity);
   if (metadataRead.status === "missing") return true;
   if (
     metadataRead.status !== "found"
@@ -467,17 +545,21 @@ export function persistTaskCommandMetadata(
 ): void;
 export function persistTaskCommandMetadata(
   storage: Storage | undefined,
+  kind: "task-terminal-start",
+  metadata: TaskTerminalStartCommandMetadata
+): void;
+export function persistTaskCommandMetadata(
+  storage: Storage | undefined,
+  kind: "task-sandbox-release",
+  metadata: TaskSandboxReleaseCommandMetadata
+): void;
+export function persistTaskCommandMetadata(
+  storage: Storage | undefined,
   kind: TaskCommandKind,
   metadata: TaskCommandMetadata
 ): void {
   const identity = metadata as TaskCommandStorageIdentity;
-  const existing = kind === "task-create"
-    ? readTaskCommandMetadata(storage, kind, identity)
-    : readTaskCommandMetadata(
-        storage,
-        kind,
-        identity as TaskMessageStorageIdentity
-      );
+  const existing=readTaskCommandMetadataValue(storage,kind,identity);
   if (existing.status === "found") {
     if (sameTaskCommandMetadata(existing.metadata, metadata)) return;
     throw new TaskCommandStorageUnavailableError("retain");
@@ -487,37 +569,29 @@ export function persistTaskCommandMetadata(
     || existing.status === "corrupt"
   ) throw new TaskCommandStorageUnavailableError("retain");
 
-  const writeOutcome = kind === "task-create"
-    ? writeTaskCommandMetadata(
-        storage,
-        kind,
-        metadata as TaskCreateCommandMetadata
-      )
-    : writeTaskCommandMetadata(
-        storage,
-        kind,
-        metadata as TaskMessageCommandMetadata
-      );
+  const writeOutcome=writeTaskCommandMetadataValue(storage,kind,metadata);
   if (writeOutcome !== "saved") {
     throw new TaskCommandStorageUnavailableError("discard");
   }
-  const restored = kind === "task-create"
-    ? readTaskCommandMetadata(
-        storage,
-        kind,
-        identity
-      )
-    : readTaskCommandMetadata(
-        storage,
-        kind,
-        identity as TaskMessageStorageIdentity
-      );
+  const restored=readTaskCommandMetadataValue(storage,kind,identity);
   if (
     restored.status !== "found"
     || !sameTaskCommandMetadata(restored.metadata, metadata)
   ) {
     throw new TaskCommandStorageUnavailableError("retain");
   }
+}
+
+export function updateTaskCommandAcceptedRun(
+  storage:Storage|undefined,
+  kind:"task-terminal-start",
+  identity:TaskMessageStorageIdentity,
+  attempt:{key:string;fingerprint:string},
+  acceptedRunId:string
+):boolean{
+  const read=readTaskCommandMetadata(storage,kind,identity);
+  if(read.status!=="found"||read.metadata.key!==attempt.key||read.metadata.fingerprint!==attempt.fingerprint)return false;
+  return writeTaskCommandMetadata(storage,kind,{...read.metadata,acceptedRunId})==="saved";
 }
 
 export function clearTaskCommandStorageForUser(
@@ -556,9 +630,13 @@ function metadataKey(
   kind: TaskCommandKind,
   identity: TaskCommandStorageIdentity
 ): string {
-  return kind === "task-create"
-    ? taskCommandMetadataKey(kind, identity)
-    : taskCommandMetadataKey(kind, identity as TaskMessageStorageIdentity);
+  const parts=[
+    TASK_COMMAND_PREFIX,kind,
+    encodeURIComponent(identity.userId),
+    encodeURIComponent(identity.projectId)
+  ];
+  if(kind!=="task-create")parts.push(encodeURIComponent((identity as TaskMessageStorageIdentity).taskId));
+  return parts.join(":");
 }
 
 function clearTaskCommandPair(
@@ -631,6 +709,14 @@ function clearTaskCommandStorage(
   }
   for (const [draftKey, metadataKey] of pairs) {
     clearStoragePairByKeys(storage, draftKey, metadataKey);
+  }
+  for(const kind of ["task-terminal-start","task-sandbox-release"] as const){
+    const prefix=`${TASK_COMMAND_PREFIX}:${kind}:`;
+    for(const key of keys){
+      if(key.startsWith(prefix)&&matchesEncodedIdentity(key.slice(prefix.length),encodedIdentity)){
+        removeStorageValue(storage,key);
+      }
+    }
   }
 }
 
@@ -710,9 +796,21 @@ function isTaskCommandMetadata(
   if (kind === "task-create") {
     return keys === "createdAt,fingerprint,key,projectId,userId";
   }
-  return keys === "createdAt,fingerprint,key,projectId,taskId,userId"
-    && "taskId" in identity
-    && value.taskId === identity.taskId;
+  if(!("taskId" in identity)||value.taskId!==identity.taskId)return false;
+  if(kind==="task-message")return keys === "createdAt,fingerprint,key,projectId,taskId,userId";
+  if(!isRecord(value.request))return false;
+  if(kind==="task-sandbox-release"){
+    return keys==="createdAt,fingerprint,key,projectId,request,taskId,userId"
+      && Object.keys(value.request).join(",")==="expectedRunId"
+      && typeof value.request.expectedRunId==="string"
+      && Boolean(value.request.expectedRunId);
+  }
+  return keys==="acceptedRunId,createdAt,fingerprint,key,projectId,request,taskId,userId"
+    && (value.acceptedRunId===null||typeof value.acceptedRunId==="string"&&Boolean(value.acceptedRunId))
+    && Object.keys(value.request).sort().join(",")==="expectedRunId,expectedSandboxState"
+    && (value.request.expectedRunId===null||typeof value.request.expectedRunId==="string"&&Boolean(value.request.expectedRunId))
+    && typeof value.request.expectedSandboxState==="string"
+    && ["starting","active","release_requested","released","failed"].includes(value.request.expectedSandboxState);
 }
 
 function canonicalJson(value: unknown): string {

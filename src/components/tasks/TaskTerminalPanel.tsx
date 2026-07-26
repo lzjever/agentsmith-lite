@@ -4,11 +4,22 @@ import { Maximize2, Play, TerminalSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch } from "react";
 import { Banner, Button, IconButton, Spinner, Text } from "@astryxdesign/core";
 import { useTheme } from "@astryxdesign/core/theme";
-import { ApiError, apiClient, newIdempotencyKey, type TaskDetail } from "../../lib/api/client";
+import { ApiError, apiClient, taskCommandOutcomeError, type TaskDetail } from "../../lib/api/client";
 import { xtermThemeFromTokens } from "./terminal-theme";
 import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
 import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
-import { convergeTerminalStart, waitForTerminalStart } from "./task-terminal-start";
+import { submitTerminalStart } from "./task-terminal-start";
+import {
+  clearTaskCommandMetadata,
+  persistTaskCommandMetadata,
+  readTaskCommandMetadata,
+  retireTaskCommandMetadata,
+  taskRuntimeCommandRemountDecision,
+  updateTaskCommandAcceptedRun,
+  type TaskTerminalStartCommandMetadata
+} from "./task-command-storage";
+import { taskDraftStorage } from "./task-draft-snapshot";
+import { useTaskMutationKeys } from "./task-mutation-key";
 import type { TaskCommandFence } from "./task-conversation-state";
 import {
   terminalSurfaceState,
@@ -28,6 +39,8 @@ function formatTerminalState(value: string): string {
 
 export function TaskTerminalPanel({
   taskId,
+  userId,
+  projectId,
   presentation,
   canonicalEpoch,
   intent,
@@ -40,6 +53,8 @@ export function TaskTerminalPanel({
   requestCanonicalRefresh
 }: {
   taskId: string;
+  userId:string;
+  projectId:string;
   presentation: TaskDetail;
   canonicalEpoch: number;
   intent: TerminalIntentState;
@@ -56,10 +71,17 @@ export function TaskTerminalPanel({
   requestCanonicalRefresh: (quiet?: boolean) => Promise<unknown>;
 }) {
   const operation = useRef<AbortController | null>(null);
+  const restoredRoute=useRef<string|null>(null);
+  const mutationKeys=useTaskMutationKeys();
+  const acceptedStart=useRef<{
+    attempt:ReturnType<typeof mutationKeys.fingerprintKey>;
+    expectedRunId:string|null;
+    targetRunId:string;
+  }|null>(null);
   const [explicitStartPending, setExplicitStartPending] = useState(false);
   const [startError, setStartError] = useState("");
   const [capacityRecovery, setCapacityRecovery] = useState<SandboxCapacityRecovery | null>(null);
-  const surface = terminalSurfaceState(presentation, explicitStartPending);
+  const surface = terminalSurfaceState(presentation,explicitStartPending||intent.target!==null);
   const observation: CanonicalTerminalObservation = {
     taskId,
     canonicalEpoch,
@@ -91,6 +113,69 @@ export function TaskTerminalPanel({
     taskId
   ]);
 
+  useEffect(() => {
+    const pending=acceptedStart.current;
+    if(!pending)return;
+    const canonicalRunId=presentation.sandboxState.runId;
+    const targetSettled=canonicalRunId===pending.targetRunId&&presentation.sandboxState.state!=="starting";
+    const targetSuperseded=canonicalRunId!==pending.targetRunId&&canonicalRunId!==pending.expectedRunId;
+    if(!targetSettled&&!targetSuperseded)return;
+    mutationKeys.discard("task-terminal-start",taskId,pending.attempt);
+    retireTaskCommandMetadata(
+      taskDraftStorage(),"task-terminal-start",{userId,projectId,taskId},pending.attempt
+    );
+    acceptedStart.current=null;
+  },[mutationKeys,presentation.sandboxState.runId,presentation.sandboxState.state,projectId,taskId,userId]);
+
+  useEffect(()=>{
+    const route=`${userId}:${projectId}:${taskId}`;
+    if(restoredRoute.current===route)return;
+    restoredRoute.current=route;
+    const storage=taskDraftStorage(),identity={userId,projectId,taskId};
+    const decision=taskRuntimeCommandRemountDecision(
+      readTaskCommandMetadata(storage,"task-terminal-start",identity)
+    );
+    if(decision.status==="cleanup"){
+      clearTaskCommandMetadata(storage,"task-terminal-start",identity);
+      mutationKeys.clear("task-terminal-start");
+      return;
+    }
+    if(decision.status!=="restore")return;
+    const metadata=decision.metadata;
+    if(metadata.fingerprint!==JSON.stringify(metadata.request)){
+      clearTaskCommandMetadata(storage,"task-terminal-start",identity);
+      mutationKeys.clear("task-terminal-start");
+      return;
+    }
+    mutationKeys.restore("task-terminal-start",taskId,metadata);
+    const canonicalRunId=presentation.sandboxState.runId;
+    if(metadata.acceptedRunId&&canonicalRunId===metadata.acceptedRunId&&presentation.sandboxState.state!=="starting"){
+      retireTaskCommandMetadata(storage,"task-terminal-start",identity,metadata);
+      mutationKeys.canonicalAbsorbed("task-terminal-start",taskId,metadata);
+      if(presentation.sandboxState.state==="active"){
+        const fence:TaskCommandFence={
+          taskId,startedAtCanonicalEpoch:canonicalEpoch,
+          expectedRunId:metadata.request.expectedRunId,
+          expectedSandboxState:metadata.request.expectedSandboxState
+        };
+        onIntent({type:"start_target_recorded",fence,targetRunId:metadata.acceptedRunId});
+      }
+      return;
+    }
+    const target=metadata.acceptedRunId;
+    if(target&&canonicalRunId!==target&&canonicalRunId!==metadata.request.expectedRunId){
+      retireTaskCommandMetadata(storage,"task-terminal-start",identity,metadata);
+      mutationKeys.canonicalAbsorbed("task-terminal-start",taskId,metadata);
+      return;
+    }
+    const fence:TaskCommandFence={
+      taskId,startedAtCanonicalEpoch:canonicalEpoch,
+      expectedRunId:metadata.request.expectedRunId,
+      expectedSandboxState:metadata.request.expectedSandboxState
+    };
+    void executeStart(fence,metadata.request,metadata,true);
+  },[canonicalEpoch,mutationKeys,onIntent,presentation.sandboxState.runId,presentation.sandboxState.state,projectId,taskId,userId]);
+
   useEffect(() => () => {
     operation.current?.abort();
     operation.current = null;
@@ -98,33 +183,66 @@ export function TaskTerminalPanel({
 
   async function start() {
     if (surface.kind !== "start") return;
-    operation.current?.abort();
-    const controller = new AbortController();
-    operation.current = controller;
     const commandFence = captureCommandFence();
-    const key = newIdempotencyKey("task-terminal-start");
+    const request={
+      expectedRunId:commandFence.expectedRunId,
+      expectedSandboxState:commandFence.expectedSandboxState
+    };
+    const fingerprint=JSON.stringify(request);
+    const attempt=mutationKeys.fingerprintKey("task-terminal-start",taskId,fingerprint);
+    await executeStart(commandFence,request,attempt,false);
+  }
+
+  async function executeStart(
+    commandFence:TaskCommandFence,
+    request:TaskTerminalStartCommandMetadata["request"],
+    attempt:{key:string;fingerprint:string},
+    restored:boolean
+  ){
+    operation.current?.abort();
+    const controller=new AbortController();
+    operation.current=controller;
     setExplicitStartPending(true);
     setStartError("");
     setCapacityRecovery(null);
     onIntent({ type: "start_progressed" });
     try {
-      await convergeTerminalStart({
+      const storage=taskDraftStorage(),identity={userId,projectId,taskId};
+      const existing=readTaskCommandMetadata(storage,"task-terminal-start",identity);
+      const metadata:TaskTerminalStartCommandMetadata=existing.status==="found"
+        ?existing.metadata
+        :{...identity,...attempt,request,acceptedRunId:null,createdAt:new Date().toISOString()};
+      if(!restored)persistTaskCommandMetadata(storage,"task-terminal-start",metadata);
+      const outcome=await submitTerminalStart({
         taskId,
-        idempotencyKey: key,
+        request,
+        idempotencyKey:attempt.key,
         signal: controller.signal,
-        start: (id, idempotencyKey, signal) => apiClient.startTaskTerminal(id, idempotencyKey, signal),
-        wait: waitForTerminalStart,
-        onReceipt: (next) => {
-          acceptCanonicalMutation("terminal_start", commandFence, {
-            targetRunId: next.runId
-          });
-          onIntent({
-            type: "start_target_recorded",
-            fence: commandFence,
-            targetRunId: next.runId
-          });
-        }
+        start:(id,nextRequest,idempotencyKey,signal)=>apiClient.startTaskTerminal(id,nextRequest,idempotencyKey,signal)
       });
+      mutationKeys.transition("task-terminal-start",taskId,attempt,outcome);
+      if(outcome.outcome==="outcome_unknown")throw outcome.error;
+      if(outcome.outcome==="rejected_before_acceptance"){
+        retireTaskCommandMetadata(storage,"task-terminal-start",identity,attempt);
+        throw taskCommandOutcomeError(outcome);
+      }
+      if("error" in outcome){
+        retireTaskCommandMetadata(storage,"task-terminal-start",identity,attempt);
+        mutationKeys.canonicalAbsorbed("task-terminal-start",taskId,attempt);
+        throw taskCommandOutcomeError(outcome);
+      }
+      if(outcome.outcome==="completed"){
+        retireTaskCommandMetadata(storage,"task-terminal-start",identity,attempt);
+        mutationKeys.canonicalAbsorbed("task-terminal-start",taskId,attempt);
+      }else{
+        if(!updateTaskCommandAcceptedRun(storage,"task-terminal-start",identity,attempt,outcome.runId)){
+          throw new Error("The Terminal command target could not be saved in this browser.");
+        }
+        acceptedStart.current={attempt,expectedRunId:request.expectedRunId,targetRunId:outcome.runId};
+      }
+      acceptCanonicalMutation("terminal_start",commandFence,{targetRunId:outcome.runId});
+      onIntent({type:"start_target_recorded",fence:commandFence,targetRunId:outcome.runId});
+      void requestCanonicalRefresh(true);
     } catch (reason) {
       if (controller.signal.aborted) return;
       if (reason instanceof ApiError && reason.presentation) {
@@ -147,6 +265,7 @@ export function TaskTerminalPanel({
   if (terminalTransportEnabled(surface, intent)) {
     return <TerminalTransport
       taskId={taskId}
+      expectedRunId={intent.fence!.runId!}
       onAccessTerminated={handleAccessTerminated}
     />;
   }
@@ -187,9 +306,11 @@ export function TaskTerminalPanel({
 
 function TerminalTransport({
   taskId,
+  expectedRunId,
   onAccessTerminated
 }: {
   taskId: string;
+  expectedRunId: string;
   onAccessTerminated: () => void;
 }) {
   const active = true;
@@ -323,7 +444,7 @@ function TerminalTransport({
     let shellExited = false;
     let transportTerminated = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    const socket = new WebSocket(apiClient.taskTerminalWebSocketUrl(taskId));
+    const socket = new WebSocket(apiClient.taskTerminalWebSocketUrl(taskId,expectedRunId));
     socketInstance.current = socket;
     setState("connecting");
 
@@ -411,10 +532,13 @@ function TerminalTransport({
         return;
       }
       if (event.code === 1009) {
+        transportTerminated = true;
+        shellExited = true;
         if (retryTimer) clearTimeout(retryTimer);
         retryScheduled = false;
         setError(event.reason || "Task terminal connection exceeded its buffer limit.");
         setState("error");
+        onAccessTerminated();
         return;
       }
       retryOrFail("Task terminal connection failed.");
@@ -426,7 +550,7 @@ function TerminalTransport({
       socket.close();
       if (socketInstance.current === socket) socketInstance.current = null;
     };
-  }, [fitTerminal, generation, onAccessTerminated, taskId, terminalEpoch]);
+  }, [expectedRunId, fitTerminal, generation, onAccessTerminated, taskId, terminalEpoch]);
 
   useEffect(() => {
     const updateAppearance = () => {

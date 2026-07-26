@@ -514,6 +514,334 @@ describe("sandbox Run store", () => {
     if(activeConvergence.kind==="replay")assert.equal(activeConvergence.responseStatus,200);
   });
 
+  it("admits one Terminal owner when different keys race for the same Run",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const run=sandboxRun({runId:"run_terminal_owner",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const startInput=(key:string,claimToken:string)=>({
+      taskId:task.id,
+      idempotency:{
+        actorId:run.startedByUserId,projectId:run.projectId,operation:"terminal-start" as const,
+        key,requestHash:`hash-${key}`,resourceId:run.runId,claimToken,
+        now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
+      },
+      admission:{namespace:run.namespace,namespaceLimit:100},
+      restart:{
+        expectedReleasedRunId:null,
+        task:{...task,currentRunId:run.runId,updatedAt:run.updatedAt},
+        runtimeState:{botifiedBaseUrl:"http://terminal"},
+        sandboxRun:run,
+        reservedAt:run.updatedAt
+      },
+      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+      rejectedAuditEvent:rejectedAdmissionAudit(run,"terminal",key)
+    });
+    const firstInput=startInput("terminal-owner-a","terminal-owner-a-claim");
+    const secondInput=startInput("terminal-owner-b","terminal-owner-b-claim");
+
+    const [first,second]=await Promise.all([
+      store.beginTerminalStart(firstInput),
+      store.beginTerminalStart(secondInput)
+    ]);
+    assert.equal(first.kind,"claimed");
+    assert.equal(second.kind,"replay");
+    if(second.kind==="replay"){
+      assert.equal(second.responseStatus,409);
+      assert.deepEqual(second.responseBody,{
+        outcome:"rejected_before_acceptance",
+        keyDisposition:"retire",
+        error:"Terminal start is already in progress for this Task",
+        code:"terminal_start_already_in_progress"
+      });
+    }
+    assert.deepEqual(await store.findInProgressTerminalStartOperation(run.runId),{
+      actorId:firstInput.idempotency.actorId,
+      projectId:firstInput.idempotency.projectId,
+      operation:"terminal-start",
+      key:firstInput.idempotency.key,
+      requestHash:firstInput.idempotency.requestHash,
+      resourceId:run.runId,
+      claimToken:firstInput.idempotency.claimToken
+    });
+
+    const startupClaimToken="terminal-owner-startup",deadline=runTimestamp(4);
+    assert.equal((await store.claimSandboxStartup({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:startupClaimToken,claimedAt:runTimestamp(1),leaseExpiresAt:deadline
+    })).kind,"claimed");
+    assert.ok(await store.beginSandboxStartupAction({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:startupClaimToken,actionDeadlineAt:deadline,startedAt:runTimestamp(1)
+    }));
+    assert.equal((await store.activateTaskSandboxRun({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      startupClaimToken,actionDeadlineAt:deadline,activatedAt:runTimestamp(2),
+      auditEvent:{
+        id:"audit_terminal_owner_active",projectId:run.projectId,actorId:null,
+        action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:task.id,
+        detail:{taskId:task.id,runId:run.runId},createdAt:runTimestamp(2)
+      }
+    })).kind,"activated");
+    const ownerReplay=await store.beginTerminalStart({
+      ...firstInput,
+      idempotency:{...firstInput.idempotency,claimToken:"terminal-owner-replay",now:runTimestamp(2)}
+    });
+    assert.equal(ownerReplay.kind,"replay");
+    if(ownerReplay.kind==="replay")assert.deepEqual(ownerReplay.responseBody,{
+      outcome:"completed",keyDisposition:"retire",runId:run.runId
+    });
+    const loserReplay=await store.beginTerminalStart({
+      ...secondInput,
+      idempotency:{...secondInput.idempotency,claimToken:"terminal-loser-replay",now:runTimestamp(2)}
+    });
+    assert.equal(loserReplay.kind,"replay");
+    if(loserReplay.kind==="replay")assert.equal(loserReplay.responseStatus,409);
+  });
+
+  it("settles the losing Terminal key when provisional Runs race from one released fence",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const startInput=(suffix:string)=>{
+      const run=sandboxRun({
+        runId:`run_terminal_provisional_${suffix}`,
+        createdAt:runTimestamp(1),
+        updatedAt:runTimestamp(1)
+      });
+      return{
+        taskId:task.id,
+        idempotency:{
+          actorId:run.startedByUserId,projectId:run.projectId,operation:"terminal-start" as const,
+          key:`terminal-provisional-${suffix}`,requestHash:`hash-${suffix}`,resourceId:run.runId,
+          claimToken:`claim-${suffix}`,now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
+        },
+        admission:{namespace:run.namespace,namespaceLimit:100},
+        restart:{
+          expectedReleasedRunId:null,
+          task:{...task,currentRunId:run.runId,updatedAt:run.updatedAt},
+          runtimeState:{botifiedBaseUrl:`http://terminal-${suffix}`},
+          sandboxRun:run,
+          reservedAt:run.updatedAt
+        },
+        rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+        rejectedAuditEvent:rejectedAdmissionAudit(run,"terminal",suffix)
+      };
+    };
+    const firstInput=startInput("a"),secondInput=startInput("b");
+    const [first,second]=await Promise.all([
+      store.beginTerminalStart(firstInput),
+      store.beginTerminalStart(secondInput)
+    ]);
+
+    assert.equal(first.kind,"claimed");
+    assert.equal(second.kind,"replay");
+    if(second.kind==="replay"){
+      assert.equal(second.responseStatus,409);
+      assert.equal((second.responseBody as {outcome:string}).outcome,"rejected_before_acceptance");
+    }
+    const runs=(await store.sandboxRuns.list()).filter((run)=>run.taskId===task.id);
+    assert.deepEqual(runs.map((run)=>run.runId),[firstInput.restart.sandboxRun.runId]);
+    const owners=await Promise.all([
+      store.findInProgressTerminalStartOperation(firstInput.idempotency.resourceId),
+      store.findInProgressTerminalStartOperation(secondInput.idempotency.resourceId)
+    ]);
+    assert.equal(owners.filter(Boolean).length,1);
+    assert.equal(owners[0]?.key,firstInput.idempotency.key);
+    assert.equal(owners[1],null);
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:secondInput.idempotency.actorId,
+      projectId:secondInput.idempotency.projectId,
+      operation:secondInput.idempotency.operation,
+      key:secondInput.idempotency.key,
+      requestHash:secondInput.idempotency.requestHash
+    }),{
+      kind:"replay",resourceId:secondInput.idempotency.resourceId,responseStatus:409,
+      responseBody:{
+        outcome:"rejected_before_acceptance",keyDisposition:"retire",
+        error:"Terminal start is already in progress for this Task",
+        code:"terminal_start_already_in_progress"
+      }
+    });
+  });
+
+  it("terminalizes a pending Terminal owner through release cleanup before admitting a new key",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const firstRun=sandboxRun({runId:"run_terminal_released_owner",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const terminalInput=(key:string,run:PersistedSandboxRunState,expectedReleasedRunId:string|null)=>({
+      taskId:task.id,
+      idempotency:{
+        actorId:run.startedByUserId,projectId:run.projectId,operation:"terminal-start" as const,
+        key,requestHash:`${key}-hash`,resourceId:run.runId,claimToken:`${key}-claim`,
+        now:run.updatedAt,leaseExpiresAt:runTimestamp(6)
+      },
+      admission:{namespace:run.namespace,namespaceLimit:100},
+      restart:{
+        expectedReleasedRunId,
+        task:{...task,currentRunId:run.runId,updatedAt:run.updatedAt},
+        runtimeState:{botifiedBaseUrl:`http://${run.runId}`},
+        sandboxRun:run,
+        reservedAt:run.updatedAt
+      },
+      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+      rejectedAuditEvent:rejectedAdmissionAudit(run,"terminal",key)
+    });
+    const firstInput=terminalInput("terminal-release-owner",firstRun,null);
+    assert.equal((await store.beginTerminalStart(firstInput)).kind,"claimed");
+    assert.equal(await store.requestTaskSandboxRelease(await beginRelease(store,"terminal-owner-release",firstRun)),"applied");
+
+    const oldReceipt=await store.findTaskIdempotency({
+      actorId:firstInput.idempotency.actorId,
+      projectId:firstInput.idempotency.projectId,
+      operation:firstInput.idempotency.operation,
+      key:firstInput.idempotency.key,
+      requestHash:firstInput.idempotency.requestHash
+    });
+    assert.equal(oldReceipt?.kind,"replay");
+    if(oldReceipt?.kind==="replay"){
+      assert.equal(oldReceipt.responseStatus,502);
+      assert.equal((oldReceipt.responseBody as {outcome:string;runId:string}).outcome,"completed");
+      assert.equal((oldReceipt.responseBody as {outcome:string;runId:string}).runId,firstRun.runId);
+      assert.equal((oldReceipt.responseBody as {error:{code:string}}).error.code,"sandbox_start_failed");
+    }
+
+    const requested=await store.sandboxRuns.get(firstRun.runId);assert.ok(requested);
+    const releasedAt=runTimestamp(3);
+    const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+    assert.equal(await store.completeSandboxRunRelease({
+      runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
+      settlement:{
+        runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
+        taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
+        startedAt:requested.startedAt,releasedAt,durationSeconds:0,resources:requested.resourceSnapshot,
+        releaseReason:requested.releaseReason!
+      },
+      auditEvent:{
+        id:"audit_terminal_owner_released",projectId:requested.projectId,actorId:null,
+        subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
+        resourceKind:"sandbox",resourceId:requested.taskId,
+        detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
+        createdAt:releasedAt
+      }
+    }),"applied");
+
+    const secondRun=sandboxRun({runId:"run_terminal_after_release",createdAt:runTimestamp(4),updatedAt:runTimestamp(4)});
+    assert.equal((await store.beginTerminalStart(
+      terminalInput("terminal-after-release",secondRun,firstRun.runId)
+    )).kind,"claimed");
+    assert.equal((await store.findTask(task.id))?.currentRunId,secondRun.runId);
+  });
+
+  it("terminalizes a pending Terminal owner when its startup action deadline drains",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const run=sandboxRun({runId:"run_terminal_deadline_owner",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const idempotency={
+      actorId:run.startedByUserId,projectId:run.projectId,operation:"terminal-start" as const,
+      key:"terminal-deadline-owner",requestHash:"terminal-deadline-owner-hash",resourceId:run.runId,
+      claimToken:"terminal-deadline-owner-claim",now:runTimestamp(1),leaseExpiresAt:runTimestamp(5)
+    };
+    assert.equal((await store.beginTerminalStart({
+      taskId:task.id,idempotency,admission:{namespace:run.namespace,namespaceLimit:100},
+      restart:{
+        expectedReleasedRunId:null,task:{...task,currentRunId:run.runId,updatedAt:run.updatedAt},
+        runtimeState:{botifiedBaseUrl:"http://terminal-deadline"},sandboxRun:run,reservedAt:run.updatedAt
+      },
+      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+      rejectedAuditEvent:rejectedAdmissionAudit(run,"terminal","deadline-owner")
+    })).kind,"claimed");
+    assert.ok(await store.markTaskSandboxStartupReady({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,readyAt:runTimestamp(1)
+    }));
+    const startupClaimToken="terminal-deadline-startup",actionDeadlineAt=runTimestamp(3);
+    assert.equal((await store.claimSandboxStartup({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:startupClaimToken,claimedAt:runTimestamp(1),leaseExpiresAt:actionDeadlineAt
+    })).kind,"claimed");
+    assert.ok(await store.beginSandboxStartupAction({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:startupClaimToken,actionDeadlineAt,startedAt:runTimestamp(1)
+    }));
+    const action=await store.sandboxRuns.get(run.runId);assert.ok(action);
+    const claimed=await store.sandboxRuns.claimForCleanup({
+      runId:run.runId,expectedFencingToken:action.fencingToken,claimedAt:actionDeadlineAt
+    });assert.ok(claimed);
+    assert.ok(await store.drainSandboxStartupAction({
+      taskId:task.id,runId:run.runId,expectedFencingToken:claimed.fencingToken,
+      claimToken:startupClaimToken,actionDeadlineAt,drainedAt:runTimestamp(4),
+      failureCode:"startup_failed",failureMessage:"Startup action deadline elapsed",
+      auditEvent:{
+        id:"audit_terminal_deadline_drained",projectId:run.projectId,actorId:null,
+        subjectUserId:run.startedByUserId,action:"sandbox.failed",status:"accepted",
+        resourceKind:"sandbox",resourceId:task.id,
+        detail:{taskId:task.id,runId:run.runId},createdAt:runTimestamp(4)
+      }
+    }));
+    assert.equal(await store.findInProgressTerminalStartOperation(run.runId),null);
+    const replay=await store.findTaskIdempotency({
+      actorId:idempotency.actorId,projectId:idempotency.projectId,operation:idempotency.operation,
+      key:idempotency.key,requestHash:idempotency.requestHash
+    });
+    assert.equal(replay?.kind,"replay");
+    if(replay?.kind==="replay")assert.equal(replay.responseStatus,502);
+  });
+
+  it("rejects an already released target when its Task was retargeted before the final Release fence",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const runA=sandboxRun({
+      runId:"run_release_retarget_a",state:"released",releaseReason:"requested",
+      releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2),fencingToken:2,updatedAt:runTimestamp(2)
+    });
+    const task=await createTaskWithRun(store,runA);
+    const release=await beginRelease(store,"release-retarget-a",runA);
+    const runB=sandboxRun({runId:"run_release_retarget_b",createdAt:runTimestamp(3),updatedAt:runTimestamp(3)});
+    assert.equal((await store.restartTaskSandboxAtomically({
+      expectedReleasedRunId:runA.runId,
+      task:{...task,currentRunId:runB.runId,updatedAt:runB.updatedAt},
+      runtimeState:{botifiedBaseUrl:"http://release-retarget-b"},
+      sandboxRun:runB,reservedAt:runB.updatedAt,admission:{namespace:runB.namespace,namespaceLimit:100},
+      ...restartAdmission(runB,"release-retarget-b")
+    })).kind,"restarted");
+
+    assert.equal(await store.requestTaskSandboxRelease(release),"conflict");
+    assert.equal((await store.findTask(task.id))?.currentRunId,runB.runId);
+    assert.equal((await store.sandboxRuns.get(runB.runId))?.state,"starting");
+  });
+
+  it("rolls back Run activation when the exact Terminal receipt cannot commit",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const task=await createTaskWithoutRun(store);
+    const run=sandboxRun({runId:"run_terminal_fault",createdAt:runTimestamp(1),updatedAt:runTimestamp(1)});
+    const idempotency={
+      actorId:run.startedByUserId,projectId:run.projectId,operation:"terminal-start" as const,
+      key:"terminal-fault",requestHash:"terminal-fault-hash",resourceId:run.runId,
+      claimToken:"terminal-fault-claim",now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
+    };
+    const begun=await store.beginTerminalStart({
+      taskId:task.id,idempotency,admission:{namespace:run.namespace,namespaceLimit:100},
+      restart:{expectedReleasedRunId:null,task:{...task,currentRunId:run.runId},runtimeState:{botifiedBaseUrl:"http://terminal"},sandboxRun:run,reservedAt:run.updatedAt},
+      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
+      rejectedAuditEvent:rejectedAdmissionAudit(run,"terminal","terminal-fault")
+    });
+    assert.equal(begun.kind,"claimed");
+    const startupClaimToken="terminal-fault-startup",deadline=runTimestamp(4);
+    assert.equal((await store.claimSandboxStartup({taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,claimToken:startupClaimToken,claimedAt:runTimestamp(1),leaseExpiresAt:deadline})).kind,"claimed");
+    assert.ok(await store.beginSandboxStartupAction({taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,claimToken:startupClaimToken,actionDeadlineAt:deadline,startedAt:runTimestamp(1)}));
+
+    const auditEvent={
+      id:"audit_terminal_fault",projectId:run.projectId,actorId:null,action:"sandbox.started" as const,
+      status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:task.id,
+      detail:{taskId:task.id,runId:run.runId},createdAt:runTimestamp(2)
+    };
+    Object.defineProperty(auditEvent,"subjectUserId",{enumerable:true,get(){throw new Error("injected audit failure")}});
+    await assert.rejects(store.activateTaskSandboxRun({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
+      actionDeadlineAt:deadline,activatedAt:runTimestamp(2),
+      auditEvent
+    }));
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"starting");
+    assert.deepEqual(await store.beginTaskIdempotency({...idempotency,claimToken:"parallel",now:runTimestamp(2)}),{kind:"in_progress",resourceId:run.runId});
+  });
+
   it("never rebinds an old Terminal key from its released Run to the current Run",async()=>{
     const store=createLocalInMemoryProductStore();
     const runA=sandboxRun({runId:"run_terminal_old_a",state:"released",releaseReason:"requested",releaseRequestedAt:runTimestamp(1),releasedAt:runTimestamp(2),fencingToken:2,updatedAt:runTimestamp(2)});
@@ -545,7 +873,9 @@ describe("sandbox Run store", () => {
 
     assert.equal(result.kind,"replay");
     if(result.kind==="replay"){
-      assert.equal(result.responseStatus,409);
+      assert.equal(result.responseStatus,502);
+      assert.equal((result.responseBody as {outcome:string;runId:string}).outcome,"completed");
+      assert.equal((result.responseBody as {outcome:string;runId:string}).runId,runA.runId);
       assert.deepEqual((result.responseBody as {error:{presentation:unknown}}).error.presentation,canonicalPresentation);
     }
     const replay=await store.findTaskIdempotency({

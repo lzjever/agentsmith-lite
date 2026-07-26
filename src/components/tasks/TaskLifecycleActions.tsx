@@ -6,13 +6,14 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskCapabilities } from "../../lib/api/client";
 import { useTaskMutationKeys } from "./task-mutation-key";
 
-export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefresh, onRelease, onDelete, disabled = false, onBusyChange }: { task: Task; capabilities: TaskCapabilities; releaseLabel: string; onRefresh: () => Promise<void>; onRelease: () => Promise<void>; onDelete: () => Promise<void>; disabled?: boolean; onBusyChange?: (busy: boolean) => void }) {
+export function TaskLifecycleActions({ task, capabilities, releaseRunId, releaseLabel, onRefresh, onRelease, onDelete, disabled = false, onBusyChange }: { task: Task; capabilities: TaskCapabilities; releaseRunId:string|null;releaseLabel: string; onRefresh: () => Promise<void>; onRelease: (expectedRunId:string) => Promise<void>; onDelete: () => Promise<void>; disabled?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const mutationKeys = useTaskMutationKeys();
   const showToast = useToast();
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  const [releaseTargetRunId,setReleaseTargetRunId]=useState<string|null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [archiveError, setArchiveError] = useState("");
   const [title, setTitle] = useState(task.title ?? "");
@@ -33,7 +34,10 @@ export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefre
   useEffect(() => {
     if (!capabilities.editTask) setRenameOpen(false);
     if (!capabilities.archiveTask) setArchiveOpen(false);
-    if (!capabilities.releaseSandbox) setReleaseOpen(false);
+    if (!capabilities.releaseSandbox) {
+      setReleaseOpen(false);
+      setReleaseTargetRunId(null);
+    }
     if (!capabilities.deleteTask) setDeleteOpen(false);
   }, [capabilities.archiveTask, capabilities.deleteTask, capabilities.editTask, capabilities.releaseSandbox]);
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange]);
@@ -125,7 +129,8 @@ export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefre
     setReleaseError("");
     let released = false;
     try {
-      await onRelease();
+      if(!releaseTargetRunId)throw new Error("The Sandbox Run changed before confirmation.");
+      await onRelease(releaseTargetRunId);
       released = true;
     } catch (reason) {
       setReleaseError(message(reason, "The Sandbox could not be released."));
@@ -134,6 +139,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefre
     }
     if (released) {
       setReleaseOpen(false);
+      setReleaseTargetRunId(null);
       restoreMenuFocus();
     }
   }
@@ -142,6 +148,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefre
     if (releasing) return;
     setReleaseError("");
     setReleaseOpen(false);
+    setReleaseTargetRunId(null);
     restoreMenuFocus();
   }
 
@@ -176,7 +183,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseLabel, onRefre
       ...(capabilities.editTask ? [{ label: "Rename", icon: <Pencil size={15} />, onClick: openRename }] : []),
       ...(capabilities.archiveTask ? [{ label: "Archive", icon: <Archive size={15} />, onClick: () => setArchiveOpen(true) }] : []),
       ...((capabilities.releaseSandbox || capabilities.deleteTask) && (capabilities.editTask || capabilities.archiveTask) ? [{ type: "divider" as const }] : []),
-      ...(capabilities.releaseSandbox ? [{ label: releaseLabel, icon: <Power size={15} />, onClick: () => setReleaseOpen(true) }] : []),
+      ...(capabilities.releaseSandbox&&releaseRunId ? [{ label: releaseLabel, icon: <Power size={15} />, onClick: () => {setReleaseTargetRunId(releaseRunId);setReleaseOpen(true);} }] : []),
       ...(capabilities.deleteTask ? [{ label: "Delete task", icon: <Trash2 size={15} />, onClick: () => setDeleteOpen(true) }] : []),
     ]} />
     <Dialog

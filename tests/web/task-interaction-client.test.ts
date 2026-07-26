@@ -8,12 +8,12 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 describe("task interaction API client", () => {
   it("builds terminal sockets from both same-origin and absolute development API bases", () => {
     assert.equal(
-      taskTerminalWebSocketUrlForApiBase("/app/api/v1", "task/1", "https://agentsmith.localhost/app/tasks"),
-      "wss://agentsmith.localhost/app/api/v1/tasks/task%2F1/terminal/ws"
+      taskTerminalWebSocketUrlForApiBase("/app/api/v1", "task/1", "run/1", "https://agentsmith.localhost/app/tasks"),
+      "wss://agentsmith.localhost/app/api/v1/tasks/task%2F1/terminal/ws?expectedRunId=run%2F1"
     );
     assert.equal(
-      taskTerminalWebSocketUrlForApiBase("http://127.0.0.1:3001/api/v1", "task/1", "http://127.0.0.1:3000/tasks"),
-      "ws://127.0.0.1:3001/api/v1/tasks/task%2F1/terminal/ws"
+      taskTerminalWebSocketUrlForApiBase("http://127.0.0.1:3001/api/v1", "task/1", "run/1", "http://127.0.0.1:3000/tasks"),
+      "ws://127.0.0.1:3001/api/v1/tasks/task%2F1/terminal/ws?expectedRunId=run%2F1"
     );
   });
 
@@ -31,7 +31,7 @@ describe("task interaction API client", () => {
     const edited = await apiClient.updateTaskMessage("task/1", "message/1", "Updated", "edit-key");
     const deleted = await apiClient.deleteTaskMessage("task/1", "message/1", "delete-key");
     await apiClient.abortTaskTurn("task/1", "abort-key");
-    await apiClient.releaseTaskSandbox("task/1", "release-key");
+    await apiClient.releaseTaskSandbox("task/1",{expectedRunId:"run_1"},"release-key");
     await apiClient.stopTaskWork("task/1", "interaction/1", "stop-key");
     await apiClient.editTask("task/1", "New title", "task-edit-key");
     await apiClient.archiveTask("task/1", "archive-key");
@@ -39,7 +39,7 @@ describe("task interaction API client", () => {
     assert.match(calls[1]!.url, /tasks\/task%2F1\/interactions\?cursor=before\+1$/);
     assert.deepEqual(calls.slice(2).map((call) => [call.init.method, new Headers(call.init.headers).get("idempotency-key")]), [["POST", "send-key"], ["PATCH", "edit-key"], ["DELETE", "delete-key"], ["POST", "abort-key"], ["POST", "release-key"], ["POST", "stop-key"], ["PATCH", "task-edit-key"], ["POST", "archive-key"]]);
     assert.match(calls[6]!.url, /tasks\/task%2F1\/sandbox\/release$/);
-    assert.equal(calls[6]!.init.body, "{}");
+    assert.equal(calls[6]!.init.body,JSON.stringify({expectedRunId:"run_1"}));
     assert.match(calls[7]!.url, /tasks\/task%2F1\/work\/interaction%2F1\/stop$/);
     assert.match(calls[8]!.url, /tasks\/task%2F1$/);
     assert.match(calls[9]!.url, /tasks\/task%2F1\/archive$/);

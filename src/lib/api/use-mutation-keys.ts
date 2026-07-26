@@ -131,8 +131,7 @@ export function createMutationKeyStore(
       const id = scope(operation, requestIdentity);
       const existing = keys.get(id);
       if (
-        existing?.state === "completed_waiting"
-        && existing.key === attempt.key
+        existing?.key === attempt.key
         && existing.fingerprint === attempt.fingerprint
       ) keys.delete(id);
     },

@@ -633,9 +633,14 @@ describe("file library service", () => {
     },"slow-health-task");
     const task=await store.findTask(created.task.id);assert.ok(task?.currentRunId);
 
-    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,"slow-health-terminal");
+    const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,{expectedRunId:run.runId,expectedSandboxState:run.state},"slow-health-terminal");
+    store.findTaskPreparationOperation=async()=>null;
+    store.listTaskMessagesDue=async()=>[];
+    store.listActiveTasks=async()=>[];
+    await services.tasks.syncActiveTasksOnce();
 
-    assert.equal(receipt.status,"in_progress");
+    assert.equal(receipt.outcome,"accepted_in_progress");
     assert.equal(healthAborted,true);
     await new Promise<void>((resolve)=>setImmediate(resolve));
     assert.equal(services.tasks.hasLocalStartupOperation(task.currentRunId),false);
@@ -664,9 +669,14 @@ describe("file library service", () => {
     },"slow-state-task");
     const task=await store.findTask(created.task.id);assert.ok(task?.currentRunId);
 
-    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,"slow-state-terminal");
+    const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,{expectedRunId:run.runId,expectedSandboxState:run.state},"slow-state-terminal");
+    store.findTaskPreparationOperation=async()=>null;
+    store.listTaskMessagesDue=async()=>[];
+    store.listActiveTasks=async()=>[];
+    await services.tasks.syncActiveTasksOnce();
 
-    assert.equal(receipt.status,"in_progress");
+    assert.equal(receipt.outcome,"accepted_in_progress");
     assert.equal(stateReadAborted,true);
     await new Promise<void>((resolve)=>setImmediate(resolve));
     assert.equal(services.tasks.hasLocalStartupOperation(task.currentRunId),false);
@@ -699,9 +709,14 @@ describe("file library service", () => {
     await store.jsonDocs.delete("sandbox_runtime_state",task.id);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state",task.id),null);
 
-    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,"slow-state-rebuild-terminal");
+    const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+    const receipt=await services.tasks.startTaskTerminal(ownerId,task.id,{expectedRunId:run.runId,expectedSandboxState:run.state},"slow-state-rebuild-terminal");
+    store.findTaskPreparationOperation=async()=>null;
+    store.listTaskMessagesDue=async()=>[];
+    store.listActiveTasks=async()=>[];
+    await services.tasks.syncActiveTasksOnce();
 
-    assert.equal(receipt.status,"in_progress");
+    assert.equal(receipt.outcome,"accepted_in_progress");
     assert.equal(stateReadSignal?.aborted,true);
     assert.equal(stateReadAborted,true);
     await new Promise<void>((resolve)=>setImmediate(resolve));

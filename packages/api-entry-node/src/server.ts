@@ -172,12 +172,15 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
         const requestUrl=new URL(req.url??"/","http://localhost");
         const routed=routeUrlForAppBasePath(requestUrl,appBasePath);
         const match=routed?.pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/terminal\/ws$/);
-        if(!match)throw new ProductError("Route not found",404);
+        if(!routed||!match)throw new ProductError("Route not found",404);
         if(options.publicBaseUrl&&req.headers.origin&&new URL(req.headers.origin).origin!==new URL(options.publicBaseUrl).origin)throw new ProductError("Terminal origin is not allowed",403);
         const sessionCookie=getCookie(req,"asl_session");
         const principal=await services.auth.requireSessionPrincipal(sessionCookie);
         terminalTaskId=decodeURIComponent(match[1]!);
-        const target=await services.tasks.openTaskTerminal(principal.user.id,terminalTaskId);
+        assertOnlySearchParams(routed,["expectedRunId"]);
+        const expectedRunId=asString(routed.searchParams.get("expectedRunId"));
+        if(!expectedRunId)throw new ProductError("Terminal expectedRunId is required",400);
+        const target=await services.tasks.openTaskTerminal(principal.user.id,terminalTaskId,expectedRunId);
         terminalAcquired=true;
         terminalSockets.handleUpgrade(req,socket,head,(client)=>{
           let released=false;
@@ -201,7 +204,7 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
             try{
               const currentPrincipal=await services.auth.requireSessionPrincipal(sessionCookie);
               if(currentPrincipal.user.id!==principal.user.id)throw new ProductError("Terminal session identity changed",403);
-              await services.tasks.validateTaskTerminalAccess(principal.user.id,terminalTaskId!);
+              await services.tasks.validateTaskTerminalAccess(principal.user.id,terminalTaskId!,target.runId);
             }
             catch{
               clearPendingInput();
@@ -758,8 +761,17 @@ async function routeApi(
       if(segments[5]&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));}
     }
     if (segments[4] === "archive" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.archiveTask(user.id,taskId,requireIdempotencyKey(req))); }
-    if (segments[4] === "sandbox" && segments[5] === "release" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.releaseTaskSandbox(user.id,taskId,requireIdempotencyKey(req))); }
-    if (segments[4] === "terminal" && segments[5] === "start" && !segments[6] && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);const receipt=await services.tasks.startTaskTerminal(user.id,taskId,requireIdempotencyKey(req));return sendJson(res,receipt.status==="in_progress"?202:200,receipt); }
+    if (segments[4] === "sandbox" && segments[5] === "release" && !segments[6] && method === "POST") {
+      assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedRunId"]);
+      return sendTaskRuntimeCommand(res,()=>services.tasks.releaseTaskSandbox(user.id,taskId,{expectedRunId:asString(body.expectedRunId)},requireIdempotencyKey(req)));
+    }
+    if (segments[4] === "terminal" && segments[5] === "start" && !segments[6] && method === "POST") {
+      assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["expectedRunId","expectedSandboxState"]);
+      const expectedRunId=body.expectedRunId===null?null:asString(body.expectedRunId);
+      const expectedSandboxState=asString(body.expectedSandboxState);
+      if(!["starting","active","release_requested","released","failed"].includes(expectedSandboxState))throw new ProductError("expectedSandboxState is invalid",400);
+      return sendTaskRuntimeCommand(res,()=>services.tasks.startTaskTerminal(user.id,taskId,{expectedRunId,expectedSandboxState:expectedSandboxState as import("../../contracts/src/api.js").TaskSandboxStateProjection["state"]},requireIdempotencyKey(req)));
+    }
     if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
     if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
     if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
@@ -1401,6 +1413,19 @@ async function sendTaskMessageCommand(
 ):Promise<void>{
   try{
     return sendJson(res,200,{outcome:"completed",keyDisposition:"retire",...await command()});
+  }catch(error){
+    return sendRejectedTaskCommand(res,error);
+  }
+}
+
+async function sendTaskRuntimeCommand(
+  res:ServerResponse,
+  command:()=>Promise<import("../../contracts/src/api.js").TaskTerminalStartReceipt|import("../../contracts/src/api.js").TaskSandboxReleaseReceipt>
+):Promise<void>{
+  try{
+    const outcome=await command();
+    const status=outcome.outcome==="accepted_in_progress"?202:"error" in outcome?502:200;
+    return sendJson(res,status,outcome);
   }catch(error){
     return sendRejectedTaskCommand(res,error);
   }

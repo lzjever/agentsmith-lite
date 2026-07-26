@@ -965,12 +965,14 @@ export class PostgresProductStore implements ProductStore {
     const run=await selectSandboxRunWithClient(client,input.runId,true);
     if(!run||!task||!taskRunRowIdentityMatches(task,run,input))return{kind:"conflict" as const};
     if(run.state==="active"&&task.deleted_at===null&&task.archived_at===null){
+      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,run,input.activatedAt);
       return{kind:"already_running" as const,task:mapTask(task),run};
     }
     if(run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.startupClaimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.activatedAt>input.actionDeadlineAt||task.deleted_at!==null||task.archived_at!==null){
       return{kind:"conflict" as const};
     }
     const activatedRun={...run,state:"active" as const,startedAt:run.startedAt??input.activatedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
+    await terminalizeTerminalStartOwnerWithClient(client,input.taskId,activatedRun,input.activatedAt);
     const updatedTask=await client.query<AgentTaskRow>("update agent_tasks set updated_at=$3 where id=$1 and current_run_id=$2 returning *",[input.taskId,input.runId,input.activatedAt]);
     if(!updatedTask.rows[0])throw new Error("Task sandbox activation lost its task lock");
     await updateSandboxRunWithClient(client,activatedRun);
@@ -986,10 +988,16 @@ export class PostgresProductStore implements ProductStore {
     const lockedTask=await client.query<SandboxReleaseTaskRow>("select task.*,project.workspace_id as project_workspace_id,project.owner_user_id as project_owner_user_id from agent_tasks task join projects project on project.id=task.project_id where task.id=$1 for update of task",[input.run.taskId]);const task=lockedTask.rows[0];
     const current=await selectSandboxRunWithClient(client,input.runId,true);if(!current||!sameRunIdentity(current,input.run))return"conflict" as const;
     const existing=await client.query<SandboxUsageSettlementRow>("select * from sandbox_usage_settlements where run_id=$1",[input.runId]);
-    if(isConfirmedReleasedRun(current)){if(!existing.rows[0]||!sameSettlement(mapSandboxUsageSettlement(existing.rows[0]),input.settlement))return"conflict" as const;await setAuthoritativeActiveTaskUsageWithClient(client,current.projectId,input.run.updatedAt);await insertAuditEventWithClient(client,input.auditEvent);return"already_applied" as const;}
+    if(!task||task.current_run_id!==current.runId||!sameTaskRunScopeRow(task,current))return"conflict" as const;
+    if(isConfirmedReleasedRun(current)){
+      if(!existing.rows[0]||!sameSettlement(mapSandboxUsageSettlement(existing.rows[0]),input.settlement))return"conflict" as const;
+      await terminalizeTerminalStartOwnerWithClient(client,current.taskId,current,input.run.updatedAt);
+      await setAuthoritativeActiveTaskUsageWithClient(client,current.projectId,input.run.updatedAt);await insertAuditEventWithClient(client,input.auditEvent);return"already_applied" as const;
+    }
     if(current.startupActionDeadlineAt&&current.startupActionDeadlineAt>input.run.updatedAt)return"conflict" as const;
     if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.startupActionDeadlineAt!==null||!isConfirmedReleasedRun(input.run)||!settlementMatchesRun(input.settlement,current,input.run))return"conflict" as const;
     if(!taskMatchesActiveSandboxRunRow(task,current))return"conflict" as const;
+    await terminalizeTerminalStartOwnerWithClient(client,current.taskId,input.run,input.run.updatedAt);
     await client.query("insert into sandbox_usage_settlements (run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,started_at,released_at,duration_seconds,cpu_request_millis,memory_request_bytes,cpu_limit_millis,memory_limit_bytes,release_reason) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",[input.settlement.runId,input.settlement.workspaceId,input.settlement.projectId,input.settlement.taskId,input.settlement.fileLibraryId,input.settlement.startedByUserId,input.settlement.startedAt,input.settlement.releasedAt,input.settlement.durationSeconds,input.settlement.resources.cpuRequestMillis,input.settlement.resources.memoryRequestBytes,input.settlement.resources.cpuLimitMillis,input.settlement.resources.memoryLimitBytes,input.settlement.releaseReason]);
     await updateSandboxRunWithClient(client,input.run);
     await setAuthoritativeActiveTaskUsageWithClient(client,task.project_id,input.run.updatedAt);await insertAuditEventWithClient(client,input.auditEvent);return"applied" as const;
@@ -1002,29 +1010,26 @@ export class PostgresProductStore implements ProductStore {
     if(!current||current.fencingToken!==input.expectedFencingToken||input.startupClaimToken!==undefined&&current.startupClaimToken!==input.startupClaimToken||!["starting","active"].includes(current.state))return null;
     if(!task.rows[0]||task.rows[0].current_run_id!==current.runId||!sameTaskRunScopeRow(task.rows[0],current))return null;
     const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
+    await terminalizeTerminalStartOwnerWithClient(client,current.taskId,failed,input.failedAt);
     await updateSandboxRunWithClient(client,failed);
     await insertAuditEventWithClient(client,input.auditEvent);
     return failed;
   })}
   async failTaskSandboxStartupAtomically(input:FailTaskSandboxStartupAtomicallyInput):Promise<FailTaskSandboxStartupAtomicallyResult>{return transaction(this.pool,async(client)=>{
-    const idem=input.idempotency;
-    const receipt=(await client.query<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",[idem.actorId,idem.projectId,idem.operation,idem.key])).rows[0];
-    if(!receipt||receipt.request_hash!==idem.requestHash)return{kind:"conflict"};
-    if(receipt.status==="completed")return{kind:"replay",responseStatus:receipt.response_status!,responseBody:mapTaskIdempotencyResponseBody(receipt.operation,receipt.response_body)};
-    if(receipt.claim_token!==idem.claimToken||receipt.operation!=="terminal-start"||receipt.resource_id!==input.failure.runId)return{kind:"conflict"};
-    const observed=await selectSandboxRunWithClient(client,input.failure.runId);
-    if(!observed||observed.projectId!==idem.projectId)return{kind:"conflict"};
-    const project=await client.query("select id from projects where id=$1 for update",[observed.projectId]);
-    if(!project.rows[0])return{kind:"conflict"};
-    const task=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[observed.taskId]);
+    const task=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId]);
     const current=await selectSandboxRunWithClient(client,input.failure.runId,true);
     if(!current||current.fencingToken!==input.failure.expectedFencingToken||!["starting","active"].includes(current.state))return{kind:"conflict"};
     if(!task.rows[0]||task.rows[0].id!==input.taskId||task.rows[0].current_run_id!==current.runId||!sameTaskRunScopeRow(task.rows[0],current)||current.startupClaimToken!==input.startupClaimToken||!strictStructuralEqual(current.resourceNames,input.resourceIdentity))return{kind:"conflict"};
     const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.failure.code,failureCause:input.failure.message,terminalFailure:input.failure.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failure.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failure.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failure.failedAt};
+    const terminalized=await terminalizeTerminalStartOwnerWithClient(
+      client,input.taskId,failed,input.idempotency.updatedAt,
+      {responseStatus:input.idempotency.responseStatus,responseBody:input.idempotency.responseBody},
+      input.idempotency
+    );
+    if(terminalized.kind==="replay")return terminalized;
+    if(terminalized.kind!=="completed")return{kind:"conflict"};
     await updateSandboxRunWithClient(client,failed);
     await insertAuditEventWithClient(client,input.failure.auditEvent);
-    const completed=await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
-    if(completed.rowCount!==1)throw new Error("Terminal startup failure receipt conflict");
     return{kind:"failed",run:failed};
   })}
   async markTaskSandboxStartupReady(input:import("../../ports/src/store.js").MarkTaskSandboxStartupReadyInput):Promise<PersistedSandboxRunState|null>{
@@ -1093,6 +1098,7 @@ export class PostgresProductStore implements ProductStore {
       const run=await selectSandboxRunWithClient(client,input.runId,true);
       if(!task||!run||task.current_run_id!==run.runId||!sameTaskRunScopeRow(task,run)||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.actionDeadlineAt>input.drainedAt||run.cleanupClaimedAt===null)return null;
       const drained={...run,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
+      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,drained,input.drainedAt);
       await updateSandboxRunWithClient(client,drained);
       await insertAuditEventWithClient(client,input.auditEvent);
       return drained;
@@ -1355,51 +1361,77 @@ export class PostgresProductStore implements ProductStore {
   }
 
   async beginTerminalStart(input:import("../../ports/src/store.js").BeginTerminalStartInput):Promise<import("../../ports/src/store.js").BeginTerminalStartResult>{return transaction(this.pool,async(client)=>{
-    const claimed=await claimTaskIdempotencyWithClient(client,input.idempotency);
-    if(claimed.kind==="hash_mismatch"||claimed.kind==="replay")return claimed;
-    const receipt=claimed.kind==="claimed"?claimed.row:(await client.query<TaskIdempotencyRow>(
+    const observedReceipt=(await client.query<TaskIdempotencyRow>(
       "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4",
       [input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key]
     )).rows[0];
-    if(!receipt)return{kind:"conflict"};
+    if(observedReceipt?.request_hash!==undefined&&observedReceipt.request_hash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
+    if(observedReceipt?.status==="completed")return{
+      kind:"replay",responseStatus:observedReceipt.response_status!,
+      responseBody:mapTaskIdempotencyResponseBody(observedReceipt.operation,observedReceipt.response_body)
+    };
+    const observedTarget=await selectSandboxRunWithClient(client,observedReceipt?.resource_id??input.idempotency.resourceId);
+    const admissionRun=input.restart
+      ?{...input.restart.sandboxRun,startupReadyAt:input.restart.reservedAt}
+      :observedTarget;
+    const lockedAdmission=admissionRun
+      ?await lockSandboxAdmissionWithClient(
+        client,
+        input.admission??{namespace:admissionRun.namespace,namespaceLimit:Number.MAX_SAFE_INTEGER},
+        admissionRun
+      )
+      :undefined;
+    const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+    const currentRun=task?.current_run_id?await selectSandboxRunWithClient(client,task.current_run_id,true):null;
+    const observedTargetResourceId=observedReceipt?.resource_id??input.idempotency.resourceId;
+    const lockedObservedTarget=observedTargetResourceId===task?.current_run_id
+      ?currentRun
+      :await selectSandboxRunWithClient(client,observedTargetResourceId,true);
+    const owner=(await client.query<TaskIdempotencyRow>(
+      "select * from task_idempotency_records where operation='terminal-start' and terminal_task_id=$1 and status='in_progress' order by created_at,idempotency_key collate \"C\" for update",
+      [input.taskId]
+    )).rows;
+    if(owner.length>1)throw new Error("Terminal startup receipt is ambiguous");
+    const claimed=await claimTerminalStartIdempotencyWithClient(client,input.idempotency,input.taskId,owner[0]);
+    if(claimed.kind==="hash_mismatch"||claimed.kind==="replay")return claimed;
+    const receipt=claimed.row;
+    const targetRun=receipt.resource_id===currentRun?.runId
+      ?currentRun
+      :receipt.resource_id===lockedObservedTarget?.runId
+        ?lockedObservedTarget
+        :null;
+    const rejectClaim=async()=>{
+      const rejected=terminalStartOwnerConflictReceipt();
+      await completeTaskIdempotencyWithClient(
+        client,{...input.idempotency,claimToken:receipt.claim_token},
+        rejected.responseStatus,rejected.responseBody,input.idempotency.now
+      );
+      return{kind:"replay" as const,...rejected};
+    };
+    if(!task||task.deleted_at||task.archived_at||task.project_id!==input.idempotency.projectId||lockedAdmission&&!lockedAdmission.available)return rejectClaim();
     if(claimed.kind==="in_progress"){
-      const project=await client.query("select id from projects where id=$1 for update",[input.idempotency.projectId]);
-      if(!project.rows[0])return{kind:"conflict"};
-      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
-      const run=await selectSandboxRunWithClient(client,receipt.resource_id,true);
-      if(!task||!run||!sameTaskRunScopeRow(task,run))return{kind:"conflict"};
-      if(task.current_run_id===run.runId&&run.state==="starting")return{kind:"in_progress",task:mapTask(task),run};
-      const terminal=terminalBoundRunReceipt(run,input.rejectionPresentation);
+      if(!targetRun||!sameTaskRunScopeRow(task,targetRun))return rejectClaim();
+      if(task.current_run_id===targetRun.runId&&targetRun.state==="starting")return{kind:"in_progress",task:mapTask(task),run:targetRun};
+      const terminal=terminalBoundRunReceipt(targetRun,input.rejectionPresentation);
       await completeTaskIdempotencyWithClient(client,{...input.idempotency,claimToken:receipt.claim_token},terminal.responseStatus,terminal.responseBody,input.idempotency.now);
       return{kind:"replay",...terminal};
     }
-    const observed=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1",[input.taskId])).rows[0];
-    if(!observed||observed.deleted_at||observed.archived_at||observed.project_id!==input.idempotency.projectId)return{kind:"conflict"};
-    const boundRun=await selectSandboxRunWithClient(client,receipt.resource_id);
-    if(boundRun&&sameTaskRunScopeRow(observed,boundRun)){
-      const project=await client.query("select id from projects where id=$1 for update",[observed.project_id]);
-      if(!project.rows[0])return{kind:"conflict"};
-      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
-      const run=await selectSandboxRunWithClient(client,receipt.resource_id,true);
-      if(!task||!run||!sameTaskRunScopeRow(task,run))return{kind:"conflict"};
-      if(task.current_run_id===run.runId&&run.state==="starting")return{kind:"claimed",task:mapTask(task),run,claimToken:input.idempotency.claimToken};
-      const terminal=terminalBoundRunReceipt(run,input.rejectionPresentation);
+    if(targetRun&&sameTaskRunScopeRow(task,targetRun)){
+      if(task.current_run_id===targetRun.runId&&targetRun.state==="starting")return{kind:"claimed",task:mapTask(task),run:targetRun,claimToken:input.idempotency.claimToken};
+      const terminal=terminalBoundRunReceipt(targetRun,input.rejectionPresentation);
       await completeTaskIdempotencyWithClient(client,input.idempotency,terminal.responseStatus,terminal.responseBody,input.idempotency.now);
       return{kind:"replay",...terminal};
     }
     const restart=input.restart;
-    if(!restart||restart.sandboxRun.runId!==receipt.resource_id)return{kind:"conflict"};
+    if(!restart||restart.sandboxRun.runId!==receipt.resource_id||!lockedAdmission)return rejectClaim();
     if(!input.admission||!input.rejectedAuditEvent)throw new Error("New Terminal reservation requires admission receipt inputs");
-    let row:AgentTaskRow|undefined;
     return admitSandboxRunWithClient<import("../../ports/src/store.js").BeginTerminalStartResult>(
       client,input.admission,{...restart.sandboxRun,startupReadyAt:restart.reservedAt},restart.reservedAt,input.idempotency,input.rejectionPresentation,input.rejectedAuditEvent,
       {kind:"conflict"},
       async()=>{
-        row=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
-        if(!row||row.deleted_at||row.archived_at||row.current_run_id!==restart.expectedReleasedRunId)return{kind:"result",value:{kind:"conflict"}};
-        const current=row.current_run_id?await selectSandboxRunWithClient(client,row.current_run_id,true):null;
-        if(row.current_run_id!==null&&(!current||current.state!=="released"||!sameTaskRunScopeRow(row,current)))return{kind:"result",value:{kind:"conflict"}};
-        if(!sandboxRestartRowIdentityMatches(row,{expectedReleasedRunId:restart.expectedReleasedRunId,task:restart.task,sandboxRun:restart.sandboxRun}))return{kind:"result",value:{kind:"conflict"}};
+        if(task.current_run_id!==restart.expectedReleasedRunId)return{kind:"result",value:await rejectClaim()};
+        if(task.current_run_id!==null&&(!currentRun||currentRun.state!=="released"||!sameTaskRunScopeRow(task,currentRun)))return{kind:"result",value:await rejectClaim()};
+        if(!sandboxRestartRowIdentityMatches(task,{expectedReleasedRunId:restart.expectedReleasedRunId,task:restart.task,sandboxRun:restart.sandboxRun}))return{kind:"result",value:await rejectClaim()};
         return{kind:"ready"};
       },
       async(insertRun)=>{
@@ -1408,13 +1440,19 @@ export class PostgresProductStore implements ProductStore {
         if(!updated)throw new Error("Terminal reservation lost its Task lock");
         await putJsonDocumentWithClient(client,"sandbox_runtime_state",input.taskId,restart.runtimeState);
         return{kind:"claimed",task:mapTask(updated),run:{...restart.sandboxRun,startupReadyAt:restart.reservedAt},claimToken:input.idempotency.claimToken};
-      }
+      },
+      lockedAdmission
     );
   })}
 
   async restartTaskSandboxAtomically(input:AtomicTaskSandboxRestartInput):Promise<AtomicTaskSandboxRestartResult>{return transaction(this.pool,async(client)=>{
-    let row:AgentTaskRow|undefined;
     const receipt=requiredSandboxRestartAdmission(input);
+    const lockedAdmission=await lockSandboxAdmissionWithClient(client,input.admission,input.sandboxRun);
+    if(!lockedAdmission.available)return{kind:"conflict" as const};
+    const row=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.task.id])).rows[0];
+    const released=input.expectedReleasedRunId===null
+      ?null
+      :await selectSandboxRunWithClient(client,input.expectedReleasedRunId,true);
     const claimed=await claimTaskIdempotencyWithClient(client,receipt.idempotency);
     if(claimed.kind!=="claimed")return claimed;
     if(claimed.row.resource_id!==input.task.id)throw new Error("Terminal start idempotency resource is inconsistent");
@@ -1422,12 +1460,8 @@ export class PostgresProductStore implements ProductStore {
       client,input.admission,input.sandboxRun,input.reservedAt,receipt.idempotency,receipt.presentation,receipt.auditEvent,
       {kind:"conflict" as const},
       async()=>{
-        row=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.task.id])).rows[0];
         if(!row||row.deleted_at||row.archived_at||row.current_run_id!==input.expectedReleasedRunId)return{kind:"result",value:{kind:"conflict" as const}};
-        if(input.expectedReleasedRunId!==null){
-          const released=await selectSandboxRunWithClient(client,input.expectedReleasedRunId,true);
-          if(!released||!sameTaskRunScopeRow(row,released)||released.state!=="released")return{kind:"result",value:{kind:"conflict" as const}};
-        }
+        if(input.expectedReleasedRunId!==null&&(!released||!sameTaskRunScopeRow(row,released)||released.state!=="released"))return{kind:"result",value:{kind:"conflict" as const}};
         if(!sandboxRestartRowIdentityMatches(row,input))return{kind:"result",value:{kind:"conflict" as const}};
         return{kind:"ready"};
       },
@@ -1437,15 +1471,16 @@ export class PostgresProductStore implements ProductStore {
         if(!updated.rows[0])throw new Error("Task sandbox restart lost its task lock");
         await putJsonDocumentWithClient(client,"sandbox_runtime_state",row!.id,input.runtimeState);
         return{kind:"restarted" as const,task:mapTask(updated.rows[0])};
-      }
+      },
+      lockedAdmission
     );
   })}
 
   async createTaskMessageAtomically(input:AtomicTaskMessageInput):Promise<AtomicTaskMessageResult>{return transaction(this.pool,async(client)=>{
     const idem=input.idempotency;
-    const claimed=await claimTaskIdempotencyWithClient(client,idem);
-    if(claimed.kind!=="claimed")return claimed;
     if(!input.restart){
+      const claimed=await claimTaskIdempotencyWithClient(client,idem);
+      if(claimed.kind!=="claimed")return claimed;
       if(!await lockActiveProjectWithClient(client,idem.projectId))return{kind:"conflict" as const};
       const row=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
       if(!row||row.deleted_at||row.archived_at||row.project_id!==idem.projectId)return{kind:"conflict" as const};
@@ -1461,48 +1496,53 @@ export class PostgresProductStore implements ProductStore {
       return{kind:"created" as const,task:mapTask(row),message:created,restarted:false};
     }
 
-    let row:AgentTaskRow|undefined;
-    let message:PersistedTaskMessage|undefined;
-    let currentRun:PersistedSandboxRunState|null=null;
-    let restarted=false;
     const receipt=requiredMessageAdmissionReceipt(input);
+    const candidateRun={...input.restart.sandboxRun,startupReadyAt:input.restart.reservedAt};
+    const lockedAdmission=await lockSandboxAdmissionWithClient(client,input.admission,candidateRun);
+    if(!lockedAdmission.available)return{kind:"conflict" as const};
+    const lockedTask=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+    if(!lockedTask||lockedTask.deleted_at||lockedTask.archived_at||lockedTask.project_id!==idem.projectId)return{kind:"conflict" as const};
+    let row:AgentTaskRow=lockedTask;
+    let currentRun=row.current_run_id?await selectSandboxRunWithClient(client,row.current_run_id,true):null;
+    const claimed=await claimTaskIdempotencyWithClient(client,idem);
+    if(claimed.kind!=="claimed")return claimed;
+    const message=canonicalTaskMessage(input.message,claimed.row.resource_id);
+    const existingMessage=(await client.query<TaskMessageRow>("select * from task_messages where id=$1",[message.id])).rows[0];
+    if(existingMessage)return{kind:"created" as const,task:mapTask(row),message:mapPersistedTaskMessage(existingMessage),restarted:false};
+    let restarted=false;
+    if(currentRun&&sameTaskRunScopeRow(row,currentRun)&&["starting","active"].includes(currentRun.state)){
+      restarted=false;
+    }else{
+      if(row.current_run_id!==input.expectedCurrentRunId)return{kind:"conflict" as const};
+      if(input.expectedCurrentRunId===null){
+        if(currentRun!==null)return{kind:"conflict" as const};
+      }else if(!currentRun||!sameTaskRunScopeRow(row,currentRun)||currentRun.state!=="released"){
+        return{kind:"conflict" as const};
+      }
+      if(!sandboxRestartRowIdentityMatches(row,{expectedReleasedRunId:input.expectedCurrentRunId,task:input.restart.task,sandboxRun:input.restart.sandboxRun}))return{kind:"conflict" as const};
+      restarted=true;
+    }
     return admitSandboxRunWithClient<AtomicTaskMessageResult>(
-      client,input.admission,{...input.restart.sandboxRun,startupReadyAt:input.restart.reservedAt},input.restart.reservedAt,input.idempotency,receipt.presentation,receipt.auditEvent,
+      client,input.admission,candidateRun,input.restart.reservedAt,input.idempotency,receipt.presentation,receipt.auditEvent,
       {kind:"conflict" as const},
-      async()=>{
-        row=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
-        if(!row||row.deleted_at||row.archived_at||row.project_id!==idem.projectId)return{kind:"result",value:{kind:"conflict" as const}};
-        message=canonicalTaskMessage(input.message,claimed.row.resource_id);
-        const existingMessage=(await client.query<TaskMessageRow>("select * from task_messages where id=$1",[message.id])).rows[0];
-        if(existingMessage)return{kind:"result",value:{kind:"created" as const,task:mapTask(row),message:mapPersistedTaskMessage(existingMessage),restarted:false}};
-        currentRun=row.current_run_id?await selectSandboxRunWithClient(client,row.current_run_id,true):null;
-        if(currentRun&&sameTaskRunScopeRow(row,currentRun)&&["starting","active"].includes(currentRun.state))return{kind:"ready",reserve:false};
-        if(row.current_run_id!==input.expectedCurrentRunId)return{kind:"result",value:{kind:"conflict" as const}};
-        if(input.expectedCurrentRunId===null){
-          if(currentRun!==null)return{kind:"result",value:{kind:"conflict" as const}};
-        }else if(!currentRun||!sameTaskRunScopeRow(row,currentRun)||currentRun.state!=="released"){
-          return{kind:"result",value:{kind:"conflict" as const}};
-        }
-        if(!sandboxRestartRowIdentityMatches(row,{expectedReleasedRunId:input.expectedCurrentRunId,task:input.restart!.task,sandboxRun:input.restart!.sandboxRun}))return{kind:"result",value:{kind:"conflict" as const}};
-        restarted=true;
-        return{kind:"ready"};
-      },
+      async()=>({kind:"ready",...(restarted?{}:{reserve:false})}),
       async(insertRun)=>{
         if(restarted){
           await insertRun();
-          const updated=await client.query<AgentTaskRow>("update agent_tasks set current_run_id=$2,updated_at=$3 where id=$1 and current_run_id is not distinct from $4 returning *",[row!.id,input.restart!.sandboxRun.runId,input.restart!.reservedAt,input.expectedCurrentRunId]);
+          const updated=await client.query<AgentTaskRow>("update agent_tasks set current_run_id=$2,updated_at=$3 where id=$1 and current_run_id is not distinct from $4 returning *",[row.id,input.restart!.sandboxRun.runId,input.restart!.reservedAt,input.expectedCurrentRunId]);
           if(!updated.rows[0])throw new Error("Task message Run reservation lost its task lock");
           row=updated.rows[0];
           await putJsonDocumentWithClient(client,"sandbox_runtime_state",row.id,input.restart!.runtimeState);
           currentRun={...input.restart!.sandboxRun,startupReadyAt:input.restart!.reservedAt};
         }
         if(!currentRun||!["starting","active"].includes(currentRun.state))return{kind:"conflict" as const};
-        const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message!));
+        const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message));
         await persistTaskInteractionChangesWithClient(client,input.taskId,[input.interactionChange]);
-        await insertAuditEventWithClient(client,canonicalMessageAuditEvent(input.auditEvent,created,row!.project_id));
+        await insertAuditEventWithClient(client,canonicalMessageAuditEvent(input.auditEvent,created,row.project_id));
         await completeTaskIdempotencyWithClient(client,input.idempotency,input.responseStatus,input.responseBody,created.updatedAt??created.createdAt);
-        return{kind:"created" as const,task:mapTask(row!),message:created,restarted};
-      }
+        return{kind:"created" as const,task:mapTask(row),message:created,restarted};
+      },
+      lockedAdmission
     );
   })}
 
@@ -1778,18 +1818,26 @@ export class PostgresProductStore implements ProductStore {
   }
   async requestTaskSandboxRelease(input:TaskSandboxReleaseMutationInput){return transaction(this.pool,async(client)=>{
     const idem=input.idempotency;
-    const claim=await client.query("select 1 from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress' for update",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken]);
-    if(claim.rowCount!==1)return"conflict" as const;
+    const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
     const current=await selectSandboxRunWithClient(client,input.runId,true);
-    if(!current||current.taskId!==input.taskId||current.runId!==input.runId)return"conflict" as const;
+    const claim=(await client.query<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",[idem.actorId,idem.projectId,idem.operation,idem.key])).rows[0];
+    if(
+      !task||task.deleted_at||task.project_id!==idem.projectId||task.current_run_id!==input.runId||
+      !current||!sameTaskRunScopeRow(task,current)||!sameRunIdentity(current,input.run)||
+      !claim||claim.status!=="in_progress"||claim.request_hash!==idem.requestHash||
+      claim.claim_token!==idem.claimToken||claim.resource_id!==input.runId
+    )return"conflict" as const;
     const already=current.state==="release_requested"||current.state==="released";
     if(current.state!=="released"){
       if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1)return"conflict" as const;
+      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,input.run,idem.updatedAt);
       await updateSandboxRunWithClient(client,{
         ...input.run,
         startupActionDeadlineAt:current.startupActionDeadlineAt,
         ...(current.startupActionDeadlineAt?{startupClaimToken:current.startupClaimToken,startupLeaseExpiresAt:current.startupLeaseExpiresAt}:{})
       });
+    }else{
+      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,current,idem.updatedAt);
     }
     await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
     return already?"already_requested" as const:"applied" as const;
@@ -2039,7 +2087,7 @@ class PostgresSandboxRunStoreImpl {
     if (run.runId !== runId) {
       throw new Error("Sandbox run fencing update runId mismatch");
     }
-    return transaction(this.pool,async(client)=>{const current=await selectSandboxRunWithClient(client,runId,true);if(current){if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");if(current.state!=="released"&&run.state==="released")throw new Error("Sandbox released transition requires atomic settlement");}if(!current||current.fencingToken!==expectedFencingToken)return null;await updateSandboxRunWithClient(client,run);return structuredClone(run);});
+    return transaction(this.pool,async(client)=>{const current=await selectSandboxRunWithClient(client,runId,true);if(current){if(!sameRunIdentity(current,run))throw new Error("Sandbox run immutable attribution changed");if(current.state==="starting"&&run.state!=="starting")throw new Error("Starting Sandbox Run terminal transition requires atomic Task ownership");if(current.state!=="released"&&run.state==="released")throw new Error("Sandbox released transition requires atomic settlement");}if(!current||current.fencingToken!==expectedFencingToken)return null;await updateSandboxRunWithClient(client,run);return structuredClone(run);});
   }
 }
 
@@ -2235,6 +2283,54 @@ async function claimTaskIdempotencyWithClient(client:PoolClient,input:BeginTaskI
   return{kind:"claimed",row};
 }
 
+async function claimTerminalStartIdempotencyWithClient(
+  client:PoolClient,
+  input:BeginTaskIdempotencyInput,
+  taskId:string,
+  owner:TaskIdempotencyRow|undefined
+):Promise<
+  | {kind:"claimed"|"in_progress";row:TaskIdempotencyRow}
+  | {kind:"hash_mismatch"}
+  | {kind:"replay";responseStatus:number;responseBody:unknown}
+>{
+  let row=(await client.query<TaskIdempotencyRow>(
+    "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",
+    [input.actorId,input.projectId,input.operation,input.key]
+  )).rows[0];
+  if(row){
+    if(row.request_hash!==input.requestHash)return{kind:"hash_mismatch"};
+    if(row.status==="completed")return{kind:"replay",responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
+    if(row.terminal_task_id!==taskId)return{kind:"hash_mismatch"};
+    if(row.claim_token!==input.claimToken&&toIso(row.lease_expires_at)>input.now)return{kind:"in_progress",row};
+    if(row.claim_token!==input.claimToken){
+      row=(await client.query<TaskIdempotencyRow>(
+        "update task_idempotency_records set claim_token=$5,lease_expires_at=$6,updated_at=$7 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 returning *",
+        [input.actorId,input.projectId,input.operation,input.key,input.claimToken,input.leaseExpiresAt,input.now]
+      )).rows[0]!;
+    }
+    return{kind:"claimed",row};
+  }
+  if(owner){
+    const rejected=terminalStartOwnerConflictReceipt();
+    row=(await client.query<TaskIdempotencyRow>(
+      `insert into task_idempotency_records
+         (actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,claim_token,lease_expires_at,response_status,response_body,created_at,updated_at,terminal_task_id)
+       values ($1,$2,$3,$4,$5,$6,'completed',$7,$8,$9,$10::jsonb,$11,$11,$12)
+       returning *`,
+      [input.actorId,input.projectId,input.operation,input.key,input.requestHash,input.resourceId,input.claimToken,input.leaseExpiresAt,rejected.responseStatus,JSON.stringify(rejected.responseBody),input.now,taskId]
+    )).rows[0]!;
+    return{kind:"replay",responseStatus:row.response_status!,responseBody:mapTaskIdempotencyResponseBody(row.operation,row.response_body)};
+  }
+  row=(await client.query<TaskIdempotencyRow>(
+    `insert into task_idempotency_records
+       (actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,claim_token,lease_expires_at,created_at,updated_at,terminal_task_id)
+     values ($1,$2,$3,$4,$5,$6,'in_progress',$7,$8,$9,$9,$10)
+     returning *`,
+    [input.actorId,input.projectId,input.operation,input.key,input.requestHash,input.resourceId,input.claimToken,input.leaseExpiresAt,input.now,taskId]
+  )).rows[0]!;
+  return{kind:"claimed",row};
+}
+
 async function completeTaskIdempotencyWithClient(client:PoolClient,input:BeginTaskIdempotencyInput,responseStatus:number,responseBody:unknown,updatedAt:string):Promise<void>{
   const completed=await client.query(
     `update task_idempotency_records
@@ -2284,6 +2380,13 @@ type SandboxAdmissionPreparation<R> =
   | {kind:"result";value:R};
 
 const SANDBOX_ADMISSION_GUARD=Symbol("sandbox-admission");
+type LockedSandboxAdmission={
+  scope:SandboxAdmissionInput;
+  available:boolean;
+  activeSandboxes:number;
+  namespaceSandboxes:number;
+  sandboxLimit:number|null;
+};
 
 async function admitSandboxRunWithClient<R>(
   client:PoolClient,
@@ -2295,27 +2398,21 @@ async function admitSandboxRunWithClient<R>(
   rejectedAuditEvent:ProjectAuditEvent,
   projectUnavailable:R,
   prepare:()=>Promise<SandboxAdmissionPreparation<R>>,
-  write:(insertRun:()=>Promise<void>)=>Promise<R>
+  write:(insertRun:()=>Promise<void>)=>Promise<R>,
+  lockedAdmission?:LockedSandboxAdmission
 ):Promise<R|SandboxCapacityRejected>{
-  const scope=normalizeSandboxAdmission(admission,run);
-  await lockSandboxNamespaceWithClient(client,scope.namespace);
-  if(!await lockActiveProjectWithClient(client,run.projectId))return projectUnavailable;
-  const policy=(await client.query<{active_tasks_limit:number|null}>("select active_tasks_limit from project_resource_policies where project_id=$1 for update",[run.projectId])).rows[0];
-  const usage=(await client.query("select project_id from project_resource_usage where project_id=$1 for update",[run.projectId])).rows[0];
-  if(!policy||!usage)return projectUnavailable;
+  const locked=lockedAdmission??await lockSandboxAdmissionWithClient(client,admission,run);
+  if(!locked.available)return projectUnavailable;
   const prepared=await prepare();
   if(prepared.kind==="result")return prepared.value;
   if(prepared.reserve===false){
     return write(async()=>{throw new Error("Existing Sandbox Run cannot insert another Run");});
   }
 
-  const projectRuns=await client.query("select run_id from sandbox_runs where project_id=$1 and state<>'released' order by run_id for update",[run.projectId]);
-  const activeSandboxes=projectRuns.rowCount??0;
-  if(policy.active_tasks_limit!==null&&activeSandboxes>=policy.active_tasks_limit){
-    return rejectSandboxAdmissionWithClient(client,{kind:"project_capacity_rejected",activeSandboxes,sandboxLimit:policy.active_tasks_limit},idempotency,presentation,rejectedAuditEvent,updatedAt);
+  if(locked.sandboxLimit!==null&&locked.activeSandboxes>=locked.sandboxLimit){
+    return rejectSandboxAdmissionWithClient(client,{kind:"project_capacity_rejected",activeSandboxes:locked.activeSandboxes,sandboxLimit:locked.sandboxLimit},idempotency,presentation,rejectedAuditEvent,updatedAt);
   }
-  const namespaceRuns=await client.query("select run_id from sandbox_runs where namespace=$1 and state<>'released' order by run_id for update",[scope.namespace]);
-  if((namespaceRuns.rowCount??0)>=scope.namespaceLimit){
+  if(locked.namespaceSandboxes>=locked.scope.namespaceLimit){
     return rejectSandboxAdmissionWithClient(client,{kind:"substrate_capacity_rejected"},idempotency,presentation,rejectedAuditEvent,updatedAt);
   }
 
@@ -2327,6 +2424,34 @@ async function admitSandboxRunWithClient<R>(
   });
   if(inserted)await setAuthoritativeActiveTaskUsageWithClient(client,run.projectId,updatedAt);
   return result;
+}
+
+async function lockSandboxAdmissionWithClient(
+  client:PoolClient,
+  admission:SandboxAdmissionInput,
+  run:PersistedSandboxRunState
+):Promise<LockedSandboxAdmission>{
+  const scope=normalizeSandboxAdmission(admission,run);
+  await lockSandboxNamespaceWithClient(client,scope.namespace);
+  const active=await lockActiveProjectWithClient(client,run.projectId);
+  if(!active)return{scope,available:false,activeSandboxes:0,namespaceSandboxes:0,sandboxLimit:null};
+  const policy=(await client.query<{active_tasks_limit:number|null}>("select active_tasks_limit from project_resource_policies where project_id=$1 for update",[run.projectId])).rows[0];
+  const usage=(await client.query("select project_id from project_resource_usage where project_id=$1 for update",[run.projectId])).rows[0];
+  if(!policy||!usage)return{scope,available:false,activeSandboxes:0,namespaceSandboxes:0,sandboxLimit:null};
+  const projectRuns=await client.query<{count:string}>(
+    "select count(*)::text as count from sandbox_runs where project_id=$1 and state<>'released'",
+    [run.projectId]
+  );
+  const namespaceRuns=await client.query<{count:string}>(
+    "select count(*)::text as count from sandbox_runs where namespace=$1 and state<>'released'",
+    [scope.namespace]
+  );
+  return{
+    scope,available:true,
+    activeSandboxes:Number(projectRuns.rows[0]?.count??0),
+    namespaceSandboxes:Number(namespaceRuns.rows[0]?.count??0),
+    sandboxLimit:policy.active_tasks_limit
+  };
 }
 
 type SandboxRestartIdentityInput = Pick<AtomicTaskSandboxRestartInput,"expectedReleasedRunId"|"task"|"sandboxRun">;
@@ -2687,7 +2812,7 @@ interface AgentTaskArtifactRow {
 }
 interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; content:string; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
 interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
-interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
+interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;terminal_task_id:string|null;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
@@ -2983,10 +3108,75 @@ function requiredMessageAdmissionReceipt(input:AtomicTaskMessageInput):{presenta
   return{presentation:input.rejectionPresentation,auditEvent:input.rejectedAuditEvent};
 }
 
-function terminalBoundRunReceipt(run:PersistedSandboxRunState,presentation:TaskPresentation):{responseStatus:number;responseBody:unknown}{
-  if(run.state==="active")return{responseStatus:200,responseBody:{status:"active",runId:run.runId,presentation}};
-  if(run.state==="failed"||run.state==="release_requested")return{responseStatus:502,responseBody:{error:{code:"sandbox_start_failed",message:"Sandbox could not be started",retryable:true,details:null,presentation}}};
-  return{responseStatus:409,responseBody:{error:{code:"task_sandbox_released",message:"Task sandbox is released",retryable:false,details:null,presentation}}};
+async function terminalizeTerminalStartOwnerWithClient(
+  client:PoolClient,
+  taskId:string,
+  run:PersistedSandboxRunState,
+  updatedAt:string,
+  outcome=terminalBoundRunReceipt(run,null),
+  expected?:CompleteTaskIdempotencyInput
+):Promise<
+  |{kind:"completed"|"none"}
+  |{kind:"conflict"}
+  |{kind:"replay";responseStatus:number;responseBody:unknown}
+>{
+  let owner:TaskIdempotencyRow|undefined;
+  if(expected){
+    owner=(await client.query<TaskIdempotencyRow>(
+      "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",
+      [expected.actorId,expected.projectId,expected.operation,expected.key]
+    )).rows[0];
+    if(!owner||owner.request_hash!==expected.requestHash)return{kind:"conflict"};
+    if(owner.status==="completed")return{
+      kind:"replay",responseStatus:owner.response_status!,
+      responseBody:mapTaskIdempotencyResponseBody(owner.operation,owner.response_body)
+    };
+    if(
+      owner.operation!=="terminal-start"||owner.terminal_task_id!==taskId||owner.resource_id!==run.runId||
+      owner.claim_token!==expected.claimToken
+    )return{kind:"conflict"};
+  }else{
+    const owners=(await client.query<TaskIdempotencyRow>(
+      "select * from task_idempotency_records where operation='terminal-start' and terminal_task_id=$1 and resource_id=$2 and status='in_progress' order by created_at,idempotency_key collate \"C\" for update",
+      [taskId,run.runId]
+    )).rows;
+    if(owners.length>1)throw new Error("Terminal startup receipt is ambiguous");
+    owner=owners[0];
+    if(!owner)return{kind:"none"};
+  }
+  const completed=await client.query(
+    `update task_idempotency_records
+        set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9
+      where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
+        and request_hash=$5 and claim_token=$6 and status='in_progress'`,
+    [
+      owner.actor_id,owner.project_id,owner.operation,owner.idempotency_key,
+      owner.request_hash,owner.claim_token,outcome.responseStatus,JSON.stringify(outcome.responseBody),updatedAt
+    ]
+  );
+  if(completed.rowCount!==1)throw new Error("Terminal startup receipt terminalization conflict");
+  return{kind:"completed"};
+}
+
+function terminalBoundRunReceipt(run:PersistedSandboxRunState,presentation:TaskPresentation|null):{responseStatus:number;responseBody:unknown}{
+  if(run.state==="active")return{responseStatus:200,responseBody:terminalActivatedReceipt(run.runId)};
+  return{responseStatus:502,responseBody:{
+    outcome:"completed",keyDisposition:"retire",runId:run.runId,
+    error:{code:"sandbox_start_failed",message:"Sandbox could not be started",retryable:true,details:null,presentation}
+  }};
+}
+function terminalActivatedReceipt(runId:string):unknown{
+  return{outcome:"completed",keyDisposition:"retire",runId};
+}
+function terminalStartOwnerConflictReceipt():{responseStatus:number;responseBody:unknown}{
+  return{
+    responseStatus:409,
+    responseBody:{
+      outcome:"rejected_before_acceptance",keyDisposition:"retire",
+      error:"Terminal start is already in progress for this Task",
+      code:"terminal_start_already_in_progress"
+    }
+  };
 }
 function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRunState):boolean{
   return left.runId===right.runId&&left.taskId===right.taskId&&left.projectId===right.projectId&&left.workspaceId===right.workspaceId&&

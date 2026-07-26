@@ -24,7 +24,9 @@ import type {
   TaskCurrentTurnProjection,
   TaskRuntimeReachability,
   TaskSandboxReleaseReceipt,
+  TaskSandboxReleaseRequest,
   TaskTerminalStartReceipt,
+  TaskTerminalStartRequest,
   TaskArtifactKind,
   TaskArtifactListPage,
   TaskArtifactListQuery,
@@ -185,6 +187,7 @@ export interface TaskArtifactDownload {
 }
 
 export interface TaskTerminalConnection {
+  runId:string;
   baseUrl: string;
   serviceKey: string;
 }
@@ -284,7 +287,7 @@ export class TaskService {
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
   private readonly startupOperationsByRunId = new Map<string, Promise<PersistedAgentTask>>();
   private readonly startupExternalActionsByRunId = new Map<string,Promise<unknown>>();
-  private readonly terminalStartupOperations = new Map<string,{runId:string;promise:Promise<PersistedAgentTask>}>();
+  private readonly startupAbortControllersByRunId = new Map<string,AbortController>();
   private readonly terminalStartReservations = new Map<string,Promise<void>>();
 
   constructor(
@@ -763,61 +766,63 @@ export class TaskService {
     return this.taskPresentation(userId,task);
   }
 
-  async releaseTaskSandbox(userId:string,taskId:string,idempotencyKey?:string):Promise<TaskSandboxReleaseReceipt>{
+  async releaseTaskSandbox(userId:string,taskId:string,request:TaskSandboxReleaseRequest,idempotencyKey?:string):Promise<TaskSandboxReleaseReceipt>{
     const task=await this.requireTaskRecordForUser(userId,taskId,"write");
-    const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId}),claimToken=newId("idempotency_claim"),timestamp=nowIso();
-    const begun=await this.store.beginTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,resourceId:task.currentRunId??task.id,claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)});
-    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+    const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.release.expectedRunId");
+    const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId,expectedRunId}),claimToken=newId("idempotency_claim"),timestamp=nowIso();
+    const existing=await this.store.findTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash});
+    if(existing?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(existing?.kind==="replay")return replayTaskCommandOutcome<TaskSandboxReleaseReceipt>(existing.responseStatus,existing.responseBody);
+    if(task.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
+    const begun=await this.store.beginTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,resourceId:expectedRunId,claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)});
+    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
     if(begun.kind==="in_progress")throw idempotencyInProgressError();
-    if(begun.kind==="replay"){if(begun.responseStatus>=400){const body=isUnknownRecord(begun.responseBody)?begun.responseBody:{};throw new ProductError(typeof body.error==="string"?body.error:"Task operation failed",begun.responseStatus,typeof body.code==="string"?body.code:undefined);}return structuredClone(begun.responseBody) as TaskSandboxReleaseReceipt;}
+    if(begun.kind==="replay")return replayTaskCommandOutcome<TaskSandboxReleaseReceipt>(begun.responseStatus,begun.responseBody);
     try{
       const currentTask=await this.store.findTask(task.id);
       if(!currentTask||currentTask.deletedAt)throw new ProductError("Task not found",404);
-      const run=currentTask.currentRunId?await this.store.sandboxRuns.get(currentTask.currentRunId):null;
-      if(!run||run.taskId!==currentTask.id||run.runId!==currentTask.currentRunId){
-        throw new ProductError("Task sandbox ownership record is unavailable or mismatched",409,"task_sandbox_unknown");
-      }
+      if(currentTask.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
+      const run=await this.store.sandboxRuns.get(expectedRunId);
+      if(!run||run.taskId!==currentTask.id||run.runId!==currentTask.currentRunId)throw taskRunTargetConflictError();
       const cleaned=run.state==="released",updatedAt=nowIso();
       const nextRun:PersistedSandboxRunState=cleaned?run:{...run,state:"release_requested",releaseReason:run.releaseReason??(run.state==="failed"?"failed":"requested"),releaseRequestedAt:run.releaseRequestedAt??updatedAt,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt};
-      const response:TaskSandboxReleaseReceipt={taskId:task.id,presentation:await this.taskPresentation(userId,currentTask,{run:nextRun,turn:"ready",reachability:"unreachable"})};
+      const response:TaskSandboxReleaseReceipt={outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:run.runId,presentation:await this.taskPresentation(userId,currentTask,{run:nextRun,turn:"ready",reachability:"unreachable"})};
       const result=await this.store.requestTaskSandboxRelease({runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,run:nextRun,idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt}});
-      if(result==="conflict")throw new ProductError("Task sandbox release changed concurrently; retry",409,"task_sandbox_release_conflict");
+      if(result==="conflict")throw taskRunTargetConflictError();
+      this.startupAbortControllersByRunId.get(run.runId)?.abort(new ProductError("Sandbox startup was superseded by release",409,"sandbox_cleanup_intent_conflict"));
       return response;
     }catch(error){if(error instanceof ProductError)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:{error:error.message,...(error.code?{code:error.code}:{})},updatedAt:nowIso()});throw error;}
   }
 
-  async openTaskTerminal(userId:string,taskId:string):Promise<TaskTerminalConnection>{
-    const task=await this.requireTaskTerminalAccess(userId,taskId);
+  async openTaskTerminal(userId:string,taskId:string,expectedRunId:string):Promise<TaskTerminalConnection>{
+    const task=await this.requireTaskTerminalAccess(userId,taskId,expectedRunId);
     if(this.occupiedTerminalTaskIds.has(task.id))throw new ProductError("Task terminal is already open",409);
     this.occupiedTerminalTaskIds.add(task.id);
     try{
       const serviceKey=this.serviceKeyForTask(task);
       const state=await this.readRuntimeState(task,serviceKey);
-      return{baseUrl:state.baseUrl,serviceKey};
+      return{runId:requireCurrentRunId(task),baseUrl:state.baseUrl,serviceKey};
     }catch(error){
       this.occupiedTerminalTaskIds.delete(task.id);
       throw error;
     }
   }
 
-  async startTaskTerminal(userId:string,taskId:string,idempotencyKey?:string):Promise<TaskTerminalStartReceipt>{
+  async startTaskTerminal(userId:string,taskId:string,request:TaskTerminalStartRequest,idempotencyKey?:string):Promise<TaskTerminalStartReceipt>{
     const candidate=await this.requireTaskRecordForUser(userId,taskId,"write");
-    const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId});
+    const {expectedRunId,expectedSandboxState}=request;
+    if(expectedRunId!==null&&(typeof expectedRunId!=="string"||!expectedRunId))throw new ProductError("task.terminal.expectedRunId must be a string or null",400);
+    if(!["starting","active","release_requested","released","failed"].includes(expectedSandboxState))throw new ProductError("task.terminal.expectedSandboxState is invalid",400);
+    const key=normalizeIdempotencyKey(idempotencyKey);
+    const requestHash=canonicalRequestHash({taskId,expectedRunId,expectedSandboxState});
     const operationIdentity=terminalStartOperationIdentity(userId,candidate.projectId,key,requestHash);
-    const localOperation=this.terminalStartupOperations.get(operationIdentity);
-    if(localOperation){
-      const [persistedTask,persistedRun]=await Promise.all([this.store.findTask(candidate.id),this.store.sandboxRuns.get(localOperation.runId)]);
-      if(persistedTask?.currentRunId===localOperation.runId&&persistedRun?.state==="starting"&&taskMatchesExactSandboxRun(persistedTask,persistedRun)){
-        return{status:"in_progress",runId:localOperation.runId,presentation:await this.taskPresentation(userId,persistedTask,{run:persistedRun})};
-      }
-    }
     const initialGate=await this.store.findTaskIdempotency({actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash});
-    if(initialGate?.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-    if(initialGate?.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(initialGate.responseStatus,initialGate.responseBody);
+    if(initialGate?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(initialGate?.kind==="replay")return replayTaskCommandOutcome<TaskTerminalStartReceipt>(initialGate.responseStatus,initialGate.responseBody);
     const reservation=await this.serializeTerminalStartReservation(operationIdentity,async()=>{
       const replayGate=await this.store.findTaskIdempotency({actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash});
-      if(replayGate?.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-      if(replayGate?.kind==="replay")return{replay:replayTaskOperationResponse<TaskTerminalStartReceipt>(replayGate.responseStatus,replayGate.responseBody)};
+      if(replayGate?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(replayGate?.kind==="replay")return{replay:replayTaskCommandOutcome<TaskTerminalStartReceipt>(replayGate.responseStatus,replayGate.responseBody)};
       const timestamp=nowIso();
       const ownership:BeginTaskIdempotencyInput={
         actorId:userId,projectId:candidate.projectId,operation:"terminal-start",key,requestHash,
@@ -829,126 +834,42 @@ export class TaskService {
         const boundRun=await this.store.sandboxRuns.get(replayGate.resourceId);
         if(!boundRun||!taskSharesSandboxRunScope(candidate,boundRun))throw new ProductError("Terminal operation Run is unavailable or mismatched",409,"task_sandbox_restart_conflict");
         const operationTask={...candidate,currentRunId:boundRun.runId};
-        const canonicalPresentation=await this.taskPresentation(userId,operationTask,{
-          run:boundRun,
-          turn:boundRun.state==="starting"?"starting":"ready",
-          reachability:"unreachable"
-        });
-        beginInput={taskId:candidate.id,idempotency:ownership,rejectionPresentation:canonicalPresentation};
+        beginInput={
+          taskId:candidate.id,idempotency:ownership,
+          rejectionPresentation:await this.taskPresentation(userId,operationTask,{run:boundRun,turn:boundRun.state==="starting"?"starting":"ready",reachability:"unreachable"})
+        };
       }else{
         const currentRun=candidate.currentRunId?await this.store.sandboxRuns.get(candidate.currentRunId):null;
-        const reservingReplacement=!currentRun||currentRun.state==="released";
-        if(reservingReplacement){
-          const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(candidate.projectId,candidate.endpointId);
-          requireTaskEndpointCapabilities(endpoint);
-          this.sandboxAdmission();
-        }
-        const restart=currentRun&&!["released"].includes(currentRun.state)&&!["starting","active"].includes(currentRun.state)
-          ?null
-          :await this.prepareSandboxRestart(userId,candidate);
-        if(reservingReplacement)this.serviceKeyForTask(restart?.task??candidate);
+        const currentState=currentRun?.state??"released";
+        if(candidate.currentRunId!==expectedRunId||currentState!==expectedSandboxState||!["released","starting"].includes(expectedSandboxState))throw taskRunTargetConflictError();
+        const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(candidate.projectId,candidate.endpointId);
+        requireTaskEndpointCapabilities(endpoint);
+        const restart=await this.prepareSandboxRestart(userId,candidate);
+        if(!currentRun||currentRun.state==="released")this.serviceKeyForTask(restart?.task??candidate);
         ownership.resourceId=restart?.sandboxRun.runId??candidate.currentRunId??candidate.id;
-        const rejectionPresentation=await this.taskPresentation(userId,candidate,{
-          run:currentRun,
-          turn:currentRun?.state==="starting"?"starting":"ready",
-          reachability:"unreachable"
-        });
         beginInput={
-          taskId:candidate.id,
-          idempotency:ownership,
-          admission:this.sandboxAdmission(),
+          taskId:candidate.id,idempotency:ownership,admission:this.sandboxAdmission(),
           ...(restart?{restart:{expectedReleasedRunId:candidate.currentRunId,...restart}}:{}),
-          rejectionPresentation,
+          rejectionPresentation:await this.taskPresentation(userId,candidate,{run:currentRun,turn:currentRun?.state==="starting"?"starting":"ready",reachability:"unreachable"}),
           rejectedAuditEvent:{id:`audit_sandbox_started_rejected_terminal_${candidate.id}_${key}`,projectId:candidate.projectId,actorId:userId,action:"sandbox.started",status:"rejected",resourceKind:"sandbox",resourceId:candidate.id,detail:{taskId:candidate.id,trigger:"terminal"},createdAt:timestamp}
         };
       }
-      return{begun:await this.store.beginTerminalStart(beginInput),ownership,beginInput};
+      return{begun:await this.store.beginTerminalStart(beginInput)};
     });
     if("replay" in reservation&&reservation.replay!==undefined)return reservation.replay;
-    const {begun,ownership,beginInput}=reservation;
-    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-    if(begun.kind==="in_progress")return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
-    if(begun.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(begun.responseStatus,begun.responseBody);
+    const {begun}=reservation;
+    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(begun.kind==="replay")return replayTaskCommandOutcome<TaskTerminalStartReceipt>(begun.responseStatus,begun.responseBody);
     if(begun.kind==="capacity_rejected"){
       if(begun.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(candidate.projectId);
       throw new SandboxRetryableProductError(begun.responseStatus,begun.responseBody);
     }
     if(begun.kind==="conflict")throw new ProductError("Task sandbox changed concurrently; retry",409,"task_sandbox_restart_conflict");
-    ownership.resourceId=begun.run.runId;ownership.claimToken=begun.claimToken;
-    let completionOwnedByStore=false;
-    try{
-      if(begun.run.startupReadyAt===null)return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
-      const startup=this.beginSandboxStartupOperation(begun.task,false,begun.run);
-      this.trackTerminalStartupOperation(operationIdentity,begun.run.runId,startup.promise);
-      if(!startup.owner)return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
-      const response=await (async()=>{
-        let task=begun.task,run=begun.run;
-        try{
-          task=await startup.promise;
-        }catch(error){
-          if(!(error instanceof ProductError&&error.code==="sandbox_startup_failed"))throw error;
-          const currentTask=await this.store.findTask(task.id)??task;
-          const currentRun=currentTask.currentRunId?await this.store.sandboxRuns.get(currentTask.currentRunId):null;
-          if(!currentRun||!taskMatchesExactSandboxRun(currentTask,currentRun)||currentRun.state!=="starting")throw error;
-          const failureAt=nowIso();
-          const projectedFailedRun=this.projectStartupFailedRun(currentRun,failureAt);
-          const presentation=await this.taskPresentation(userId,currentTask,{run:projectedFailedRun,turn:"ready",reachability:"unreachable"});
-          const envelope=sandboxStartFailedErrorEnvelope(presentation);
-          if(!currentRun.startupClaimToken)throw new ProductError("Terminal startup claim is unavailable",409,"task_sandbox_restart_conflict");
-          const terminalized=await this.store.failTaskSandboxStartupAtomically({
-            taskId:currentTask.id,
-            startupClaimToken:currentRun.startupClaimToken,
-            resourceIdentity:currentRun.resourceNames,
-            failure:{
-              runId:currentRun.runId,
-              expectedFencingToken:currentRun.fencingToken,
-              code:"startup_failed",
-              message:"Sandbox startup did not complete. Retry release to remove its resources.",
-              failedAt:failureAt,
-              auditEvent:{id:`audit_sandbox_failed_${currentRun.runId}`,projectId:currentRun.projectId,actorId:null,subjectUserId:currentRun.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:currentRun.taskId,detail:{taskId:currentRun.taskId,runId:currentRun.runId,endpointId:currentTask.endpointId},createdAt:failureAt}
-            },
-            idempotency:{actorId:userId,projectId:currentTask.projectId,operation:"terminal-start",key,requestHash,claimToken:ownership.claimToken,responseStatus:502,responseBody:envelope,updatedAt:failureAt}
-          });
-          if(terminalized.kind==="conflict")throw new ProductError("Terminal startup failure could not be committed",409,"task_sandbox_restart_conflict");
-          completionOwnedByStore=true;
-          if(terminalized.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(terminalized.responseStatus,terminalized.responseBody);
-          await this.refreshSandboxFailureAlerts(currentTask.projectId,currentTask.endpointId);
-          throw new SandboxRetryableProductError(502,envelope);
-        }
-        return this.taskTerminalStartReceipt(userId,task);
-      })();
-      if(response.status==="in_progress")return response;
-      if(!await this.store.completeTaskIdempotency({...ownership,responseStatus:200,responseBody:response,updatedAt:nowIso()})){
-        const completed=await this.store.findTaskIdempotencyByResource({actorId:userId,operation:"terminal-start",key,requestHash,resourceId:ownership.resourceId});
-        if(completed?.kind!=="replay")throw new ProductError("Terminal start idempotency ownership changed before completion",409);
-        return replayTaskOperationResponse<TaskTerminalStartReceipt>(completed.responseStatus,completed.responseBody);
-      }
-      return response;
-    }catch(error){
-      if(error instanceof ProductError&&!completionOwnedByStore){
-        const convergenceAt=nowIso();
-        const converged=await this.store.beginTerminalStart({
-          ...beginInput,
-          idempotency:{...ownership,now:convergenceAt,leaseExpiresAt:deadlineIso(convergenceAt,TERMINAL_START_LEASE_MS)}
-        });
-        if(converged.kind==="replay")return replayTaskOperationResponse<TaskTerminalStartReceipt>(converged.responseStatus,converged.responseBody);
-        if(converged.kind==="in_progress")return{status:"in_progress",runId:converged.run.runId,presentation:await this.taskPresentation(userId,converged.task,{run:converged.run})};
-      }
-      throw error;
-    }
+    return{outcome:"accepted_in_progress",keyDisposition:"retain",runId:begun.run.runId};
   }
 
-  private async taskTerminalStartReceipt(userId:string,candidate:PersistedAgentTask):Promise<TaskTerminalStartReceipt>{
-    const task=await this.store.findTask(candidate.id);
-    if(!task||task.deletedAt||task.projectId!==candidate.projectId)throw new ProductError("Task not found",404);
-    const run=await this.activeSandboxRun(task);
-    if(!run)throw idempotencyInProgressError();
-    const status=run.state==="active"?"active" as const:"in_progress" as const;
-    return{status,runId:run.runId,presentation:await this.taskPresentation(userId,task,{run})};
-  }
-
-  async validateTaskTerminalAccess(userId:string,taskId:string):Promise<void>{
-    await this.requireTaskTerminalAccess(userId,taskId);
+  async validateTaskTerminalAccess(userId:string,taskId:string,expectedRunId:string):Promise<void>{
+    await this.requireTaskTerminalAccess(userId,taskId,expectedRunId);
   }
 
   closeTaskTerminal(taskId:string):void{
@@ -1263,6 +1184,7 @@ export class TaskService {
       failedTaskIds: []
     };
     await this.reconcileTaskPreparations(result.failedTaskIds);
+    await this.reconcileTerminalStartups(result.failedTaskIds);
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
     const activeSandboxes = await this.store.listActiveTasks();
     result.activeTaskCount=activeSandboxes.length;
@@ -1314,6 +1236,21 @@ export class TaskService {
         });
         if(failed)failedTaskIds.push(run.taskId);
         else if(!(error instanceof Error&&/readiness changed/.test(error.message)))failedTaskIds.push(run.taskId);
+      }
+    }
+  }
+
+  private async reconcileTerminalStartups(failedTaskIds:string[]):Promise<void>{
+    for(const run of await this.store.sandboxRuns.list()){
+      if(run.state!=="starting"||run.startupReadyAt===null)continue;
+      const operation=await this.store.findInProgressTerminalStartOperation(run.runId);
+      if(!operation)continue;
+      try{
+        const task=await this.store.findTask(run.taskId);
+        if(!task||!taskMatchesExactSandboxRun(task,run))continue;
+        await this.beginSandboxStartupOperation(task,true,run).promise;
+      }catch{
+        failedTaskIds.push(run.taskId);
       }
     }
   }
@@ -1672,20 +1609,15 @@ export class TaskService {
     const runId=requireCurrentRunId(task);
     const existing=this.startupOperationsByRunId.get(runId);
     if(existing)return{owner:false,promise:existing};
-    const operation=this.startReservedSandbox(task,persistFailure,knownRun);
+    const controller=new AbortController();
+    const operation=this.startReservedSandbox(task,persistFailure,knownRun,controller.signal);
     this.startupOperationsByRunId.set(runId,operation);
+    this.startupAbortControllersByRunId.set(runId,controller);
     void operation.finally(()=>{
       if(this.startupOperationsByRunId.get(runId)===operation)this.startupOperationsByRunId.delete(runId);
+      if(this.startupAbortControllersByRunId.get(runId)===controller)this.startupAbortControllersByRunId.delete(runId);
     }).catch(()=>undefined);
     return{owner:true,promise:operation};
-  }
-
-  private trackTerminalStartupOperation(identity:string,runId:string,promise:Promise<PersistedAgentTask>):void{
-    const operation={runId,promise};
-    this.terminalStartupOperations.set(identity,operation);
-    void promise.finally(()=>{
-      if(this.terminalStartupOperations.get(identity)===operation)this.terminalStartupOperations.delete(identity);
-    }).catch(()=>undefined);
   }
 
   private async serializeTerminalStartReservation<T>(identity:string,reserve:()=>Promise<T>):Promise<T>{
@@ -1720,15 +1652,16 @@ export class TaskService {
     };
   }
 
-  private async startReservedSandbox(stored:PersistedAgentTask,persistFailure=true,knownRun?:PersistedSandboxRunState):Promise<PersistedAgentTask>{
+  private async startReservedSandbox(stored:PersistedAgentTask,persistFailure=true,knownRun?:PersistedSandboxRunState,signal?:AbortSignal):Promise<PersistedAgentTask>{
     let task=stored;
+    signal?.throwIfAborted();
     const run=knownRun??await this.activeSandboxRun(task);
     if(!run)throw new ProductError("Task sandbox must be reserved before runtime startup",409,"task_sandbox_not_reserved");
     if(!taskMatchesExactSandboxRun(task,run)||!["starting","active"].includes(run.state))throw new ProductError("Task sandbox reservation changed",409,"task_sandbox_not_reserved");
     if(run.state==="starting"){
       let operation="start sandbox";
       try{
-        task=await this.startLiveSandbox({task,run})??task;
+        task=await this.startLiveSandbox({task,run,...(signal?{signal}:{})})??task;
       }catch(error){
         if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
         if(error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??""))return task;
@@ -1766,11 +1699,10 @@ export class TaskService {
     };
   }
 
-  private async requireTaskTerminalAccess(userId:string,taskId:string):Promise<PersistedAgentTask>{
+  private async requireTaskTerminalAccess(userId:string,taskId:string,expectedRunId:string):Promise<PersistedAgentTask>{
     const task=await this.requireTaskForUser(userId,taskId,"write");
     const run=await this.activeSandboxRun(task);
-    if(!run||run.state!=="active")throw new ProductError("Task terminal is available while the sandbox is running",409);
-    if(!await this.taskExecutionEligible(task))throw new ProductError("Task terminal is no longer available for this task",409);
+    if(!run||run.state!=="active"||run.runId!==expectedRunId)throw taskRunTargetConflictError();
     if(this.abortingTaskIds.has(task.id))throw new ProductError("Task terminal is unavailable while the current turn is aborting",409);
     const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);const state=await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
     if(!botifiedStateAllowsTerminal(state.state))throw new ProductError("Task terminal is available only while Botified is running or idle",409);
@@ -2208,7 +2140,9 @@ export class TaskService {
   private async startLiveSandbox(input: {
     task: PersistedAgentTask;
     run: SandboxRunState;
+    signal?:AbortSignal;
   }): Promise<PersistedAgentTask|null> {
+    input.signal?.throwIfAborted();
     const live = this.config.liveSandbox;
     const startupClaimToken=newId("startup_claim");
     const claimedAt=nowIso();
@@ -2273,7 +2207,8 @@ export class TaskService {
         try{
           await withHardDeadline(
             (signal)=>this.trackStartupExternalAction(input.run.runId,applySandboxReconcileActionsToKubernetes(live.port,[action],signal)),
-            actionDeadlineAt
+            actionDeadlineAt,
+            input.signal
           );
         }catch{
           throw new ProductError("Kubernetes startup mutation result is unknown",504,"sandbox_startup_unknown_result");
@@ -2311,7 +2246,8 @@ export class TaskService {
         const runtime=await this.readRuntimeState(input.task,serviceKey,signal);
         await this.readVerifiedBotifiedState(input.task,runtime.baseUrl,serviceKey,signal);
       })()),
-      readinessDeadlineAt
+      readinessDeadlineAt,
+      input.signal
     );
     const activatedAt=nowIso();
     const activated=await this.store.activateTaskSandboxRun({
@@ -2388,9 +2324,7 @@ export class TaskService {
     if(!current||!taskMatchesExactSandboxRun(task,current)||current.state!=="starting")return null;
     console.error(`Sandbox ${runId} ${operation} failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);
     const failureAt=nowIso();
-    const terminalOperation=error instanceof ProductError&&error.code==="botified_session_mismatch"
-      ?await this.store.findInProgressTerminalStartOperation(runId)
-      :null;
+    const terminalOperation=await this.store.findInProgressTerminalStartOperation(runId);
     if(terminalOperation){
       if(terminalOperation.projectId!==current.projectId||terminalOperation.resourceId!==runId||!current.startupClaimToken){
         throw new ProductError("Terminal startup failure ownership is unavailable",409,"task_sandbox_restart_conflict");
@@ -2413,7 +2347,7 @@ export class TaskService {
         idempotency:{
           ...terminalOperation,
           responseStatus:502,
-          responseBody:envelope,
+          responseBody:{outcome:"completed",keyDisposition:"retire",runId,error:envelope.error},
           updatedAt:failureAt
         }
       });
@@ -2677,6 +2611,9 @@ export class TaskService {
     const cleanupPending=run?.state==="release_requested"||run?.state==="failed";
     const runtimeUsable=run?.state==="released"||run?.state==="starting"||(run?.state==="active"&&runtime.reachability==="reachable");
     const canInteract=canWrite&&retained&&executionEligible&&!cleanupPending&&Boolean(runtimeUsable);
+    const canStartNewWork=canWrite&&retained&&executionEligible;
+    const canControlCurrentWork=canWrite&&retained&&run?.state==="active"&&
+      runtime.reachability==="reachable"&&(turn==="running"||turn==="ready");
     const capabilities:TaskCapabilities = unavailableRunId ? {
       sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,
       releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false
@@ -2688,7 +2625,10 @@ export class TaskService {
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn: canInteract && turn === "running",
       stopWork:canInteract&&turn==="running",
-      openTerminal: canWrite&&retained&&executionEligible&&!cleanupPending&&(releaseConfirmed||(run?.state==="active"&&(turn==="running"||turn==="ready"))),
+      openTerminal: !cleanupPending&&(
+        canStartNewWork&&(releaseConfirmed||run?.state==="starting")||
+        canControlCurrentWork
+      ),
       editTask: canWrite && retained,
       releaseSandbox: canWrite && !task.deletedAt && Boolean(run&&run.state!=="released"),
       archiveTask: canWrite && retained && releaseConfirmed,
@@ -2816,6 +2756,16 @@ function replayTaskOperationResponse<T>(statusCode:number,responseBody:unknown):
   ));
 }
 
+function replayTaskCommandOutcome<T>(statusCode:number,responseBody:unknown):T{
+  if(isUnknownRecord(responseBody)&&responseBody.outcome==="rejected_before_acceptance"){
+    return replayTaskOperationResponse<T>(statusCode,responseBody);
+  }
+  if(isUnknownRecord(responseBody)&&["accepted_in_progress","completed"].includes(String(responseBody.outcome))){
+    return structuredClone(responseBody) as T;
+  }
+  return replayTaskOperationResponse<T>(statusCode,responseBody);
+}
+
 function sandboxRetryableEnvelope(value:unknown):SandboxRetryableErrorEnvelope|null{
   if(!isUnknownRecord(value)||!isUnknownRecord(value.error))return null;
   const error=value.error;
@@ -2883,6 +2833,14 @@ function idempotencyPayloadMismatchError():ProductError {
     "Idempotency-Key was already used with a different request",
     409,
     "idempotency_payload_mismatch"
+  );
+}
+
+function taskRunTargetConflictError():ProductError {
+  return new ProductError(
+    "Task Sandbox Run changed; refresh before retrying this action",
+    409,
+    "task_run_target_conflict"
   );
 }
 
@@ -3525,10 +3483,12 @@ function terminalStartOperationIdentity(actorId:string,projectId:string,key:stri
   return `${actorId}\u0000${projectId}\u0000terminal-start\u0000${key}\u0000${requestHash}`;
 }
 
-async function withHardDeadline<T>(start:(signal:AbortSignal)=>Promise<T>,deadlineAt:string):Promise<T>{
+async function withHardDeadline<T>(start:(signal:AbortSignal)=>Promise<T>,deadlineAt:string,externalSignal?:AbortSignal):Promise<T>{
   const remaining=Math.max(0,Date.parse(deadlineAt)-Date.now());
   const controller=new AbortController();
-  const operation=start(controller.signal);
+  const signal=externalSignal?AbortSignal.any([controller.signal,externalSignal]):controller.signal;
+  signal.throwIfAborted();
+  const operation=start(signal);
   let timeout:NodeJS.Timeout|undefined;
   try{
     return await Promise.race([

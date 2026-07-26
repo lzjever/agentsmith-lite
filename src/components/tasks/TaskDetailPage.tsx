@@ -4,7 +4,7 @@ import { Archive, ArrowLeft, Info, RefreshCw, TerminalSquare } from "lucide-reac
 import { Banner, Button as AstryxButton, Dialog, DialogHeader, Heading, IconButton, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, type Task, type TaskArtifact, type TaskArtifactKind, type TaskInteractionItem, type TaskInteractionSnapshot } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, taskCommandOutcomeError, type Task, type TaskArtifact, type TaskArtifactKind, type TaskInteractionItem, type TaskInteractionSnapshot } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
 import { useCurrentUser } from "../app-shell/current-user";
 import { DocumentTitle } from "../layout/DocumentTitle";
@@ -26,6 +26,14 @@ import {
 } from "./task-conversation-state";
 import { clearTaskDraft, shouldClearTaskDraftForAccessStatus, taskDraftStorage, type TaskDraftIdentity } from "./task-draft-snapshot";
 import { useTaskMutationKeys } from "./task-mutation-key";
+import {
+  clearTaskCommandMetadata,
+  persistTaskCommandMetadata,
+  readTaskCommandMetadata,
+  retireTaskCommandMetadata,
+  taskRuntimeCommandRemountDecision,
+  type TaskSandboxReleaseCommandMetadata
+} from "./task-command-storage";
 import {
   createTerminalIntentState,
   reduceTerminalIntent
@@ -103,6 +111,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   const [turnAborting, setTurnAborting] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const taskLoadVersion = useRef(0);
+  const restoredReleaseRoute=useRef<string|null>(null);
   const artifactsLoadVersion = useRef(0);
   const taskWorkspaceRef = useRef<HTMLDivElement>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -373,19 +382,34 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
     }
   }
 
-  async function releaseSandbox() {
+  async function releaseSandbox(expectedRunId:string,restored?:TaskSandboxReleaseCommandMetadata) {
     const detail = taskPresentationRef.current.presentation;
     if (!detail?.capabilities.releaseSandbox || releasing || deleting || lifecycleBusy) return;
     const fence = captureCommandFence();
+    const request={expectedRunId};
+    const fingerprint=JSON.stringify(request);
+    const identity={userId:currentUser.id,projectId,taskId};
+    if(restored&&restored.fingerprint!==fingerprint)return;
+    if(restored)mutationKeys.restore("task-sandbox-release",taskId,restored);
+    const attempt=mutationKeys.fingerprintKey("task-sandbox-release",taskId,fingerprint);
     setReleasing(true);
     try {
-      await apiClient.releaseTaskSandbox(taskId, mutationKeys.key("task-sandbox-release", taskId));
-      mutationKeys.complete("task-sandbox-release", taskId);
+      if(!restored)persistTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",{
+        ...identity,...attempt,request,createdAt:new Date().toISOString()
+      });
+      const outcome=await apiClient.releaseTaskSandbox(taskId,request,attempt.key);
+      mutationKeys.transition("task-sandbox-release",taskId,attempt,outcome);
+      if(outcome.outcome==="outcome_unknown")throw outcome.error;
+      if(outcome.outcome==="rejected_before_acceptance"){
+        retireTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",identity,attempt);
+        throw taskCommandOutcomeError(outcome);
+      }
+      retireTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",identity,attempt);
+      mutationKeys.canonicalAbsorbed("task-sandbox-release",taskId,attempt);
       if (!mounted.current) return;
       acceptCanonicalMutation("release", fence);
     } catch (reason) {
       if (!mounted.current) return;
-      mutationKeys.completeApiFailure(reason, "task-sandbox-release", taskId);
       if (
         reason instanceof ApiError
         && (reason.status === 403 || reason.status === 404 || reason.status === 409)
@@ -395,6 +419,37 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       if (mounted.current) setReleasing(false);
     }
   }
+
+  useEffect(()=>{
+    if(!taskPresentation.initialized||!taskPresentation.presentation)return;
+    const route=`${currentUser.id}:${projectId}:${taskId}`;
+    if(restoredReleaseRoute.current===route)return;
+    restoredReleaseRoute.current=route;
+    const storage=taskDraftStorage(),identity={userId:currentUser.id,projectId,taskId};
+    const decision=taskRuntimeCommandRemountDecision(
+      readTaskCommandMetadata(storage,"task-sandbox-release",identity)
+    );
+    if(decision.status==="cleanup"){
+      clearTaskCommandMetadata(storage,"task-sandbox-release",identity);
+      mutationKeys.clear("task-sandbox-release");
+      return;
+    }
+    if(decision.status!=="restore")return;
+    const metadata=decision.metadata;
+    if(metadata.fingerprint!==JSON.stringify(metadata.request)){
+      clearTaskCommandMetadata(storage,"task-sandbox-release",identity);
+      mutationKeys.clear("task-sandbox-release");
+      return;
+    }
+    const sandbox=taskPresentation.presentation.sandboxState;
+    if(sandbox.runId!==metadata.request.expectedRunId||["release_requested","released"].includes(sandbox.state)){
+      retireTaskCommandMetadata(storage,"task-sandbox-release",identity,metadata);
+      mutationKeys.restore("task-sandbox-release",taskId,metadata);
+      mutationKeys.canonicalAbsorbed("task-sandbox-release",taskId,metadata);
+      return;
+    }
+    void releaseSandbox(metadata.request.expectedRunId,metadata).catch(()=>undefined);
+  },[currentUser.id,mutationKeys,projectId,taskId,taskPresentation.initialized,taskPresentation.presentation]);
 
   if (taskState === "loading") return <RouteLoadingPage title="Task" />;
   if (taskState === "missing") return <TaskLoadFailure title="Task not found" detail="This task does not exist or is no longer available." basePath={basePath} />;
@@ -443,7 +498,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
           <div className="ml-auto flex shrink-0 flex-nowrap items-center gap-1">
             <IconButton ref={detailsTriggerRef} label="Task details" tooltip="Task details" variant="ghost" size="lg" icon={<Info size={16} />} onClick={() => setDetailsOpen(true)} />
             <IconButton label="Refresh task" tooltip="Refresh task" variant="ghost" size="lg" icon={<RefreshCw size={17} />} isDisabled={mutationBusy} onClick={() => void refresh()} />
-            <TaskLifecycleActions task={task} capabilities={capabilities} releaseLabel={releaseLabel} onRefresh={async () => {
+            <TaskLifecycleActions task={task} capabilities={capabilities} releaseRunId={sandboxState.runId} releaseLabel={releaseLabel} onRefresh={async () => {
               await requestCanonicalRefresh(true);
             }} onRelease={releaseSandbox} onDelete={deleteTask} disabled={turnAborting} onBusyChange={setLifecycleBusy} />
           </div>
@@ -459,7 +514,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       {sandboxFailureNotice ? <div className="shrink-0 pt-2">{sandboxFailureNotice}</div> : null}
       <div ref={taskWorkspaceRef} tabIndex={-1} className="grid min-h-0 min-w-0 flex-1 overflow-hidden pt-2 outline-none" data-testid="task-workspace">
         <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} userId={currentUser.id} projectId={projectId} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} state={taskPresentation} dispatch={dispatchTaskPresentation} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestConversationCanonicalRefresh} commandBusy={turnAborting} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
-        {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} presentation={detail} canonicalEpoch={taskPresentation.canonicalEpoch} intent={terminalIntent} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestCanonicalRefresh} /></div> : null}
+        {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} userId={currentUser.id} projectId={projectId} presentation={detail} canonicalEpoch={taskPresentation.canonicalEpoch} intent={terminalIntent} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestCanonicalRefresh} /></div> : null}
         <section className={`${mode === "artifacts" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-border bg-surface`} aria-label="Task Artifacts"><div className="shrink-0 border-b border-border px-3 py-3"><Heading level={4} accessibilityLevel={2}>Artifacts</Heading></div><div className="min-h-0 flex-1 overflow-y-auto p-3">{artifactsPanel}</div></section>
       </div>
     </div>

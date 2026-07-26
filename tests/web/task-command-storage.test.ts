@@ -10,11 +10,13 @@ import {
   readTaskCommandMetadata,
   retireTaskCommandMetadata,
   restoreTaskCommandMetadata,
+  taskRuntimeCommandRemountDecision,
   taskCommandRemountDecision,
   restoreTaskCreateDraft,
   taskCommandMetadataKey,
   taskCreateDraftKey,
   writeTaskCommandMetadata,
+  updateTaskCommandAcceptedRun,
   writeTaskCreateDraft
 } from "../../src/components/tasks/task-command-storage.ts";
 import {
@@ -30,6 +32,141 @@ const createIdentity = { userId: "user_1", projectId: "project_1" };
 const messageIdentity = { ...createIdentity, taskId: "task_1" };
 
 describe("Task command session storage", () => {
+  it("restores exact Terminal and Release identities only on the same Task route",()=>{
+    const storage=new MemoryStorage();
+    const terminal={
+      ...messageIdentity,key:"terminal-key",fingerprint:"terminal-fingerprint",
+      createdAt:"2026-07-26T12:00:00.000Z",
+      request:{expectedRunId:"run_a",expectedSandboxState:"released" as const},
+      acceptedRunId:null
+    };
+    const release={
+      ...messageIdentity,key:"release-key",fingerprint:"release-fingerprint",
+      createdAt:"2026-07-26T12:01:00.000Z",
+      request:{expectedRunId:"run_b"}
+    };
+    assert.equal(writeTaskCommandMetadata(storage,"task-terminal-start",terminal),"saved");
+    assert.equal(writeTaskCommandMetadata(storage,"task-sandbox-release",release),"saved");
+    assert.deepEqual(
+      taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)),
+      {status:"restore",metadata:terminal}
+    );
+    assert.deepEqual(
+      taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-sandbox-release",messageIdentity)),
+      {status:"restore",metadata:release}
+    );
+    assert.equal(
+      readTaskCommandMetadata(storage,"task-terminal-start",{...messageIdentity,taskId:"task_2"}).status,
+      "missing"
+    );
+    assert.equal(updateTaskCommandAcceptedRun(
+      storage,"task-terminal-start",messageIdentity,terminal,"run_c"
+    ),true);
+    assert.equal(
+      restoreTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)?.acceptedRunId,
+      "run_c"
+    );
+
+    const remountedKeys=createMutationKeyStore(()=>"new-key");
+    const restored=restoreTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)!;
+    remountedKeys.restore("task-terminal-start",messageIdentity.taskId,restored);
+    assert.equal(
+      remountedKeys.fingerprintKey("task-terminal-start",messageIdentity.taskId,terminal.fingerprint).key,
+      terminal.key
+    );
+    assert.equal(
+      retireTaskCommandMetadata(storage,"task-terminal-start",messageIdentity,terminal),
+      true
+    );
+    assert.equal(readTaskCommandMetadata(storage,"task-terminal-start",messageIdentity).status,"missing");
+  });
+
+  it("unlocks canonical or superseded remounts while unresolved remounts replay the same key",()=>{
+    const absorbedKeys=createMutationKeyStore((operation)=>`new-${operation}`);
+    const absorbed={
+      key:"restored-terminal-key",fingerprint:"terminal-old-fingerprint"
+    };
+    absorbedKeys.restore("task-terminal-start",messageIdentity.taskId,absorbed);
+    absorbedKeys.canonicalAbsorbed("task-terminal-start",messageIdentity.taskId,absorbed);
+    assert.deepEqual(
+      absorbedKeys.fingerprintKey("task-terminal-start",messageIdentity.taskId,"terminal-new-fingerprint"),
+      {key:"new-task-terminal-start",fingerprint:"terminal-new-fingerprint"}
+    );
+
+    const supersededKeys=createMutationKeyStore((operation)=>`new-${operation}`);
+    const superseded={
+      key:"restored-release-key",fingerprint:"release-old-fingerprint"
+    };
+    supersededKeys.restore("task-sandbox-release",messageIdentity.taskId,superseded);
+    supersededKeys.canonicalAbsorbed("task-sandbox-release",messageIdentity.taskId,superseded);
+    assert.deepEqual(
+      supersededKeys.fingerprintKey("task-sandbox-release",messageIdentity.taskId,"release-new-fingerprint"),
+      {key:"new-task-sandbox-release",fingerprint:"release-new-fingerprint"}
+    );
+
+    const unresolvedKeys=createMutationKeyStore(()=>"must-not-rotate");
+    unresolvedKeys.restore("task-terminal-start",messageIdentity.taskId,absorbed);
+    assert.deepEqual(
+      unresolvedKeys.fingerprintKey("task-terminal-start",messageIdentity.taskId,absorbed.fingerprint),
+      absorbed
+    );
+    assert.throws(
+      ()=>unresolvedKeys.fingerprintKey("task-terminal-start",messageIdentity.taskId,"terminal-new-fingerprint")
+    );
+  });
+
+  it("retires a remounted Terminal key after a background failure replay with no presentation",()=>{
+    let sequence=0;
+    const storage=new MemoryStorage();
+    const request={expectedRunId:"run_a",expectedSandboxState:"released" as const};
+    const metadata={
+      ...messageIdentity,key:"terminal-unresolved",fingerprint:JSON.stringify(request),
+      createdAt:"2026-07-26T12:00:00.000Z",request,acceptedRunId:null
+    };
+    writeTaskCommandMetadata(storage,"task-terminal-start",metadata);
+
+    const firstMount=createMutationKeyStore(()=>`new-key-${++sequence}`);
+    firstMount.restore("task-terminal-start",messageIdentity.taskId,metadata);
+    firstMount.transition("task-terminal-start",messageIdentity.taskId,metadata,{
+      outcome:"outcome_unknown",keyDisposition:"retain"
+    });
+    assert.deepEqual(
+      firstMount.fingerprintKey("task-terminal-start",messageIdentity.taskId,metadata.fingerprint),
+      {key:metadata.key,fingerprint:metadata.fingerprint}
+    );
+    assert.equal(
+      restoreTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)?.acceptedRunId,
+      null
+    );
+
+    const remounted=restoreTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)!;
+    const secondMount=createMutationKeyStore(()=>`new-key-${++sequence}`);
+    secondMount.restore("task-terminal-start",messageIdentity.taskId,remounted);
+    const replayedTerminalOutcome={
+      outcome:"completed" as const,keyDisposition:"retire" as const,runId:"run_b",
+      error:{
+        code:"sandbox_start_failed",message:"Sandbox could not be started",
+        retryable:true as const,details:null,presentation:null
+      }
+    };
+    assert.equal(
+      secondMount.fingerprintKey("task-terminal-start",messageIdentity.taskId,metadata.fingerprint).key,
+      metadata.key
+    );
+    secondMount.transition("task-terminal-start",messageIdentity.taskId,metadata,replayedTerminalOutcome);
+    assert.equal(
+      retireTaskCommandMetadata(storage,"task-terminal-start",messageIdentity,metadata),
+      true
+    );
+    secondMount.canonicalAbsorbed("task-terminal-start",messageIdentity.taskId,metadata);
+
+    assert.equal(readTaskCommandMetadata(storage,"task-terminal-start",messageIdentity).status,"missing");
+    assert.deepEqual(
+      secondMount.fingerprintKey("task-terminal-start",messageIdentity.taskId,"new-terminal-fingerprint"),
+      {key:"new-key-1",fingerprint:"new-terminal-fingerprint"}
+    );
+  });
+
   it("restores a matching Task create draft and key after remount without duplicating the prompt", () => {
     const storage = new MemoryStorage();
     const draft = {

@@ -720,11 +720,6 @@ export interface TaskCapabilities {
   deleteTask: boolean;
 }
 
-export interface TaskSandboxReleaseReceipt {
-  taskId: string;
-  presentation: TaskPresentation;
-}
-
 export const SERVER_COMMAND_OUTCOMES = [
   "accepted_in_progress",
   "completed",
@@ -746,9 +741,24 @@ export type TaskCreateCommandOutcome =
   | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string}
   | RejectedCommandOutcome;
 
+export interface TaskTerminalStartRequest {
+  expectedRunId:string|null;
+  expectedSandboxState:TaskSandboxStateProjection["state"];
+}
+
 export type TaskTerminalStartReceipt =
-  | { status:"active"; runId:string; presentation:TaskPresentation }
-  | { status:"in_progress"; runId:string; presentation:TaskPresentation };
+  | {outcome:"accepted_in_progress";keyDisposition:"retain";runId:string}
+  | {outcome:"completed";keyDisposition:"retire";runId:string}
+  | {outcome:"completed";keyDisposition:"retire";runId:string;error:SandboxRetryableErrorEnvelope["error"]}
+  | RejectedCommandOutcome;
+
+export interface TaskSandboxReleaseRequest {
+  expectedRunId:string;
+}
+
+export type TaskSandboxReleaseReceipt =
+  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;presentation:TaskPresentation}
+  | RejectedCommandOutcome;
 
 export interface TaskPresentation extends TaskStateProjection {
   task: AgentTask;
