@@ -868,15 +868,18 @@ export type AtomicAdmissionIdempotencyResult =
   | {kind:"in_progress"}
   | {kind:"replay";responseStatus:number;responseBody:unknown};
 
+export type AtomicTaskCreateDeterministicRejection={
+  kind:"project_unavailable"|"library_name_conflict"|"library_not_found"|"library_deleting"|"already_bound";
+  claimToken?:string;
+};
+
 export type AtomicTaskCreateResult=
   | {kind:"created";task:PersistedAgentTask}
-  | {kind:"project_unavailable"}
-  | {kind:"library_name_conflict"}
-  | {kind:"library_not_found"}
-  | {kind:"library_deleting"}
-  | {kind:"already_bound"}
+  | {kind:"resume";task:PersistedAgentTask;claimToken:string}
+  | AtomicTaskCreateDeterministicRejection
   | SandboxCapacityRejected
-  | AtomicAdmissionIdempotencyResult;
+  | Exclude<AtomicAdmissionIdempotencyResult,{kind:"in_progress"}>
+  | {kind:"in_progress";resourceId:string};
 
 export interface AtomicTaskSandboxRestartInput {
   // Null is the first-Run case and is valid only while the Task has no current Run.
@@ -1115,6 +1118,13 @@ export interface TaskMessageIdempotencyEnvelope {
   receipt: TaskMessageReceipt;
 }
 
+export interface TaskCreateIdempotencyEnvelope {
+  kind:"task_create";
+  taskId:string;
+  projectId:string;
+  actorId:string;
+}
+
 export interface TaskIdempotencyLookupInput extends TaskIdempotencyScope {
   requestHash: string;
 }
@@ -1212,6 +1222,7 @@ export interface TaskPreparationOperation {
   key:string;
   requestHash:string;
   resourceId:string;
+  claimToken:string;
 }
 
 export interface InProgressTerminalStartOperation {

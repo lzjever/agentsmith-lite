@@ -2,6 +2,32 @@
 
 Mutating routes require the session cookie and `x-csrf-token`; command routes that declare replay protection also require an `Idempotency-Key`. Task resources require project membership; there is no global control-plane API. The Web client uses only AgentSmith `/api/v1` routes and never calls Botified.
 
+Task create and Task message commands expose only three server outcomes:
+`completed`, `accepted_in_progress`, and `rejected_before_acceptance`. Every
+response includes `keyDisposition`. A completed command returns
+`keyDisposition: retire`; an accepted command whose final response is not yet
+durable returns `keyDisposition: retain`; a rejected command returns either
+value according to whether replay may still converge. An idempotency
+fingerprint mismatch is `rejected_before_acceptance` with `retain`, does not
+replace the original command, and leaves the original payload replayable with
+the same key. Ordinary rejection before admission retires the key. When the
+server cannot prove rejection or completion, it retains the key.
+
+Task message never returns `accepted_in_progress`: its message identity,
+interaction, optional Sandbox admission, and completed command receipt commit
+atomically. A short-lived unresolved claim is returned as a retained rejection
+for the Web client to synthesize as `outcome_unknown`. Task create may return
+`accepted_in_progress` after its Task, File Library binding, initial
+interaction, optional Run, and durable preparation operation have committed
+but JuiceFS preparation has not completed. Replaying the original Task create
+route resumes that same Task identity; there is no status query route. Recovery
+uses the persisted Task, Library, Run, context snapshot, and preparation
+operation directly. It does not re-run mutable Endpoint health, context
+resolution, or Sandbox capacity admission. Reclaiming an expired preparation
+lease preserves the original Task resource ID. Any failure while reading or
+preparing an already-admitted identity remains `accepted_in_progress` with
+`keyDisposition: retain`.
+
 Project credential create and rotate requests accept a plaintext provider secret only for that write. The server encrypts it before storage and returns metadata, mask/fingerprint, and rotation information only. Endpoint create and update requests bind an existing project credential through `credentialId`. Endpoint `baseUrl` must be HTTPS and must not include credentials, query, or hash; it must normalize to the bound credential base URL. Public credential, endpoint, dashboard, and Task payloads never expose provider plaintext.
 
 `GET /api/v1/workspaces` projects include the current user's nullable `pinnedAt`; it is never shared with other members. `PUT /api/v1/projects/{projectId}/pin` accepts `{ pinned: boolean }` and naturally idempotently sets that member's pin. Removing project membership removes the pin.

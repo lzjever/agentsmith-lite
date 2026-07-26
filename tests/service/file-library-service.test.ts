@@ -729,7 +729,7 @@ describe("file library service", () => {
     store.createTaskAtomically=async(input)=>{
       if(input.task.prompt==="must be rejected before filesystem preparation"){
         rejectedStagingRoot=path.join(services.projectAbsoluteRoot(project.rootPath),".preparations",input.task.id);
-        assert.notEqual((await readdir(rejectedStagingRoot)).length,0);
+        await assert.rejects(()=>readdir(rejectedStagingRoot!),{code:"ENOENT"});
         assert.deepEqual(await directoryTree(libraryRoot),before);
       }
       return createTaskAtomically(input);

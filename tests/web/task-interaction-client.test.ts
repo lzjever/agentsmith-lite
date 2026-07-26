@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { apiClient, taskTerminalWebSocketUrlForApiBase } from "../../src/lib/api/client.js";
+import { apiClient, taskTerminalWebSocketUrlForApiBase } from "../../src/lib/api/client.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -22,7 +22,7 @@ describe("task interaction API client", () => {
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input); calls.push({ url, init });
       if (url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "user@example.test" }, csrfToken: "csrf" });
-      return Response.json({ messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, presentation:taskPresentation() });
+      return Response.json({ outcome:"completed",keyDisposition:"retire",messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, presentation:taskPresentation() });
     };
 
     await apiClient.currentIdentity();
@@ -43,6 +43,7 @@ describe("task interaction API client", () => {
     assert.match(calls[7]!.url, /tasks\/task%2F1\/work\/interaction%2F1\/stop$/);
     assert.match(calls[8]!.url, /tasks\/task%2F1$/);
     assert.match(calls[9]!.url, /tasks\/task%2F1\/archive$/);
+    assert.equal(sent.outcome, "completed");
     assert.equal(sent.disposition, "queued_for_active_run");
     assert.equal(edited.messageId, "message_1");
     assert.equal(deleted.messageId, "message_1");

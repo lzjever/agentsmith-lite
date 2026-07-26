@@ -33,7 +33,7 @@ import type {
   SandboxRetryableErrorEnvelope
 } from "../../contracts/src/api.js";
 import { classifyPreviewMediaType, sandboxStartFailedErrorEnvelope } from "../../contracts/src/api.js";
-import { ProductError } from "../../domain/src/errors.js";
+import { ForbiddenError, ProductError, ReceiptUncertaintyError } from "../../domain/src/errors.js";
 import { newId, nowIso } from "../../domain/src/ids.js";
 import { normalizeSandboxResources } from "../../domain/src/kubernetesQuantity.js";
 import { requireNonEmptyString } from "../../domain/src/validation.js";
@@ -52,6 +52,7 @@ import type {
   PersistedTaskMessage,
   ProductStore,
   TaskMessageIdempotencyEnvelope,
+  TaskCreateIdempotencyEnvelope,
   TaskIdempotencyOperation,
   TaskPreparationOperation,
   TaskInteractionChangeInput,
@@ -86,7 +87,7 @@ import { WorkspaceService } from "./workspaceService.js";
 import { detectProjectFileMediaType,readRegularFileWithoutFollowingSymlink,withProjectFileLock } from "./fileService.js";
 import { openProjectRootDescriptor } from "./filePathValidationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
-import type { ProjectPermission } from "./authorizationService.js";
+import type { ProjectAccessSnapshot, ProjectPermission } from "./authorizationService.js";
 import type { ContextService } from "./contextService.js";
 
 export interface TaskLiveSandboxConfig {
@@ -256,6 +257,26 @@ export class SandboxRetryableProductError extends ProductError {
   }
 }
 
+export class ProvenTaskCommandRejectionError extends ProductError {
+  constructor(error:ProductError){
+    super(error.message,error.statusCode,error.code);
+    this.name="ProvenTaskCommandRejectionError";
+  }
+}
+
+export class TaskCreatePreparationInProgressError extends Error {
+  constructor(readonly taskId:string,cause:unknown){
+    super(cause instanceof Error?cause.message:"Task filesystem preparation is still in progress",{cause});
+    this.name="TaskCreatePreparationInProgressError";
+  }
+}
+
+function isTaskCreateReceiptContention(error:unknown):boolean{
+  return error instanceof TaskCreatePreparationInProgressError&&
+    error.cause instanceof ProductError&&
+    error.cause.code==="idempotency_in_progress";
+}
+
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
   private readonly occupiedTerminalTaskIds = new Set<string>();
@@ -284,90 +305,272 @@ export class TaskService {
     const endpointId = requireNonEmptyString(input.endpointId, "task.endpointId");
     const prompt = requireNonEmptyString(input.prompt, "task.prompt");
     const title = normalizeTaskTitle(input.title, prompt);
-    const project = await this.workspaces.requireProjectForUser(userId, projectId, "write");
-    const result = await this.runIdempotentTaskOperation({
-      actorId: userId,
-      projectId,
-      operation: "create",
-      key: idempotencyKey,
-      request: { endpointId, prompt, title, fileLibrary:input.fileLibrary }
-    }, newId("task"), async (id,ownership) => {
-      const existing = await this.store.findTask(id);
-      if (existing) {
-        const existingLibrary=existing.fileLibraryId?await this.store.findFileLibrary(existing.fileLibraryId):null;
-        if(!existingLibrary)throw new Error("Admitted Task File Library is unavailable during preparation recovery");
-        const existingRun=existing.currentRunId?await this.store.sandboxRuns.get(existing.currentRunId):null;
-        const marker=taskPreparationMarker(project.id,existing.id,existingRun,ownership);
-        await this.promoteTaskPreparation(project.rootPath,existingLibrary,existing.id,input.fileLibrary.mode==="create_new",marker);
-        await this.markCurrentTaskRunReady(existing);
-        return this.taskPresentation(userId,existing);
+    const authorizedAccess=await this.workspaces.projectAccessForUser(userId,projectId);
+    if(!authorizedAccess.canWrite)throw new ForbiddenError("Project access denied");
+    const authorizedProject=authorizedAccess.project;
+    const key=normalizeIdempotencyKey(idempotencyKey);
+    const requestHash=canonicalRequestHash({endpointId,prompt,title,fileLibrary:input.fileLibrary});
+    const timestamp=nowIso();
+    const existingOperation=await this.store.findTaskIdempotency({
+      actorId:userId,projectId,operation:"create",key,requestHash
+    });
+    if(existingOperation?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(existingOperation?.kind==="replay"){
+      return this.replayTaskCreate(userId,authorizedAccess,existingOperation);
+    }
+    const id=existingOperation?.kind==="in_progress"?existingOperation.resourceId:newId("task");
+    const ownership:BeginTaskIdempotencyInput={
+      actorId:userId,projectId,operation:"create",key,requestHash,resourceId:id,
+      claimToken:newId("idempotency_claim"),now:timestamp,
+      leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)
+    };
+    if(existingOperation?.kind==="in_progress"){
+      let persisted:PersistedAgentTask|null;
+      try{
+        persisted=await this.store.findTask(existingOperation.resourceId);
+      }catch(error){
+        throw new TaskCreatePreparationInProgressError(existingOperation.resourceId,error);
       }
+      if(persisted){
+        const completed=await this.resumePersistedTaskCreate(
+          authorizedProject,
+          persisted,
+          ownership
+        );
+        return this.taskPresentation(userId,completed,{projectAccess:authorizedAccess});
+      }
+    }
+    try{
+      const project = await this.workspaces.requireProjectForUser(userId, projectId, "write");
       const endpoint = await this.endpoints.requireCredentialEndpointForUser(userId, projectId, endpointId);
       requireTaskEndpointCapabilities(endpoint);
       const agentContext = this.config.liveSandbox ? await this.config.contexts?.resolveForAgent(userId, projectId) ?? "" : "";
-      const timestamp=nowIso();
       const selection:{prepare:boolean;library:FileLibrary}=input.fileLibrary.mode==="create_new"?{prepare:true,library:{
         id:`library_${id.slice("task_".length)}`,workspaceId:project.workspaceId,projectId,name:requireNonEmptyString(input.fileLibrary.name,"task.fileLibrary.name",160),rootSubPath:`libraries/library_${id.slice("task_".length)}/home`,lifecycleStatus:"active",createdByUserId:userId,createdAt:timestamp,updatedAt:timestamp
       }}:await this.taskLibraryCandidate(project.workspaceId,projectId,input.fileLibrary.id,userId,timestamp);
-      const library=selection.library;
-      const create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library,agentContext,createdByUserId:userId});
+      const create=await this.prepareTaskCreate({id,project,endpoint,prompt,title,library:selection.library,agentContext,createdByUserId:userId});
       if(create.initialMessage){
         const initialProjection=await this.prepareProductInteractionChange(messageProductSource(create.initialMessage),create.task);
         if(!initialProjection)throw new ProductError("Initial Task interaction projection is unavailable",409);
         create.initialInteractionChange=initialProjection.change;
       }
-      const marker=taskPreparationMarker(project.id,id,create.sandboxRun??null,ownership);
-      await this.prepareTaskStaging(project.rootPath,id,marker);
-      if(input.fileLibrary.mode==="create_new")create.newFileLibrary=library;
+      create.idempotency=ownership;
+      if(input.fileLibrary.mode==="create_new")create.newFileLibrary=selection.library;
       if(create.reserveActive){
-        create.idempotency=ownership;
         create.rejectionPresentation=null;
         create.rejectedAuditEvent={
-          id:`audit_task_create_rejected_${id}`,
-          projectId,
-          actorId:userId,
-          action:"task.create",
-          status:"rejected",
-          resourceKind:"task",
-          resourceId:id,
-          detail:{taskId:id,trigger:"task_create"},
-          createdAt:timestamp
+          id:`audit_task_create_rejected_${id}`,projectId,actorId:userId,action:"task.create",status:"rejected",
+          resourceKind:"task",resourceId:id,detail:{taskId:id,trigger:"task_create"},createdAt:timestamp
         };
       }
       create.auditEvent={
-        id:`audit_task_create_${id}`,
-        projectId,
-        actorId:userId,
-        action:"task.create",
-        status:"accepted",
-        resourceKind:"task",
-        resourceId:id,
-        detail:{taskId:id},
-        createdAt:timestamp
+        id:`audit_task_create_${id}`,projectId,actorId:userId,action:"task.create",status:"accepted",
+        resourceKind:"task",resourceId:id,detail:{taskId:id},createdAt:timestamp
       };
-      let persisted:PersistedAgentTask;
+
       const created=await this.store.createTaskAtomically(create);
-      if(created.kind!=="created"){
-        if(created.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-        if(created.kind==="in_progress")throw idempotencyInProgressError();
-        if(created.kind==="replay")return replayTaskOperationResponse<TaskPresentation>(created.responseStatus,created.responseBody);
-        if(created.kind==="project_unavailable")throw new ProductError("Project is not active",409,"project_not_active");
-        if(created.kind==="library_not_found")throw new ProductError("File Library not found",404,"file_library_not_found");
-        if(created.kind==="library_deleting")throw new ProductError("File Library deletion is in progress",409,"file_library_deleting");
-        if(created.kind==="already_bound")throw new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
-        if(created.kind==="library_name_conflict")throw new ProductError("File Library name already exists",409,"file_library_name_conflict");
-        await this.bestEffortRemoveTaskStaging(project.rootPath,id);
+      if(created.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(created.kind==="in_progress")throw idempotencyInProgressError();
+      if(created.kind==="replay"){
+        const replay=await this.store.findTaskIdempotency({actorId:userId,projectId,operation:"create",key,requestHash});
+        if(replay?.kind!=="replay")throw idempotencyInProgressError();
+        return this.replayTaskCreate(userId,authorizedAccess,replay);
+      }
+      if(created.kind==="capacity_rejected"){
         if(created.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(projectId);
         throw new SandboxRetryableProductError(created.responseStatus,created.responseBody);
       }
-      persisted=created.task;
-      if(create.reserveActive)await this.refreshSandboxCapacityAlerts(projectId);
-      await this.promoteTaskPreparation(project.rootPath,library,id,input.fileLibrary.mode==="create_new",marker);
-      await this.markCurrentTaskRunReady(persisted);
-      return this.taskPresentation(userId,persisted);
+      if(created.kind!=="created"&&created.kind!=="resume"){
+        const error=taskCreateAdmissionError(created.kind);
+        return created.claimToken
+          ?this.completeClaimedRejectedTaskCreate(
+            userId,
+            authorizedAccess,
+            {...ownership,claimToken:created.claimToken},
+            error
+          )
+          :this.completeRejectedTaskCreate(userId,authorizedAccess,ownership,error);
+      }
+
+      const operationOwnership=created.kind==="resume"
+        ?{...ownership,resourceId:created.task.id,claimToken:created.claimToken}
+        :ownership;
+      const completed=await this.completeAdmittedTaskCreate(
+        project,
+        created.task,
+        operationOwnership,
+        create.reserveActive,
+        created.kind==="resume"
+      );
+      return this.taskPresentation(userId,completed,{projectAccess:authorizedAccess});
+    }catch(error){
+      if(error instanceof TaskCreatePreparationInProgressError)throw error;
+      const raced=await this.store.findTaskIdempotency({
+        actorId:userId,projectId,operation:"create",key,requestHash
+      });
+      if(raced?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(raced?.kind==="replay")return this.replayTaskCreate(userId,authorizedAccess,raced);
+      if(raced?.kind==="in_progress"){
+        const persisted=await this.store.findTask(raced.resourceId);
+        if(persisted){
+          const completed=await this.resumePersistedTaskCreate(
+            authorizedProject,
+            persisted,
+            {...ownership,resourceId:persisted.id}
+          );
+          return this.taskPresentation(userId,completed,{projectAccess:authorizedAccess});
+        }
+        throw idempotencyInProgressError();
+      }
+      if(isTerminalizablePreAdmissionRejection(error)){
+        return this.completeRejectedTaskCreate(userId,authorizedAccess,ownership,error);
+      }
+      throw error;
+    }
+  }
+
+  private async resumePersistedTaskCreate(
+    project:{id:string;rootPath:string},
+    persisted:PersistedAgentTask,
+    ownership:BeginTaskIdempotencyInput,
+    knownOperation?:TaskPreparationOperation
+  ):Promise<PersistedAgentTask>{
+    try{
+      const operation=knownOperation??await this.store.findTaskPreparationOperation(persisted.id);
+      if(!operation||
+        operation.actorId!==ownership.actorId||
+        operation.projectId!==ownership.projectId||
+        operation.key!==ownership.key||
+        operation.requestHash!==ownership.requestHash||
+        operation.resourceId!==persisted.id
+      )throw new Error("Task preparation operation identity is unavailable");
+      const begun=await this.store.beginTaskIdempotency(ownership);
+      if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(begun.kind==="replay"){
+        requireMatchingTaskCreateReceipt(begun,persisted,ownership.actorId,project.id);
+        return persisted;
+      }
+      if(begun.kind==="in_progress")throw idempotencyInProgressError();
+      const operationOwnership={
+        ...ownership,
+        resourceId:persisted.id,
+        claimToken:begun.claimToken
+      };
+      return await this.completeAdmittedTaskCreate(
+        project,
+        persisted,
+        operationOwnership,
+        false,
+        true
+      );
+    }catch(error){
+      if(error instanceof TaskCreatePreparationInProgressError)throw error;
+      throw new TaskCreatePreparationInProgressError(persisted.id,error);
+    }
+  }
+
+  private async completeAdmittedTaskCreate(
+    project:{id:string;rootPath:string},
+    persisted:PersistedAgentTask,
+    ownership:BeginTaskIdempotencyInput,
+    refreshCapacity:boolean,
+    recovering:boolean
+  ):Promise<PersistedAgentTask>{
+    try{
+      const run=persisted.currentRunId?await this.store.sandboxRuns.get(persisted.currentRunId):null;
+      if(persisted.currentRunId&&(!run||!taskMatchesExactSandboxRun(persisted,run))){
+        throw new Error("Admitted Task Run is unavailable during preparation");
+      }
+      if(!run||run.startupReadyAt===null){
+        const library=persisted.fileLibraryId?await this.store.findFileLibrary(persisted.fileLibraryId):null;
+        if(!library)throw new Error("Admitted Task File Library is unavailable during preparation");
+        const marker=taskPreparationMarker(project.id,persisted.id,run,ownership);
+        const projectRoot=path.resolve(this.config.dataRoot,project.rootPath);
+        await withProjectFileLock(projectRoot,async()=>{
+          if(recovering){
+            try{
+              await requireRecoverableTaskPreparationMarker(this.config.dataRoot,projectRoot,marker);
+            }catch(error){
+              if(!isNotFound(error)&&!(error instanceof Error&&error.message==="Task preparation marker is missing"))throw error;
+              await this.prepareTaskStaging(project.rootPath,persisted.id,marker);
+            }
+          }else{
+            await this.prepareTaskStaging(project.rootPath,persisted.id,marker);
+          }
+          const newLibrary=library.id===`library_${persisted.id.slice("task_".length)}`;
+          await this.promoteTaskPreparation(project.rootPath,library,persisted.id,newLibrary,marker);
+          await this.markCurrentTaskRunReady(persisted);
+        });
+      }
+      if(refreshCapacity)await this.refreshSandboxCapacityAlerts(project.id);
+      const response=taskCreateIdempotencyEnvelope(persisted,ownership.actorId);
+      if(!await this.store.completeTaskIdempotency({
+        actorId:ownership.actorId,
+        projectId:ownership.projectId,
+        operation:"create",
+        key:ownership.key,
+        requestHash:ownership.requestHash,
+        claimToken:ownership.claimToken,
+        responseStatus:200,
+        responseBody:response,
+        updatedAt:nowIso()
+      })){
+        const converged=await this.store.findTaskIdempotencyByResource({
+          actorId:ownership.actorId,
+          operation:"create",
+          key:ownership.key,
+          requestHash:ownership.requestHash,
+          resourceId:persisted.id
+        });
+        if(converged?.kind!=="replay"||converged.responseStatus!==200)throw new Error("Task preparation operation lost its claim");
+        requireMatchingTaskCreateReceipt(converged,persisted,ownership.actorId,project.id);
+      }
+      return persisted;
+    }catch(error){
+      if(error instanceof TaskCreatePreparationInProgressError)throw error;
+      throw new TaskCreatePreparationInProgressError(persisted.id,error);
+    }
+  }
+
+  private async completeRejectedTaskCreate(
+    userId:string,
+    access:ProjectAccessSnapshot,
+    ownership:BeginTaskIdempotencyInput,
+    error:ProductError
+  ):Promise<TaskPresentation>{
+    const begun=await this.store.beginTaskIdempotency(ownership);
+    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(begun.kind==="in_progress")throw idempotencyInProgressError();
+    if(begun.kind==="replay")return this.replayTaskCreate(userId,access,begun);
+    return this.completeClaimedRejectedTaskCreate(
+      userId,
+      access,
+      {...ownership,resourceId:begun.resourceId,claimToken:begun.claimToken},
+      error
+    );
+  }
+
+  private async completeClaimedRejectedTaskCreate(
+    userId:string,
+    access:ProjectAccessSnapshot,
+    claimed:BeginTaskIdempotencyInput,
+    error:ProductError
+  ):Promise<TaskPresentation>{
+    const responseBody=taskOperationErrorBody(error);
+    if(await this.store.completeTaskIdempotency({
+      ...claimed,
+      responseStatus:error.statusCode,responseBody,updatedAt:nowIso()
+    }))throw provenTaskCommandRejection(error);
+    const terminal=await this.store.findTaskIdempotencyByResource({
+      actorId:claimed.actorId,
+      operation:"create",
+      key:claimed.key,
+      requestHash:claimed.requestHash,
+      resourceId:claimed.resourceId
     });
-    const persisted = await this.store.findTask(result.task.id);
-    return persisted&&!persisted.deletedAt?this.taskPresentation(userId,persisted):result;
+    if(terminal?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(terminal?.kind==="replay")return this.replayTaskCreate(userId,access,terminal);
+    throw idempotencyInProgressError();
   }
 
   private async taskLibraryCandidate(workspaceId:string,projectId:string,idValue:unknown,userId:string,timestamp:string):Promise<{library:FileLibrary;prepare:boolean}>{
@@ -661,7 +864,7 @@ export class TaskService {
       }
       return{begun:await this.store.beginTerminalStart(beginInput),ownership,beginInput};
     });
-    if("replay" in reservation)return reservation.replay;
+    if("replay" in reservation&&reservation.replay!==undefined)return reservation.replay;
     const {begun,ownership,beginInput}=reservation;
     if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
     if(begun.kind==="in_progress")return{status:"in_progress",runId:begun.run.runId,presentation:await this.taskPresentation(userId,begun.task,{run:begun.run})};
@@ -753,27 +956,67 @@ export class TaskService {
   }
 
   async sendTaskMessage(userId: string, taskId: string, content: string, idempotencyKey?: string): Promise<TaskMessageReceipt> {
-    const task = await this.requireTaskRecordForUser(userId, taskId, "write");
     const text = requireNonEmptyString(content, "task.message.content");
+    const task = await this.store.findTask(taskId);
+    if(!task)throw new ProductError("Task not found",404);
+    await this.workspaces.requireProjectMembershipForUser(userId,task.projectId,"write");
     const operation=taskOperation("message"),key=normalizeIdempotencyKey(idempotencyKey);
     const requestHash=canonicalRequestHash({taskId,content:text});
-    const id=newId("message"),claimToken=newId("idempotency_claim"),timestamp=nowIso();
+    const existing=await this.store.findTaskIdempotency({
+      actorId:userId,projectId:task.projectId,operation,key,requestHash
+    });
+    if(existing?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(existing?.kind==="replay")return this.replayTaskMessage(userId,task,existing);
+    const id=existing?.kind==="in_progress"?existing.resourceId:newId("message");
+    const claimToken=newId("idempotency_claim"),timestamp=nowIso();
     const ownership:BeginTaskIdempotencyInput={actorId:userId,projectId:task.projectId,operation,key,requestHash,resourceId:id,claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)};
-    const begun=await this.store.beginTaskIdempotency(ownership);
-    if(begun.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
-    if(begun.kind==="in_progress")throw idempotencyInProgressError();
-    if(begun.kind==="replay")return this.replayTaskMessage(userId,task,begun);
-    let idempotencyCompleted=false;
+    let ownsClaim=false;
+    if(existing?.kind==="in_progress"){
+      let begun:Awaited<ReturnType<ProductStore["beginTaskIdempotency"]>>;
+      try{
+        begun=await this.store.beginTaskIdempotency(ownership);
+      }catch(error){
+        const converged=await this.store.findTaskIdempotency({
+          actorId:userId,projectId:task.projectId,operation,key,requestHash
+        });
+        if(converged?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+        if(converged?.kind==="replay")return this.replayTaskMessage(userId,task,converged);
+        throw error;
+      }
+      if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(begun.kind==="in_progress")throw idempotencyInProgressError();
+      if(begun.kind==="replay")return this.replayTaskMessage(userId,task,begun);
+      ownership.resourceId=begun.resourceId;
+      ownership.claimToken=begun.claimToken;
+      ownsClaim=true;
+    }
+    try{
+      await this.workspaces.requireProjectForUser(userId,task.projectId,"write");
+      const current = await this.store.findTask(task.id);
+      if (!current || current.deletedAt || current.projectId!==task.projectId) throw new ProductError("Task not found", 404);
+      if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to receive messages", 409);
+    }catch(error){
+      const raced=await this.store.findTaskIdempotency({
+        actorId:userId,projectId:task.projectId,operation,key,requestHash
+      });
+      if(raced?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(raced?.kind==="replay")return this.replayTaskMessage(userId,task,raced);
+      if(raced?.kind==="in_progress"&&!ownsClaim)throw idempotencyInProgressError();
+      if(isTerminalizablePreAdmissionRejection(error)){
+        return this.completeRejectedTaskMessage(userId,task,ownership,error);
+      }
+      throw error;
+    }
     try{
       const current = await this.store.findTask(task.id);
       if (!current || current.deletedAt || current.projectId!==task.projectId) throw new ProductError("Task not found", 404);
       if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to receive messages", 409);
       const message: PersistedTaskMessage = {
-        id:begun.resourceId,
+        id:ownership.resourceId,
         taskId: task.id,
         actorId: userId,
         content: text,
-        deliveryKey: deliveryKeyForMessage(begun.resourceId),
+        deliveryKey: deliveryKeyForMessage(ownership.resourceId),
         requestHash: deliveryRequestHash(text),
         claimToken: null,
         receipt: null,
@@ -805,20 +1048,20 @@ export class TaskService {
         message,
         idempotency:ownership,
         auditEvent:{
-          id:`audit_task_message_create_${begun.resourceId}`,
+          id:`audit_task_message_create_${ownership.resourceId}`,
           projectId:task.projectId,
           actorId:userId,
           action:"task.message.create",
           status:"accepted",
           resourceKind:"task",
           resourceId:task.id,
-          detail:{taskId:task.id,messageId:begun.resourceId,deliveryStatus:"pending"},
+          detail:{taskId:task.id,messageId:ownership.resourceId,deliveryStatus:"pending"},
           createdAt:timestamp
         },
-        admission:this.sandboxAdmission(),
+        admission:this.config.liveSandbox?this.sandboxAdmission():this.releasedSandboxAdmission(),
         rejectionPresentation,
         rejectedAuditEvent:{
-          id:`audit_sandbox_started_rejected_message_${begun.resourceId}`,
+          id:`audit_sandbox_started_rejected_message_${ownership.resourceId}`,
           projectId:task.projectId,
           actorId:userId,
           action:"sandbox.started",
@@ -833,21 +1076,56 @@ export class TaskService {
         interactionChange:projected.change,
         ...(restart?{restart}: {})
       });
-      if(created.kind==="hash_mismatch")throw new ProductError("Idempotency-Key was already used with a different request",409);
+      if(created.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
       if(created.kind==="in_progress")throw idempotencyInProgressError();
-      if(created.kind==="replay")return this.replayTaskMessage(userId,task,{kind:"replay",resourceId:begun.resourceId,responseStatus:created.responseStatus,responseBody:created.responseBody});
+      if(created.kind==="replay")return this.replayTaskMessage(userId,task,{kind:"replay",resourceId:ownership.resourceId,responseStatus:created.responseStatus,responseBody:created.responseBody});
       if(created.kind==="capacity_rejected"){
         if(created.admission.kind==="project_capacity_rejected")await this.bestEffortRecordProjectSandboxCapacityRejected(task.projectId);
         throw new SandboxRetryableProductError(created.responseStatus,created.responseBody);
       }
       if(created.kind==="conflict")throw new ProductError("Task message or sandbox changed concurrently",409,"task_message_conflict");
-      idempotencyCompleted=true;
       if(created.restarted)void this.refreshSandboxCapacityAlerts(current.projectId);
       return structuredClone(acceptedReceipt);
     }catch(error){
-      if(error instanceof ProductError&&!idempotencyCompleted)await this.store.completeTaskIdempotency({actorId:userId,projectId:task.projectId,operation,key,requestHash,claimToken:begun.claimToken,responseStatus:error.statusCode,responseBody:taskOperationErrorBody(error),updatedAt:nowIso()});
+      const converged=await this.store.findTaskIdempotency({
+        actorId:userId,projectId:task.projectId,operation,key,requestHash
+      });
+      if(converged?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+      if(converged?.kind==="replay")return this.replayTaskMessage(userId,task,converged);
+      if(isTerminalizablePreAdmissionRejection(error)){
+        return this.completeRejectedTaskMessage(userId,task,ownership,error);
+      }
       throw error;
     }
+  }
+
+  private async completeRejectedTaskMessage(
+    userId:string,
+    task:PersistedAgentTask,
+    ownership:BeginTaskIdempotencyInput,
+    error:ProductError
+  ):Promise<TaskMessageReceipt>{
+    const begun=await this.store.beginTaskIdempotency(ownership);
+    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(begun.kind==="in_progress")throw idempotencyInProgressError();
+    if(begun.kind==="replay")return this.replayTaskMessage(userId,task,begun);
+    const claimed={...ownership,resourceId:begun.resourceId,claimToken:begun.claimToken};
+    if(await this.store.completeTaskIdempotency({
+      ...claimed,
+      responseStatus:error.statusCode,
+      responseBody:taskOperationErrorBody(error),
+      updatedAt:nowIso()
+    }))throw provenTaskCommandRejection(error);
+    const terminal=await this.store.findTaskIdempotencyByResource({
+      actorId:ownership.actorId,
+      operation:"message",
+      key:ownership.key,
+      requestHash:ownership.requestHash,
+      resourceId:begun.resourceId
+    });
+    if(terminal?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(terminal?.kind==="replay")return this.replayTaskMessage(userId,task,terminal);
+    throw idempotencyInProgressError();
   }
 
   async editTaskMessage(userId: string, taskId: string, messageId: string, content: string, idempotencyKey?: string): Promise<TaskMessageReceipt> {
@@ -1003,23 +1281,28 @@ export class TaskService {
 
   private async reconcileTaskPreparations(failedTaskIds:string[]):Promise<void>{
     for(const run of await this.store.sandboxRuns.list()){
-      if(run.state!=="starting"||run.startupReadyAt!==null)continue;
+      if(run.state!=="starting"&&run.state!=="active")continue;
       try{
         const task=await this.store.findTask(run.taskId);
         const project=await this.store.findProject(run.projectId);
-        const library=task?.fileLibraryId?await this.store.findFileLibrary(task.fileLibraryId):null;
-        if(!task||!project||!library||!taskMatchesExactSandboxRun(task,run))throw new Error("Task preparation ownership is unavailable");
-        const projectRoot=path.resolve(this.config.dataRoot,project.rootPath);
+        if(!task||!project||!taskMatchesExactSandboxRun(task,run))continue;
         const operation=await this.store.findTaskPreparationOperation(task.id);
-        if(!operation)throw new Error("Task preparation operation identity is unavailable");
-        const marker=taskPreparationMarker(project.id,task.id,run,operation);
-        await requireRecoverableTaskPreparationMarker(this.config.dataRoot,projectRoot,marker);
-        const libraryTarget=path.resolve(projectRoot,library.rootSubPath);
-        await this.promoteTaskPreparation(project.rootPath,library,task.id,!await directoryWalkExists(projectRoot,relativeDirectorySegments(projectRoot,libraryTarget)),marker);
-        if(!await this.store.markTaskSandboxStartupReady({taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,readyAt:nowIso()})){
-          throw new Error("Task preparation readiness changed during recovery");
-        }
+        if(!operation)continue;
+        const timestamp=nowIso();
+        await this.resumePersistedTaskCreate(project,task,{
+          ...operation,
+          claimToken:newId("idempotency_claim"),
+          now:timestamp,
+          leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)
+        },operation);
       }catch(error){
+        if(isTaskCreateReceiptContention(error))continue;
+        const currentRun=await this.store.sandboxRuns.get(run.runId);
+        if(currentRun&&currentRun.startupReadyAt!==null){
+          console.error(`Task ${run.taskId} create receipt recovery failed after readiness: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);
+          continue;
+        }
+        console.error(`Task ${run.taskId} preparation recovery failed: ${redactSecretLikeText(error instanceof Error?error.message:String(error))}`);
         const failedAt=nowIso();
         const failed=await this.store.failSandboxRun({
           runId:run.runId,
@@ -2246,6 +2529,18 @@ export class TaskService {
     return interaction||persisted ? { interaction:interaction??persisted!.interaction, ...(correlation ? { correlation } : persisted?.correlation ? { correlation:persisted.correlation } : {}) } : null;
   }
 
+  private async replayTaskCreate(
+    userId:string,
+    access:ProjectAccessSnapshot,
+    replay:Extract<Awaited<ReturnType<ProductStore["findTaskIdempotency"]>>,{kind:"replay"}>
+  ):Promise<TaskPresentation>{
+    if(replay.responseStatus>=400)return replayTaskOperationResponse<TaskPresentation>(replay.responseStatus,replay.responseBody);
+    const task=await this.store.findTask(replay.resourceId);
+    if(!task||task.projectId!==access.project.id)throw invalidTaskCreateIdempotencyError();
+    requireMatchingTaskCreateReceipt(replay,task,userId,access.project.id);
+    return this.taskPresentation(userId,task,{projectAccess:access});
+  }
+
   private async replayTaskMessage(
     userId:string,
     authorizedTask:PersistedAgentTask,
@@ -2355,7 +2650,13 @@ export class TaskService {
   private async taskPresentation(
     userId:string,
     task:PersistedAgentTask,
-    known:{run?:PersistedSandboxRunState|null;turn?:TaskCurrentTurnProjection["state"];reachability?:TaskRuntimeReachability;queued?:PersistedTaskMessage[]}={}
+    known:{
+      run?:PersistedSandboxRunState|null;
+      turn?:TaskCurrentTurnProjection["state"];
+      reachability?:TaskRuntimeReachability;
+      queued?:PersistedTaskMessage[];
+      projectAccess?:ProjectAccessSnapshot;
+    }={}
   ):Promise<TaskPresentation>{
     const loadedRun=known.run!==undefined?known.run:(task.currentRunId?await this.store.sandboxRuns.get(task.currentRunId):null);
     const run=loadedRun&&taskMatchesExactSandboxRun(task,loadedRun)?loadedRun:null;
@@ -2369,7 +2670,7 @@ export class TaskService {
       :runtime.turn==="ready"&&await this.hasQueuedTurnMessage(task.id,queued)?"queued":runtime.turn;
     const state=projectTaskState({archivedAt:task.archivedAt,run,unavailableRunId,turn});
     const [projectAccess,executionEligible]=await Promise.all([
-      this.workspaces.projectAccessForUser(userId,task.projectId),
+      known.projectAccess??this.workspaces.projectAccessForUser(userId,task.projectId),
       this.taskExecutionEligible(task)
     ]);
     const canWrite = projectAccess.canWrite && projectAccess.writableLifecycle;
@@ -2510,7 +2811,11 @@ function replayTaskOperationResponse<T>(statusCode:number,responseBody:unknown):
   const envelope=sandboxRetryableEnvelope(responseBody);
   if(envelope)throw new SandboxRetryableProductError(statusCode,envelope);
   const record=isUnknownRecord(responseBody)?responseBody:{};
-  throw new ProductError(typeof record.error==="string"?record.error:"Task operation failed",statusCode,typeof record.code==="string"?record.code:undefined);
+  throw new ProvenTaskCommandRejectionError(new ProductError(
+    typeof record.error==="string"?record.error:"Task operation failed",
+    statusCode,
+    typeof record.code==="string"?record.code:undefined
+  ));
 }
 
 function sandboxRetryableEnvelope(value:unknown):SandboxRetryableErrorEnvelope|null{
@@ -2575,8 +2880,136 @@ function idempotencyInProgressError():ProductError {
   return new ProductError("Idempotent task operation is still in progress",409,"idempotency_in_progress");
 }
 
+function idempotencyPayloadMismatchError():ProductError {
+  return new ProductError(
+    "Idempotency-Key was already used with a different request",
+    409,
+    "idempotency_payload_mismatch"
+  );
+}
+
+function provenTaskCommandRejection(error:ProductError):ProductError {
+  return error instanceof SandboxRetryableProductError||error instanceof ProvenTaskCommandRejectionError
+    ?error
+    :new ProvenTaskCommandRejectionError(error);
+}
+
+function isTerminalizablePreAdmissionRejection(error:unknown):error is ProductError {
+  return error instanceof ProductError&&
+    !(error instanceof ReceiptUncertaintyError)&&
+    error.code!=="idempotency_in_progress"&&
+    error.code!=="idempotency_payload_mismatch";
+}
+
+function taskCreateAdmissionError(
+  kind:"project_unavailable"|"library_name_conflict"|"library_not_found"|"library_deleting"|"already_bound"
+):ProductError {
+  if(kind==="project_unavailable")return new ProductError("Project is not active",409,"project_not_active");
+  if(kind==="library_not_found")return new ProductError("File Library not found",404,"file_library_not_found");
+  if(kind==="library_deleting")return new ProductError("File Library deletion is in progress",409,"file_library_deleting");
+  if(kind==="already_bound")return new ProductError("File Library is already bound to a Task",409,"file_library_already_bound");
+  return new ProductError("File Library name already exists",409,"file_library_name_conflict");
+}
+
 function invalidTaskMessageIdempotencyError():ProductError {
-  return new ProductError("Task message idempotency record is invalid",409,"task_message_idempotency_invalid");
+  return new ReceiptUncertaintyError("Task message idempotency record is invalid","task_message_idempotency_invalid");
+}
+
+function invalidTaskCreateIdempotencyError():ProductError {
+  return new ReceiptUncertaintyError("Task create idempotency record is invalid","task_create_idempotency_invalid");
+}
+
+function taskCreateIdempotencyEnvelope(task:PersistedAgentTask,actorId:string):TaskCreateIdempotencyEnvelope {
+  return{kind:"task_create",taskId:task.id,projectId:task.projectId,actorId};
+}
+
+function isTaskCreateIdempotencyEnvelope(value:unknown):value is TaskCreateIdempotencyEnvelope {
+  return isUnknownRecord(value)&&
+    hasExactKeys(value,["actorId","kind","projectId","taskId"])&&
+    value.kind==="task_create"&&
+    typeof value.taskId==="string"&&
+    typeof value.projectId==="string"&&
+    typeof value.actorId==="string";
+}
+
+function requireMatchingTaskCreateReceipt(
+  replay:Extract<Awaited<ReturnType<ProductStore["findTaskIdempotency"]>>,{kind:"replay"}>,
+  task:PersistedAgentTask,
+  actorId:string,
+  projectId:string
+):void{
+  if(replay.responseStatus!==200)throw new Error("Task preparation receipt is not a successful admission");
+  if(replay.resourceId!==task.id||task.projectId!==projectId)throw invalidTaskCreateIdempotencyError();
+  if(isTaskCreateIdempotencyEnvelope(replay.responseBody)){
+    if(
+      replay.responseBody.taskId!==task.id||
+      replay.responseBody.projectId!==projectId||
+      replay.responseBody.actorId!==actorId
+    )throw invalidTaskCreateIdempotencyError();
+    return;
+  }
+  requireLegacyTaskCreatePresentation(replay.responseBody,task,projectId);
+}
+
+function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTask,projectId:string):void{
+  if(!isUnknownRecord(value)||!hasExactKeys(value,["capabilities","currentTurn","lifecycle","sandboxState","task"])){
+    throw invalidTaskCreateIdempotencyError();
+  }
+  const presentedTask=value.task;
+  const lifecycle=value.lifecycle;
+  const currentTurn=value.currentTurn;
+  const sandboxState=value.sandboxState;
+  const capabilities=value.capabilities;
+  if(
+    !isUnknownRecord(presentedTask)||
+    !hasExactKeys(presentedTask,[
+      "createdAt","endpointId","fileLibraryId","id","projectId","prompt","updatedAt","workspaceId",
+      ...("title" in presentedTask?["title"]:[])
+    ])||
+    !["createdAt","endpointId","fileLibraryId","id","projectId","prompt","updatedAt","workspaceId"].every(
+      (key)=>typeof presentedTask[key]==="string"
+    )||
+    ("title" in presentedTask&&typeof presentedTask.title!=="string")||
+    presentedTask.id!==task.id||
+    presentedTask.projectId!==projectId||
+    presentedTask.workspaceId!==task.workspaceId||
+    presentedTask.endpointId!==task.endpointId||
+    presentedTask.fileLibraryId!==task.fileLibraryId||
+    presentedTask.prompt!==task.prompt||
+    presentedTask.createdAt!==task.createdAt
+  )throw invalidTaskCreateIdempotencyError();
+  if(
+    !isUnknownRecord(lifecycle)||
+    !hasExactKeys(lifecycle,["state"])||
+    !["active","archived"].includes(String(lifecycle.state))||
+    !isUnknownRecord(currentTurn)||
+    !hasExactKeys(currentTurn,["state"])||
+    !["ready","starting","queued","running","aborting"].includes(String(currentTurn.state))||
+    !isUnknownRecord(sandboxState)||
+    !hasExactKeys(sandboxState,["cause","runId","state"])||
+    !["starting","active","release_requested","released","failed"].includes(String(sandboxState.state))||
+    !(sandboxState.runId===null||typeof sandboxState.runId==="string")||
+    !validLegacySandboxCause(sandboxState.cause)||
+    !isUnknownRecord(capabilities)||
+    !hasExactKeys(capabilities,[
+      "abortTurn","archiveTask","deleteTask","editQueuedMessage","editTask","openTerminal",
+      "releaseSandbox","sendMessage","stopWork"
+    ])||
+    !Object.values(capabilities).every((candidate)=>typeof candidate==="boolean")
+  )throw invalidTaskCreateIdempotencyError();
+}
+
+function validLegacySandboxCause(value:unknown):boolean{
+  return value===null||(
+    isUnknownRecord(value)&&
+    hasExactKeys(value,["code","message"])&&
+    ["startup_failed","runtime_unreachable","runner_failed","cleanup_failed"].includes(String(value.code))&&
+    typeof value.message==="string"
+  );
+}
+
+function hasExactKeys(value:Record<string,unknown>,keys:string[]):boolean{
+  return Object.keys(value).sort().join(",")===[...keys].sort().join(",");
 }
 
 function taskMessageIdempotencyEnvelope(message:PersistedTaskMessage,task:PersistedAgentTask,actorId:string,receipt:TaskMessageReceipt):TaskMessageIdempotencyEnvelope {
@@ -3257,9 +3690,10 @@ async function requireTaskPreparationMarker(directory:string,expected:TaskPrepar
 }
 
 async function readTaskPreparationMarker(directory:string):Promise<TaskPreparationMarker>{
-  const directoryHandle=await openDescriptorAnchoredDirectory(directory);
+  let directoryHandle;
   let handle;
   try{
+    directoryHandle=await openDescriptorAnchoredDirectory(directory);
     handle=await open(`/proc/self/fd/${directoryHandle.fd}/${TASK_PREPARATION_MARKER}`,fsConstants.O_RDONLY|fsConstants.O_NOFOLLOW);
     const value=JSON.parse(await handle.readFile("utf8")) as Partial<TaskPreparationMarker>;
     if(
@@ -3274,7 +3708,7 @@ async function readTaskPreparationMarker(directory:string):Promise<TaskPreparati
     throw error;
   }finally{
     await handle?.close();
-    await directoryHandle.close();
+    await directoryHandle?.close();
   }
 }
 

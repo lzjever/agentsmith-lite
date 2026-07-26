@@ -4,6 +4,7 @@ import { Pencil, Send, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { Banner, Button, Dialog, DialogHeader, IconButton, Text, TextArea } from "@astryxdesign/core";
 import type { TaskCapabilities, TaskQueuedMessage } from "../../lib/api/client";
+import { TaskCommandStorageUnavailableError } from "./task-command-storage";
 import {
   clearTaskDraft,
   restoreTaskDraft,
@@ -15,7 +16,7 @@ import {
 import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
 import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
 
-export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, canManagePolicy, policyHref, capabilities, queuedMessages, busy, unavailableMessage = "Messaging is unavailable", onSend, onUpdateQueued, onDeleteQueued }: { userId: string; projectId: string; taskId: string; activeSandboxesHref: string; canManagePolicy: boolean; policyHref: string; capabilities: TaskCapabilities; queuedMessages: TaskQueuedMessage[]; busy: boolean; unavailableMessage?: string; onSend: (content: string) => Promise<void>; onUpdateQueued: (messageId: string, content: string) => Promise<void>; onDeleteQueued: (messageId: string) => Promise<void> }) {
+export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, canManagePolicy, policyHref, capabilities, queuedMessages, busy, payloadLocked, storageUnavailable, unavailableMessage = "Messaging is unavailable", onSend, onUpdateQueued, onDeleteQueued }: { userId: string; projectId: string; taskId: string; activeSandboxesHref: string; canManagePolicy: boolean; policyHref: string; capabilities: TaskCapabilities; queuedMessages: TaskQueuedMessage[]; busy: boolean; payloadLocked: boolean; storageUnavailable: boolean; unavailableMessage?: string; onSend: (content: string, submittedDraft: string) => Promise<void>; onUpdateQueued: (messageId: string, content: string) => Promise<void>; onDeleteQueued: (messageId: string) => Promise<void> }) {
   const composer = useRef<HTMLElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
@@ -33,8 +34,9 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
   const [deleting, setDeleting] = useState(false);
   const [rejectedFocusSequence, setRejectedFocusSequence] = useState(0);
   const rejectedFocusRequest = useRef(false);
+  const submittingDraft = useRef<string | null>(null);
   const messageBusy = busy || submitting || saving || deleting;
-  const composerEditable = capabilities.sendMessage && !busy && !saving && !deleting;
+  const composerEditable = capabilities.sendMessage && !messageBusy && !payloadLocked;
   const nextEdit = editDraft.trim();
   const editChanged = Boolean(editing) && nextEdit !== editing?.content.trim();
   const draftIdentity: TaskDraftIdentity = { userId, projectId, taskId };
@@ -47,7 +49,9 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
       clearTaskDraft(taskDraftStorage(), previous);
     }
     previousDraftIdentity.current = draftIdentity;
-    const restored = restoreTaskDraft(taskDraftStorage(), draftIdentity);
+    const storage = taskDraftStorage();
+    const restored = restoreTaskDraft(storage, draftIdentity);
+    if (restored.status === "corrupt") clearTaskDraft(storage, draftIdentity);
     setDraft(restored.draft);
     setDraftNotice(restored.status === "unavailable" ? TASK_DRAFT_STORAGE_NOTICE : "");
   }, [projectId, taskId, userId]);
@@ -79,16 +83,21 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
   async function submit() {
     const submittedDraft = draft;
     const content = draft.trim();
-    if (!content || messageBusy || !capabilities.sendMessage) return;
+    if (
+      !content
+      || messageBusy
+      || submittingDraft.current !== null
+      || !capabilities.sendMessage
+    ) return;
+    submittingDraft.current = submittedDraft;
     setSendError("");
     setSendErrorTitle("Message could not be sent");
     setCapacityRecovery(null);
     setSubmitting(true);
     try {
-      await onSend(content);
+      await onSend(content, submittedDraft);
       setDraft((current) => {
         if (current !== submittedDraft) return current;
-        clearTaskDraft(taskDraftStorage(), draftIdentity);
         setDraftNotice("");
         return "";
       });
@@ -96,6 +105,12 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
         requestAnimationFrame(() => input.current?.focus());
       }
     } catch (reason) {
+      if (reason instanceof TaskCommandStorageUnavailableError) {
+        setSendError("");
+        setCapacityRecovery(null);
+        setDraftNotice(TASK_DRAFT_STORAGE_NOTICE);
+        return;
+      }
       const recovery = sandboxCapacityRecovery(reason);
       setCapacityRecovery(recovery);
       setSendError(errorMessage(reason, "The message could not be sent."));
@@ -111,11 +126,13 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
       rejectedFocusRequest.current = true;
       setRejectedFocusSequence((sequence) => sequence + 1);
     } finally {
+      submittingDraft.current = null;
       setSubmitting(false);
     }
   }
 
   function changeDraft(value: string) {
+    if (payloadLocked || submittingDraft.current !== null || messageBusy) return;
     setDraft(value);
     const outcome = writeTaskDraft(taskDraftStorage(), draftIdentity, value);
     setDraftNotice(outcome === "saved" ? "" : TASK_DRAFT_STORAGE_NOTICE);
@@ -162,8 +179,8 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
     {queuedMessages.length ? <ul className="mb-3 max-h-36 overflow-y-auto divide-y divide-border border-y border-border">{queuedMessages.map((message) => <li key={message.id} className="flex min-w-0 items-start justify-between gap-3 py-2.5"><div className="min-w-0"><Text display="block" type="supporting" className="break-words">{message.content}</Text><Text display="block" type="code" color="secondary" className="mt-1">{readableStatus(message.deliveryStatus)}</Text>{message.safeError ? <Text display="block" type="supporting" className="mt-1 break-words text-error">{message.safeError}</Text> : null}</div><div className="flex shrink-0 gap-1">{capabilities.editQueuedMessage && message.editable ? <IconButton label="Edit queued message" tooltip="Edit queued message" variant="ghost" size="lg" icon={<Pencil size={15} />} isDisabled={messageBusy} onClick={() => { setEditing(message); setEditDraft(message.content); setEditError(""); }} /> : null}{capabilities.sendMessage && message.deletable ? <IconButton label="Delete queued message" tooltip="Delete queued message" variant="ghost" size="lg" icon={<Trash2 size={15} />} isDisabled={messageBusy} onClick={() => { setRemoveError(""); setRemoving(message); }} /> : null}</div></li>)}</ul> : null}
     {capacityRecovery ? <SandboxCapacityRecoveryNotice className="mb-3" recovery={capacityRecovery} activeSandboxesHref={activeSandboxesHref} canManagePolicy={canManagePolicy} policyHref={policyHref} title="Sandbox could not be started" /> : null}
     {sendError && !capacityRecovery ? <Banner className="mb-3" status="error" title={sendErrorTitle} description={sendError} /> : null}
-    {draftNotice ? <Text as="p" display="block" type="supporting" color="secondary" className="mb-2" role="status">{draftNotice}</Text> : null}
-    <form className="flex items-end gap-2" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="min-w-0 flex-1"><TextArea ref={input} label="Message" isLabelHidden value={draft} onChange={changeDraft} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} isDisabled={!capabilities.sendMessage || busy || saving || deleting} placeholder={capabilities.sendMessage ? "Message the task" : unavailableMessage} rows={2} width="100%" /></div><IconButton type="submit" label="Send message" tooltip="Send message" size="lg" icon={<Send size={16} />} isDisabled={!capabilities.sendMessage || messageBusy || !draft.trim()} /></form>
+    {draftNotice || storageUnavailable ? <Text as="p" display="block" type="supporting" color="secondary" className="mb-2" role="status">{TASK_DRAFT_STORAGE_NOTICE}</Text> : null}
+    <form className="flex items-end gap-2" onSubmit={(event) => { event.preventDefault(); void submit(); }}><div className="min-w-0 flex-1"><TextArea ref={input} label="Message" isLabelHidden value={draft} onChange={changeDraft} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} isDisabled={!capabilities.sendMessage || messageBusy || payloadLocked} placeholder={capabilities.sendMessage ? "Message the task" : unavailableMessage} rows={2} width="100%" /></div><IconButton type="submit" label="Send message" tooltip="Send message" size="lg" icon={<Send size={16} />} isDisabled={!capabilities.sendMessage || messageBusy || !draft.trim()} /></form>
     <Dialog
       className="[&_button]:min-h-11 [&_button]:min-w-11"
       isOpen={Boolean(editing)}

@@ -1,4 +1,15 @@
-const TASK_DRAFT_PREFIX = "agentsmith.task-draft.v1";
+import {
+  clearTaskCommandMetadata,
+  clearTaskCommandStorageForProject,
+  clearTaskCommandStorageForUser,
+  persistTaskCommandMetadata,
+  readTaskCommandMetadata,
+  taskCommandMetadataKey,
+  taskMessageDraftKey,
+  TaskCommandStorageUnavailableError,
+  type TaskMessageCommandMetadata
+} from "./task-command-storage.ts";
+
 const MAX_TASK_DRAFT_BYTES = 32_768;
 export const TASK_DRAFT_STORAGE_NOTICE = "This draft could not be saved in this browser. You can keep editing and send it.";
 
@@ -14,12 +25,7 @@ type TaskDraftSnapshot = TaskDraftIdentity & {
 };
 
 export function taskDraftKey(identity: TaskDraftIdentity): string {
-  return [
-    TASK_DRAFT_PREFIX,
-    encodeURIComponent(identity.userId),
-    encodeURIComponent(identity.projectId),
-    encodeURIComponent(identity.taskId)
-  ].join(":");
+  return taskMessageDraftKey(identity);
 }
 
 export function taskDraftStorage(): Storage | undefined {
@@ -32,7 +38,7 @@ export function taskDraftStorage(): Storage | undefined {
 
 export type TaskDraftRestore = {
   draft: string;
-  status: "empty" | "restored" | "unavailable";
+  status: "empty" | "restored" | "corrupt" | "unavailable";
 };
 
 export function restoreTaskDraft(
@@ -41,22 +47,24 @@ export function restoreTaskDraft(
 ): TaskDraftRestore {
   if (!storage) return { draft: "", status: "unavailable" };
   const key = taskDraftKey(identity);
+  let raw: string | null;
   try {
-    const raw = storage.getItem(key);
-    if (!raw) return { draft: "", status: "empty" };
+    raw = storage.getItem(key);
+  } catch {
+    return { draft: "", status: "unavailable" };
+  }
+  if (!raw) return { draft: "", status: "empty" };
+  try {
     const value: unknown = JSON.parse(raw);
     if (isTaskDraftSnapshot(value, identity)) {
+      if (new TextEncoder().encode(value.draft).byteLength > MAX_TASK_DRAFT_BYTES) {
+        return { draft: "", status: "corrupt" };
+      }
       return { draft: value.draft, status: "restored" };
     }
-    storage.removeItem(key);
-    return { draft: "", status: "empty" };
+    return { draft: "", status: "corrupt" };
   } catch {
-    try {
-      storage.removeItem(key);
-    } catch {
-      // The common unavailable status is enough when cleanup is also blocked.
-    }
-    return { draft: "", status: "unavailable" };
+    return { draft: "", status: "corrupt" };
   }
 }
 
@@ -74,11 +82,7 @@ export function writeTaskDraft(
   const serialized = JSON.stringify(snapshot);
   if (!storage) return "unavailable";
   if (new TextEncoder().encode(draft).byteLength > MAX_TASK_DRAFT_BYTES) {
-    try {
-      storage.removeItem(key);
-    } catch {
-      // Storage failures never block composing or submitting.
-    }
+    clearTaskMessageCommandPair(storage, identity);
     return "too_large";
   }
   try {
@@ -86,27 +90,95 @@ export function writeTaskDraft(
     else storage.removeItem(key);
     return "saved";
   } catch {
-    try {
-      storage.removeItem(key);
-    } catch {
-      // The unavailable result remains non-blocking when cleanup is blocked.
-    }
+    clearTaskMessageCommandPair(storage, identity);
     return "unavailable";
   }
 }
 
 export function clearTaskDraft(storage: Storage | undefined, identity: TaskDraftIdentity): void {
-  if (!storage) return;
-  try {
-    storage.removeItem(taskDraftKey(identity));
-  } catch {
-    // Storage failures never block accepted commands or cleanup.
+  clearTaskMessageCommandPair(storage, identity);
+}
+
+export function persistTaskMessageCommandAttempt(
+  storage: Storage | undefined,
+  identity: TaskDraftIdentity,
+  draft: string,
+  metadata: TaskMessageCommandMetadata
+): void {
+  const restored = restoreTaskDraft(storage, identity);
+  if (restored.status !== "restored" || restored.draft !== draft) {
+    if (restored.status === "unavailable") {
+      throw new TaskCommandStorageUnavailableError();
+    }
+    clearTaskCommandMetadata(storage, "task-message", identity);
+    throw new TaskCommandStorageUnavailableError();
   }
+  persistTaskCommandMetadata(storage, "task-message", metadata);
+}
+
+export function clearTaskMessageCommandAttempt(
+  storage: Storage | undefined,
+  identity: TaskDraftIdentity,
+  attempt: { key: string; fingerprint: string },
+  draft: string
+): boolean {
+  const metadataRead = readTaskCommandMetadata(
+    storage,
+    "task-message",
+    identity
+  );
+  if (metadataRead.status !== "found") return false;
+  const restored = restoreTaskDraft(storage, identity);
+  if (
+    metadataRead.metadata.key !== attempt.key
+    || metadataRead.metadata.fingerprint !== attempt.fingerprint
+    || restored.status !== "restored"
+    || restored.draft !== draft
+  ) return false;
+
+  if (!storage) return false;
+  const draftKey = taskDraftKey(identity);
+  try {
+    storage.removeItem(draftKey);
+    if (storage.getItem(draftKey) !== null) return false;
+  } catch {
+    return false;
+  }
+  try {
+    storage.removeItem(taskCommandMetadataKey("task-message", identity));
+    storage.getItem(taskCommandMetadataKey("task-message", identity));
+  } catch {
+    // No actionable draft remains, so stale metadata is safe.
+  }
+  return true;
+}
+
+export function clearTaskMessageCommandPair(
+  storage: Storage | undefined,
+  identity: TaskDraftIdentity
+): boolean {
+  if (!storage) return false;
+  const draftKey = taskDraftKey(identity);
+  try {
+    const draftRaw = storage.getItem(draftKey);
+    if (draftRaw !== null) {
+      storage.removeItem(draftKey);
+      if (storage.getItem(draftKey) !== null) return false;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    storage.removeItem(taskCommandMetadataKey("task-message", identity));
+    storage.getItem(taskCommandMetadataKey("task-message", identity));
+  } catch {
+    // No actionable draft remains, so stale metadata is safe.
+  }
+  return true;
 }
 
 export function clearTaskDraftsForUser(storage: Storage | undefined, userId: string): void {
-  const prefix = `${TASK_DRAFT_PREFIX}:${encodeURIComponent(userId)}:`;
-  clearTaskDraftsWithPrefix(storage, prefix);
+  clearTaskCommandStorageForUser(storage, userId);
 }
 
 export function clearTaskDraftsForProject(
@@ -114,26 +186,11 @@ export function clearTaskDraftsForProject(
   userId: string,
   projectId: string
 ): void {
-  const prefix = `${TASK_DRAFT_PREFIX}:${encodeURIComponent(userId)}:${encodeURIComponent(projectId)}:`;
-  clearTaskDraftsWithPrefix(storage, prefix);
+  clearTaskCommandStorageForProject(storage, userId, projectId);
 }
 
 export function shouldClearTaskDraftForAccessStatus(status: number): boolean {
   return status === 403 || status === 404;
-}
-
-function clearTaskDraftsWithPrefix(storage: Storage | undefined, prefix: string): void {
-  if (!storage) return;
-  try {
-    const keys: string[] = [];
-    for (let index = 0; index < storage.length; index += 1) {
-      const key = storage.key(index);
-      if (key?.startsWith(prefix)) keys.push(key);
-    }
-    for (const key of keys) storage.removeItem(key);
-  } catch {
-    // Storage failures never block logout, identity changes, or access recovery.
-  }
 }
 
 function isTaskDraftSnapshot(value: unknown, identity: TaskDraftIdentity): value is TaskDraftSnapshot {

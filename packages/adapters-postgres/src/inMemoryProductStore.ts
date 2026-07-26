@@ -44,6 +44,7 @@ import type {
   ProjectSandboxSettlementPage,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
+  AtomicTaskCreateDeterministicRejection,
   AtomicTaskSandboxRestartInput,
   AtomicTaskSandboxRestartResult,
   AtomicTaskMessageInput,
@@ -1059,21 +1060,35 @@ export class InMemoryProductStore implements ProductStore {
 
   async createTaskAtomically(input: AtomicTaskCreateInput) {
     return this.atomicTaskMessageMutation([input],async()=>{
-    if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
     validateTaskRunReservation(input);
-    const idempotency=input.reserveActive?requiredAdmissionCreateIdempotency(input):null;
+    const idempotency=input.idempotency??(input.reserveActive?requiredAdmissionCreateIdempotency(input):null);
+    let ownedClaimToken:string|undefined;
+    const reject=(kind:AtomicTaskCreateDeterministicRejection["kind"]):AtomicTaskCreateDeterministicRejection=>
+      ownedClaimToken?{kind,claimToken:ownedClaimToken}:{kind};
     if(idempotency){
       const claimed=this.claimAtomicTaskMessageMutation(idempotency);
+      if(claimed.kind==="in_progress"){
+        const record=this.taskIdempotency.get(taskIdempotencyKey(idempotency));
+        if(!record)throw new Error("Task create idempotency record is unavailable");
+        return{kind:"in_progress" as const,resourceId:record.resourceId};
+      }
       if(claimed.kind!=="claimed")return claimed;
-      if(claimed.resourceId!==input.task.id)throw new Error("Task create idempotency resource is inconsistent");
+      ownedClaimToken=idempotency.claimToken;
+      if(claimed.resourceId!==input.task.id){
+        const existing=this.tasks.get(claimed.resourceId);
+        return existing
+          ?{kind:"resume" as const,task:clone(existing),claimToken:idempotency.claimToken}
+          :{kind:"in_progress" as const,resourceId:claimed.resourceId};
+      }
     }
+    if (this.tasks.has(input.task.id)) throw new Error("Task already exists");
     const project=this.projects.get(input.task.projectId);
-    if(!project||(project.lifecycleStatus??"active")!=="active")return{kind:"project_unavailable" as const};
+    if(!project||(project.lifecycleStatus??"active")!=="active")return reject("project_unavailable");
     let library=input.task.fileLibraryId?this.fileLibraries.get(input.task.fileLibraryId):undefined;
-    if(input.newFileLibrary){if(library||await this.createFileLibrary(input.newFileLibrary)===null)return{kind:"library_name_conflict" as const};library=input.newFileLibrary;}
-    if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_not_found" as const};}
-    if(library.lifecycleStatus==="deleting"){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"library_deleting" as const};}
-    if([...this.tasks.values()].some((task)=>task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return{kind:"already_bound" as const};}
+    if(input.newFileLibrary){if(library||await this.createFileLibrary(input.newFileLibrary)===null)return reject("library_name_conflict");library=input.newFileLibrary;}
+    if(!library||library.workspaceId!==input.task.workspaceId||library.projectId!==input.task.projectId){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return reject("library_not_found");}
+    if(library.lifecycleStatus==="deleting"){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return reject("library_deleting");}
+    if([...this.tasks.values()].some((task)=>task.fileLibraryId===library.id)){if(input.newFileLibrary)this.fileLibraries.delete(input.newFileLibrary.id);return reject("already_bound");}
     const task = normalizeStoredTask(input.task);
     if (input.reserveActive) {
       const rejected=await this.admitSandboxRun(input.admission,input.sandboxRun!,task.updatedAt,idempotency!,input.rejectionPresentation!,input.rejectedAuditEvent!);
@@ -1410,10 +1425,10 @@ export class InMemoryProductStore implements ProductStore {
     return row?{actorId:row.actorId,projectId:row.projectId,operation:"terminal-start",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId,claimToken:row.claimToken}:null;
   }
   async findTaskPreparationOperation(taskId:string):Promise<import("../../ports/src/store.js").TaskPreparationOperation|null>{
-    const rows=[...this.taskIdempotency.values()].filter((record)=>record.operation==="create"&&record.resourceId===taskId);
+    const rows=[...this.taskIdempotency.values()].filter((record)=>record.operation==="create"&&record.resourceId===taskId&&record.status==="in_progress");
     if(rows.length!==1)return null;
     const row=rows[0]!;
-    return{actorId:row.actorId,projectId:row.projectId,operation:"create",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId};
+    return{actorId:row.actorId,projectId:row.projectId,operation:"create",key:row.key,requestHash:row.requestHash,resourceId:row.resourceId,claimToken:row.claimToken};
   }
 
   async completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean> {

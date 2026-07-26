@@ -65,6 +65,101 @@ describe("file library store", () => {
     assert.deepEqual(results.map((result)=>result.kind).sort(),["already_bound","created"]);
   });
 
+  it("reclaims an expired create operation with its persisted Task ID",async()=>{
+    const store=createLocalInMemoryProductStore();
+    await store.createProject(project());
+    const persisted=task({id:"task_persisted",fileLibraryId:"library_persisted"});
+    const idempotency={
+      actorId:"user_one",
+      projectId:"project_one",
+      operation:"create" as const,
+      key:"expired-task-create",
+      requestHash:"expired-task-create-request",
+      resourceId:persisted.id,
+      claimToken:"expired-task-create-first",
+      now:"2026-07-19T00:00:00.000Z",
+      leaseExpiresAt:"2026-07-19T00:01:00.000Z"
+    };
+    assert.equal((await store.createTaskAtomically({
+      task:persisted,
+      newFileLibrary:library({id:"library_persisted"}),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency
+    })).kind,"created");
+
+    const replacement=task({id:"task_replacement",fileLibraryId:"library_replacement"});
+    const reclaimed=await store.createTaskAtomically({
+      task:replacement,
+      newFileLibrary:library({id:"library_replacement"}),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:{
+        ...idempotency,
+        resourceId:replacement.id,
+        claimToken:"expired-task-create-second",
+        now:"2026-07-19T00:02:00.000Z",
+        leaseExpiresAt:"2026-07-19T00:03:00.000Z"
+      }
+    });
+
+    assert.equal(reclaimed.kind,"resume");
+    if(reclaimed.kind==="resume"){
+      assert.equal(reclaimed.task.id,persisted.id);
+      assert.equal(reclaimed.claimToken,"expired-task-create-second");
+    }
+    assert.equal(await store.findTask(replacement.id),null);
+    assert.equal(await store.findFileLibrary(replacement.fileLibraryId!),null);
+  });
+
+  it("returns the owning create claim with deterministic store rejections",async()=>{
+    const store=createLocalInMemoryProductStore();
+    await store.createProject(project());
+    const unavailableTask=task({id:"task_project_unavailable",fileLibraryId:"library_project_unavailable"});
+    const unavailableClaim=createReceipt(unavailableTask,"project-unavailable");
+    assert.ok(await store.setProjectLifecycleStatus("project_one","archived","2026-07-19T00:01:00.000Z"));
+
+    assert.deepEqual(await store.createTaskAtomically({
+      task:unavailableTask,
+      newFileLibrary:library({id:unavailableTask.fileLibraryId!,name:"Unavailable"}),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:unavailableClaim
+    }),{kind:"project_unavailable",claimToken:unavailableClaim.claimToken});
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:unavailableClaim.actorId,
+      projectId:unavailableClaim.projectId,
+      operation:unavailableClaim.operation,
+      key:unavailableClaim.key,
+      requestHash:unavailableClaim.requestHash
+    }),{kind:"in_progress",resourceId:unavailableTask.id});
+
+    assert.ok(await store.setProjectLifecycleStatus("project_one","active","2026-07-19T00:02:00.000Z"));
+    await store.createFileLibrary(library({id:"library_claim_conflict",name:"Taken after prevalidation"}));
+    const conflictTask=task({id:"task_library_conflict",fileLibraryId:"library_generated_conflict"});
+    const conflictLibrary=library({
+      id:conflictTask.fileLibraryId!,
+      name:" taken AFTER prevalidation ",
+      rootSubPath:"libraries/library_generated_conflict/home"
+    });
+    const conflictClaim=createReceipt(conflictTask,"library-conflict");
+
+    assert.deepEqual(await store.createTaskAtomically({
+      task:conflictTask,
+      newFileLibrary:conflictLibrary,
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:conflictClaim
+    }),{kind:"library_name_conflict",claimToken:conflictClaim.claimToken});
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:conflictClaim.actorId,
+      projectId:conflictClaim.projectId,
+      operation:conflictClaim.operation,
+      key:conflictClaim.key,
+      requestHash:conflictClaim.requestHash
+    }),{kind:"in_progress",resourceId:conflictTask.id});
+  });
+
   it("serializes Task binding against deletion and fences the physical operation claim", async () => {
     const store = createLocalInMemoryProductStore();
     await store.createProject(project());
@@ -219,6 +314,20 @@ function deletionReceipt(key: string, requestHash: string, resourceId: string, c
     claimToken,
     now: "2026-07-19T00:00:00.000Z",
     leaseExpiresAt: "2026-07-19T00:05:00.000Z"
+  };
+}
+
+function createReceipt(task:PersistedAgentTask,label:string) {
+  return {
+    actorId:"user_one",
+    projectId:task.projectId,
+    operation:"create" as const,
+    key:`create-${label}`,
+    requestHash:`create-hash-${label}`,
+    resourceId:task.id,
+    claimToken:`create-claim-${label}`,
+    now:"2026-07-19T00:00:00.000Z",
+    leaseExpiresAt:"2026-07-19T00:05:00.000Z"
   };
 }
 

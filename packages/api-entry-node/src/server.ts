@@ -12,11 +12,11 @@ import {
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
 import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
-import { SandboxRetryableProductError } from "../../application/src/taskService.js";
+import { ProvenTaskCommandRejectionError, SandboxRetryableProductError, TaskCreatePreparationInProgressError } from "../../application/src/taskService.js";
 import { FileLibraryBoundError } from "../../application/src/fileLibraryService.js";
 import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type ProjectMembershipRole, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput, type WorkspaceMembershipRole } from "../../contracts/src/api.js";
 import type { ContextContentType } from "../../application/src/contextService.js";
-import { ProductError } from "../../domain/src/errors.js";
+import { ProductError, ReceiptUncertaintyError } from "../../domain/src/errors.js";
 import { MAX_PROJECT_FILE_BYTES } from "../../domain/src/fileDefaults.js";
 import { FetchOpenAICompatibleClient, type OpenAICompatibleClient } from "../../openai-compatible-client/src/index.js";
 import type { BotifiedRuntimeHttpClient } from "../../ports/src/botified.js";
@@ -730,16 +730,18 @@ async function routeApi(
         return sendJson(res, 200, await services.tasks.listTasks(user.id, projectId, asTaskListQuery(url.searchParams)));
       }
       if (!segments[5] && method === "POST") {
-        assertOnlySearchParams(url, []);
-        const body = await readJson(req);
-        assertOnlyKeys(body,["prompt","endpointId","title","fileLibrary"]);
-        const fileLibrary=asTaskFileLibrary(body.fileLibrary);
-        return sendJson(res, 200, await services.tasks.createTask(user.id, projectId, {
-          prompt: asString(body.prompt),
-          endpointId: asString(body.endpointId),
-          ...(body.title!==undefined?{title:asString(body.title)}:{}),
-          fileLibrary
-        },requireIdempotencyKey(req)));
+        return sendTaskCreateCommand(res,async()=>{
+          assertOnlySearchParams(url, []);
+          const body = await readJson(req);
+          assertOnlyKeys(body,["prompt","endpointId","title","fileLibrary"]);
+          const fileLibrary=asTaskFileLibrary(body.fileLibrary);
+          return services.tasks.createTask(user.id, projectId, {
+            prompt: asString(body.prompt),
+            endpointId: asString(body.endpointId),
+            ...(body.title!==undefined?{title:asString(body.title)}:{}),
+            fileLibrary
+          },requireIdempotencyKey(req));
+        });
       }
     }
   }
@@ -751,7 +753,7 @@ async function routeApi(
     if (!segments[4] && method === "PATCH") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["title"]);return sendJson(res,200,await services.tasks.editTask(user.id,taskId,asString(body.title),requireIdempotencyKey(req)));}
     if (!segments[4] && method === "DELETE") {assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTask(user.id,taskId,requireIdempotencyKey(req)));}
     if (segments[4] === "messages") {
-      if(!segments[5]&&method==="POST"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req)));}
+      if(!segments[5]&&method==="POST"){return sendTaskMessageCommand(res,async()=>{assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return services.tasks.sendTaskMessage(user.id,taskId,asString(body.content),requireIdempotencyKey(req));});}
       if(segments[5]&&method==="PATCH"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,["content"]);return sendJson(res,200,await services.tasks.editTaskMessage(user.id,taskId,segments[5],asString(body.content),requireIdempotencyKey(req)));}
       if(segments[5]&&method==="DELETE"){assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.deleteTaskMessage(user.id,taskId,segments[5],requireIdempotencyKey(req)));}
     }
@@ -1377,6 +1379,62 @@ function handleError(res: ServerResponse, error: unknown): void {
   if(statusCode>=500)console.error("Product API request failed",error);
   const message = error instanceof ProductError ? error.message : "Internal server error";
   sendJson(res, statusCode, { error: message, ...(error instanceof ProductError && error.code ? { code:error.code } : {}) });
+}
+
+async function sendTaskCreateCommand(
+  res:ServerResponse,
+  command:()=>Promise<import("../../contracts/src/api.js").TaskPresentation>
+):Promise<void>{
+  try{
+    return sendJson(res,200,{outcome:"completed",keyDisposition:"retire",...await command()});
+  }catch(error){
+    if(error instanceof TaskCreatePreparationInProgressError){
+      return sendJson(res,202,{outcome:"accepted_in_progress",keyDisposition:"retain",taskId:error.taskId});
+    }
+    return sendRejectedTaskCommand(res,error);
+  }
+}
+
+async function sendTaskMessageCommand(
+  res:ServerResponse,
+  command:()=>Promise<import("../../contracts/src/api.js").TaskMessageReceipt>
+):Promise<void>{
+  try{
+    return sendJson(res,200,{outcome:"completed",keyDisposition:"retire",...await command()});
+  }catch(error){
+    return sendRejectedTaskCommand(res,error);
+  }
+}
+
+function sendRejectedTaskCommand(res:ServerResponse,error:unknown):void{
+  const statusCode=error instanceof ProductError?error.statusCode:500;
+  const code=error instanceof ProductError?error.code:undefined;
+  if(
+    error instanceof ReceiptUncertaintyError||
+    code==="idempotency_in_progress"||
+    (!(error instanceof SandboxRetryableProductError)&&
+      !(error instanceof ProvenTaskCommandRejectionError)&&
+      statusCode>=500)
+  ){
+    return handleError(res,error);
+  }
+  const keyDisposition=code==="idempotency_payload_mismatch"
+    ?"retain" as const
+    :"retire" as const;
+  if(error instanceof SandboxRetryableProductError){
+    return sendJson(res,statusCode,{
+      outcome:"rejected_before_acceptance",
+      keyDisposition,
+      error:error.envelope.error,
+      code:error.envelope.error.code
+    });
+  }
+  return sendJson(res,statusCode,{
+    outcome:"rejected_before_acceptance",
+    keyDisposition,
+    error:error instanceof ProductError?error.message:"Internal server error",
+    ...(code?{code}:{})
+  });
 }
 
 function handleTaskRouteError(res: ServerResponse, error: unknown): void {

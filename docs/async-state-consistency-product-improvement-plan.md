@@ -107,7 +107,7 @@ milestone rather than expanding the plan.
 
 ### 5.1 Command outcomes
 
-Every mutating request carries:
+Every replay-protected command listed in the command contract matrix carries:
 
 - an idempotency key;
 - an operation name;
@@ -116,22 +116,36 @@ Every mutating request carries:
 
 The server binds the key to that tuple. Reusing a key with a different
 fingerprint returns `idempotency_payload_mismatch` and never changes the
-original operation.
+original operation. This contract applies only to the commands in the matrix;
+it does not extend replay protection to unrelated mutations such as Profile or
+Notification updates.
 
-The API exposes a typed acceptance outcome. The Web must not infer acceptance
-from an HTTP status, `retryable`, a JSON body, or an exception class.
+Every definitive server response exposes exactly one of three typed acceptance
+outcomes plus the orthogonal `keyDisposition: retain | retire` field:
 
-| Outcome | Meaning | Web key state |
+| Server outcome | Meaning | Allowed `keyDisposition` |
 |---|---|---|
-| `accepted_in_progress` | durably admitted, result still converging | retain and reconcile |
-| `completed` | durable final result is available | clear after canonical state absorbs it |
-| `rejected_before_acceptance` | no business operation was admitted | clear and allow a new action |
-| `outcome_unknown` | transport cannot establish the result | retain and query/replay the same command |
+| `accepted_in_progress` | durably admitted, result still converging | `retain` |
+| `completed` | durable final result is available | `retire` |
+| `rejected_before_acceptance` | this attempt admitted no business operation | `retain` or `retire`, explicitly selected by the server |
 
-Timeouts, response parsing failures, dropped connections, `408`, and
-unclassified `5xx` are `outcome_unknown`. A structured `409` is not
-automatically a rejection; it may represent an admitted command still
-converging.
+`outcome_unknown` is a Web transport/client state and is never serialized as a
+server outcome. The Web enters it when a timeout, response parsing failure,
+dropped connection, `408`, or unclassified `5xx` prevents it from reading a
+typed server outcome and disposition. It conservatively retains the key and
+replays the same command.
+
+The Web changes key state only from `keyDisposition`; it does not derive
+disposition from the error code, HTTP status, `retryable`, an untyped JSON body,
+or an exception class. A structured `409` is not automatically a rejection or
+a reason to retire a key.
+
+`idempotency_payload_mismatch` means the changed-payload attempt was not
+admitted, while the original key remains bound to the original command. It must
+return `rejected_before_acceptance + retain` and preserve the original key,
+fingerprint, and payload binding. Ordinary rejections proven to occur before
+admission return `rejected_before_acceptance + retire`. When the server cannot
+prove that retiring the key is safe, it returns `retain`.
 
 The existing idempotency store is the only command-result store. The only
 resolution path is replaying the original mutation route with the same key,
@@ -142,16 +156,26 @@ client-side command system.
 ### 5.2 Mutation-key lifetime
 
 `useMutationKeys` is the one Web helper for command identity. It exposes
-explicit transitions for the four outcomes above.
+explicit transitions for the three server outcomes plus the client-only
+`outcome_unknown` state.
 
 - A key is never rotated merely because time passed.
 - A retry of an unresolved action uses the same key and fingerprint.
-- While an unresolved action remains mounted, a changed payload cannot reuse
-  its key. It is a new user action after the current action is resolved.
-- Only non-secret identity metadata may survive a component remount.
+- While an action is unresolved, its form payload is locked and cannot change
+  under the retained key. A changed payload is a new user action only after the
+  current action is resolved.
+- In addition to the normal Task create/message form drafts, only non-secret
+  identity metadata may survive a component remount.
 
-Task drafts may retain a Task-message key, scope, fingerprint, and creation
-time. They must not persist a full prompt solely for idempotency.
+Task create and Task message use `sessionStorage` for the normal form draft plus
+non-sensitive `{userId, projectId/taskId, key, fingerprint, createdAt}`
+metadata. Storage keys follow the existing authenticated-user isolation: Task
+create is scoped by `userId + projectId`, Task message by
+`userId + projectId + taskId`, and both are removed by the existing logout
+cleanup. On remount, an unresolved action reconstructs the same payload from
+that locked draft and replays the original mutation route with the same key and
+fingerprint. The prompt remains only in the normal form draft; do not save a
+second prompt or serialized request payload for idempotency.
 
 An upload key may be replayed only while the current page still holds the
 original `File` object. Upload recovery does not cross a component remount.
@@ -160,8 +184,8 @@ later file selection is a new explicit upload with a new key. Atomic
 no-replace, explicit overwrite, and server-side same-key convergence keep that
 new action safe without a command-result query API or persisted file bytes.
 
-Secrets, API keys, file bytes, and raw request payloads are never added to
-browser storage.
+Secrets, API keys, file bytes, and idempotency-only request payload copies are
+never added to browser storage.
 
 ### 5.3 Task state ownership
 
@@ -265,7 +289,7 @@ transaction framework.
 
 | Command | Durable acceptance point | Exact target | Final convergence |
 |---|---|---|---|
-| Task create | one `AtomicTaskCreate` transaction commits Library create/bind, Task, Run reservation, initial message, initial interaction, and fixed receipt | request fingerprint | replay returns same complete Task |
+| Task create | one Postgres transaction commits the complete business identity (Library create/bind, Task, Run reservation, initial message, and initial interaction) plus a durable in-progress operation | request fingerprint | JuiceFS preparation resumes from that operation; terminalize the receipt afterward and replay returns the same Task |
 | Task message | interaction/queue admission and receipt commit | Task + interaction identity | stream/GET shows one accepted message |
 | Terminal start | Run reservation and in-progress receipt commit | `expectedRunId + expectedSandboxState` | Run activation and completed receipt commit atomically |
 | Release | `release_requested` fence and receipt commit | `expectedRunId` | drain barrier confirms exact resources absent |
@@ -274,6 +298,18 @@ transaction framework.
 | Upload/overwrite | ordered file operation receipt and staged identity commit | Library + normalized path + fingerprint | earlier durable path operations converge first, then one filesystem commit or precise conflict |
 | Recursive delete | ordered receipt plus quarantine identity commit | Library + normalized path | earlier durable path operations converge first; replay resumes same quarantine only |
 | Library rename | renamed row and receipt commit | Library + `expectedUpdatedAt` | replay returns durable name |
+
+Task create has one Postgres atomic boundary, not a cross-database/filesystem
+transaction. Any required JuiceFS preparation begins only after the Postgres
+commit. Replay or the existing continuation resumes that durable in-progress
+operation, and the receipt becomes terminal only after JuiceFS preparation
+reaches its stable result.
+
+Task message does not use `accepted_in_progress`: atomic interaction and queue
+admission succeeds as `completed`. If the Web cannot determine whether that
+commit occurred, it uses `outcome_unknown + retain` and replays the same
+command. Botified delivery and Agent execution then converge through canonical
+Task state; they are not part of the Task-message command outcome.
 
 Release, Abort, and Stop never silently retarget to the newest Run or work item.
 If the expected target changed, the API returns a typed target conflict and the
@@ -376,17 +412,29 @@ as part of the same change.
 
 Implement:
 
-- the four typed acceptance outcomes in contracts and Web API client;
-- key/fingerprint mismatch handling;
+- the three server wire outcomes and client-only `outcome_unknown` state in
+  contracts and the Web API client;
+- explicit server `keyDisposition` and key/fingerprint mismatch handling;
 - explicit `useMutationKeys` transitions;
-- result lookup/replay through the existing idempotency store;
-- correct key retention for Task create/message and file commands.
+- same-route replay through the existing idempotency store;
+- `sessionStorage` draft and identity retention for Task create and Task
+  message;
+- payload locking while either command is unresolved;
+- Task create Postgres admission followed by resumable JuiceFS preparation and
+  receipt terminalization.
+
+This first slice applies the common outcome/key contract only to Task create
+and Task message. It does not implement or claim exactly-once file behavior.
+Terminal start, Release, Abort, and Stop adopt the contract in Slice 3; file
+commands adopt it with their durable safety work in Slice 4. No slice adds a
+command-result query endpoint.
 
 Focused behavior checks:
 
 - a Task message accepted before a simulated lost response produces one
-  interaction after replay;
-- a Task create committed before response loss returns the same Task;
+  interaction after same-route replay, including after a remount;
+- a Task create admitted before response loss resumes JuiceFS preparation and
+  returns the same Task after same-route replay, including after a remount;
 - the same key with a changed fingerprint is rejected without changing the
   original operation.
 
@@ -421,6 +469,7 @@ User result: visible Task, Terminal, and Files state does not jump backward.
 
 Implement:
 
+- the common outcome/key contract for Terminal start, Release, Abort, and Stop;
 - `202 accepted_in_progress` after durable Terminal-start reservation;
 - one reconciler startup owner;
 - atomic Run activation plus final Terminal-start receipt;
@@ -447,6 +496,7 @@ the Task the user can see.
 
 Implement:
 
+- the common outcome/key contract and durable replay safety for file commands;
 - atomic no-replace for normal upload;
 - one staged atomic replace for explicit overwrite;
 - single-node per-Library/path ordering for different command keys;
@@ -524,9 +574,9 @@ The milestone is complete when:
 
 - all commands in the matrix have one durable acceptance point, one typed
   outcome path, and one replay path;
-- the Web retains unresolved command identity while the action is mounted,
-  preserves Task-message identity with its existing draft, and never changes a
-  retained command's payload;
+- the Web retains unresolved Task create/message identity and normal form draft
+  in `sessionStorage` across remounts, replays the original mutation route with
+  the same key and fingerprint, and never changes a retained command's payload;
 - Task canonical state and Terminal local state have non-overlapping owners;
 - focused out-of-order checks prove stale responses cannot regress the UI;
 - Terminal start returns after reservation while external startup is blocked;

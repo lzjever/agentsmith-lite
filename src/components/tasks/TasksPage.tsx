@@ -5,13 +5,26 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Banner, Button as AstryxButton, IconButton, Spinner, Text, useToast } from "@astryxdesign/core";
-import { ApiError, apiClient, isReadOnlyMutationError, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, taskCommandOutcomeError, type FileLibrary, type ProjectCapabilities, type TaskListPage, type TaskListQuery } from "../../lib/api/client";
+import { useCurrentUser } from "../app-shell/current-user";
 import { PageHeader } from "../layout/PageHeader";
 import { PageLayout } from "../layout/PageLayout";
 import { TaskCreateDialog, type TaskCreateValue } from "./TaskCreateDialog";
 import { TaskList } from "./TaskList";
 import { taskDetailNeedsRefresh } from "./task-ui";
 import { useTaskMutationKeys } from "./task-mutation-key";
+import {
+  clearTaskCreateCommandAttempt,
+  clearTaskCreateCommandPair,
+  persistTaskCreateCommandAttempt,
+  readTaskCommandMetadata,
+  readTaskCreateDraft,
+  retireTaskCommandMetadata,
+  taskCommandRemountDecision,
+  TaskCommandStorageUnavailableError,
+  taskCommandFingerprint
+} from "./task-command-storage";
+import { taskDraftStorage } from "./task-draft-snapshot";
 
 const emptyPage: TaskListPage = { items: [], nextCursor: null, total: 0 };
 const initialQuery: TaskListQuery = { archived: "exclude", sort: "updated_at", direction: "desc", limit: 25 };
@@ -30,6 +43,7 @@ export function TasksPageContent(props: TasksPageContentProps) {
 }
 
 function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPageContentProps) {
+  const { id: userId } = useCurrentUser();
   const mutationKeys = useTaskMutationKeys();
   const showToast = useToast();
   const active = useRef(true);
@@ -52,6 +66,8 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const [error, setError] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createPayloadLocked, setCreatePayloadLocked] = useState(false);
+  const [createStorageUnavailable, setCreateStorageUnavailable] = useState(false);
   const loadVersion = useRef(0);
   const endpointsLoadVersion = useRef(0);
   const capabilitiesLoadVersion = useRef(0);
@@ -60,6 +76,65 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   const cursor = cursors[pageIndex];
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => {
+    const storage = taskDraftStorage();
+    const identity = { userId, projectId };
+    const metadataRead = readTaskCommandMetadata(
+      storage,
+      "task-create",
+      identity
+    );
+    if (metadataRead.status === "unavailable") {
+      setCreatePayloadLocked(true);
+      setCreateStorageUnavailable(true);
+      return;
+    }
+    const draftRead = readTaskCreateDraft(storage, identity);
+    const decision = taskCommandRemountDecision(
+      metadataRead,
+      draftRead.status
+    );
+    if (decision.status === "locked_unavailable") {
+      setCreatePayloadLocked(true);
+      setCreateStorageUnavailable(true);
+      return;
+    }
+    if (decision.status === "fresh") {
+      mutationKeys.clear("task-create");
+      setCreatePayloadLocked(false);
+      setCreateStorageUnavailable(false);
+      return;
+    }
+    if (decision.status === "cleanup") {
+      const cleared = clearTaskCreateCommandPair(storage, identity);
+      if (cleared) mutationKeys.clear("task-create");
+      setCreatePayloadLocked(!cleared);
+      setCreateStorageUnavailable(!cleared);
+      return;
+    }
+    if (decision.status !== "restore" || draftRead.status !== "found") return;
+    const metadata = decision.metadata;
+
+    let cancelled = false;
+    setCreatePayloadLocked(true);
+    setCreateStorageUnavailable(false);
+    void taskCommandFingerprint(taskCreateRequest(draftRead.draft)).then((fingerprint) => {
+      if (cancelled) return;
+      if (fingerprint !== metadata.fingerprint) {
+        const cleared = clearTaskCreateCommandPair(storage, identity);
+        if (cleared) mutationKeys.clear("task-create");
+        setCreatePayloadLocked(!cleared);
+        setCreateStorageUnavailable(!cleared);
+        return;
+      }
+      mutationKeys.restore("task-create", projectId, metadata);
+    }).catch(() => {
+      if (cancelled) return;
+      setCreatePayloadLocked(true);
+      setCreateStorageUnavailable(true);
+    });
+    return () => { cancelled = true; };
+  }, [mutationKeys, projectId, userId]);
   useEffect(() => {
     function restoreQuery() {
       const restored = taskQueryFromLocation();
@@ -172,36 +247,141 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
   async function createTask(input: TaskCreateValue) {
     setCreating(true);
     setError("");
-    const identity = JSON.stringify(input);
+    const storage = taskDraftStorage();
+    const storageIdentity = { userId, projectId };
+    const request = taskCreateRequest(input);
     try {
-      const title = input.title.trim();
-      const task = await apiClient.createTask(projectId, { prompt: input.prompt, endpointId: input.endpointId, ...(title ? { title } : {}), fileLibrary: input.fileLibrary }, mutationKeys.key("task-create", identity));
+      const fingerprint = await taskCommandFingerprint(request);
+      const metadataRead = readTaskCommandMetadata(
+        storage,
+        "task-create",
+        storageIdentity
+      );
+      if (metadataRead.status === "unavailable") {
+        setCreatePayloadLocked(true);
+        setCreateStorageUnavailable(true);
+        throw new TaskCommandStorageUnavailableError();
+      }
+      if (metadataRead.status === "corrupt") {
+        setCreatePayloadLocked(true);
+        throw new TaskCommandStorageUnavailableError();
+      }
+      const restored = metadataRead.status === "found"
+        ? metadataRead.metadata
+        : null;
+      if (restored) {
+        mutationKeys.restore("task-create", projectId, restored);
+      }
+      const attempt = mutationKeys.fingerprintKey("task-create", projectId, fingerprint);
+      const metadata = {
+        ...storageIdentity,
+        ...attempt,
+        createdAt: restored?.fingerprint === fingerprint
+          ? restored.createdAt
+          : new Date().toISOString()
+      };
+      try {
+        persistTaskCreateCommandAttempt(storage, input, metadata);
+      } catch (reason) {
+        const retain = restored !== null
+          || reason instanceof TaskCommandStorageUnavailableError
+            && reason.attemptDisposition === "retain";
+        if (retain) {
+          setCreatePayloadLocked(true);
+          setCreateStorageUnavailable(true);
+        } else {
+          mutationKeys.discard("task-create", projectId, attempt);
+          setCreatePayloadLocked(false);
+        }
+        throw reason;
+      }
+      setCreateStorageUnavailable(false);
+      setCreatePayloadLocked(true);
+
+      const outcome = await apiClient.createTask(projectId, request, attempt.key);
+      const retireRejection = outcome.outcome === "rejected_before_acceptance"
+        && outcome.keyDisposition === "retire";
+      if (!retireRejection) {
+        mutationKeys.transition("task-create", projectId, attempt, outcome);
+      }
+
+      if (outcome.outcome === "accepted_in_progress") {
+        throw new Error("Task creation is still in progress. Try again.");
+      }
+      if (outcome.outcome === "outcome_unknown") {
+        throw taskCommandOutcomeError(outcome);
+      }
+      if (outcome.outcome === "rejected_before_acceptance") {
+        if (retireRejection) {
+          if (
+            !retireTaskCommandMetadata(
+              storage,
+              "task-create",
+              storageIdentity,
+              attempt
+            )
+          ) {
+            setCreatePayloadLocked(true);
+            setCreateStorageUnavailable(true);
+            throw new TaskCommandStorageUnavailableError("retain");
+          }
+          mutationKeys.transition("task-create", projectId, attempt, outcome);
+          setCreatePayloadLocked(false);
+          setCreateStorageUnavailable(false);
+        }
+        const reason = taskCommandOutcomeError(outcome);
+        const detail = message(reason);
+        if (isReadOnlyMutationError(reason)) {
+          setDialogOpen(false);
+          if (retireRejection) mutationKeys.clear("task-create");
+          setCapabilities((current) => current
+            ? { ...current, canCreateTasks: false }
+            : current);
+          setError(detail);
+        } else if (isTaskEndpointDrift(reason)) {
+          setEndpointPickerRevision((current) => current + 1);
+          await loadEndpoints();
+        } else if (isTaskLibraryDrift(reason)) {
+          await loadLibraries();
+        }
+        throw reason;
+      }
+
       if (!active.current) return;
-      mutationKeys.complete("task-create", identity);
+      setPage((current) => ({
+        ...current,
+        items: [
+          outcome,
+          ...current.items.filter((item) => item.task.id !== outcome.task.id)
+        ],
+        total: current.items.some((item) => item.task.id === outcome.task.id)
+          ? current.total
+          : current.total + 1
+      }));
+      if (
+        !clearTaskCreateCommandAttempt(
+          storage,
+          storageIdentity,
+          attempt,
+          input
+        )
+      ) throw new TaskCommandStorageUnavailableError();
+      mutationKeys.canonicalAbsorbed("task-create", projectId, attempt);
+      setCreatePayloadLocked(false);
       showToast({ body: "Task created" });
-      navigate(`${basePath}/${task.task.id}`);
+      navigate(`${basePath}/${outcome.task.id}`);
     } catch (reason) {
       if (!active.current) return;
-      const detail = message(reason);
-      mutationKeys.completeApiFailure(reason, "task-create", identity);
-      if (isReadOnlyMutationError(reason)) {
+      if (
+        reason instanceof ApiError
+        && reason.status === 403
+      ) {
         setDialogOpen(false);
-        mutationKeys.clear("task-create");
-        if (reason instanceof ApiError && reason.status === 403) {
-          setPage(emptyPage);
-          await load();
-          loadCreateDependencies();
-          throw new Error(detail);
-        }
-        setCapabilities((current) => current ? { ...current, canCreateTasks: false } : current);
-        setError(detail);
-      } else if (isTaskEndpointDrift(reason)) {
-        setEndpointPickerRevision((current)=>current+1);
-        await loadEndpoints();
-      } else if (isTaskLibraryDrift(reason)) {
-        await loadLibraries();
+        setPage(emptyPage);
+        await load();
+        loadCreateDependencies();
       }
-      throw reason instanceof Error ? reason : new Error(detail);
+      throw reason instanceof Error ? reason : new Error(message(reason));
     } finally { if (active.current) setCreating(false); }
   }
 
@@ -222,7 +402,7 @@ function ProjectTasksPageContent({ workspaceId, projectId, navigate }: TasksPage
     {state === "loading" ? <div className="grid min-h-48 place-items-center px-4 py-6"><Spinner label="Loading tasks..." /></div> : null}
     {state === "error" ? <Banner status="error" container="section" title="Tasks unavailable" description={error || "Tasks could not be loaded."} endContent={<AstryxButton label="Try again" variant="secondary" onClick={() => void load()} />} /> : null}
     {state === "ready" ? <><TaskList page={page} basePath={basePath} query={query} pageIndex={pageIndex} onQueryChange={changeQuery} onNext={nextPage} onPrevious={() => setPageIndex((value) => Math.max(0, value - 1))} />{capabilitiesState === "ready" && !canCreate ? <Text display="block" type="supporting" color="secondary" className="mt-4">Your project access is read-only.</Text> : null}{canCreate && endpointsState === "ready" && taskReadyEndpointCount===0 ? <Text display="block" type="supporting" color="secondary" className="mt-4">No task-ready endpoint is available. <Link className="text-primary hover:underline" href={`/workspaces/${workspaceId}/projects/${projectId}/endpoints`}><Text weight="medium">Open endpoints</Text></Link></Text> : null}</> : null}
-    <TaskCreateDialog projectId={projectId} endpointPickerRevision={endpointPickerRevision} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={capabilities?.canManagePolicy === true} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} onClose={() => { if (!creating) { setDialogOpen(false); mutationKeys.clear("task-create"); } }} onCreate={createTask} />
+    <TaskCreateDialog userId={userId} projectId={projectId} endpointPickerRevision={endpointPickerRevision} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={capabilities?.canManagePolicy === true} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} libraries={libraries} librariesLoading={librariesState === "loading"} open={dialogOpen} saving={creating} payloadLocked={createPayloadLocked} storageUnavailable={createStorageUnavailable} onClose={() => { if (!creating) { setDialogOpen(false); if (!createPayloadLocked) mutationKeys.clear("task-create"); } }} onCreate={createTask} />
   </PageLayout>;
 }
 
@@ -231,6 +411,18 @@ function DependencyError({ children }: { children: ReactNode }) {
 }
 
 function message(error: unknown): string { return error instanceof ApiError ? error.message : error instanceof Error ? error.message : "The task request could not be completed."; }
+
+function taskCreateRequest(input: TaskCreateValue) {
+  const title = input.title.trim();
+  return {
+    prompt: input.prompt.trim(),
+    endpointId: input.endpointId,
+    ...(title ? { title } : {}),
+    fileLibrary: input.fileLibrary.mode === "create_new"
+      ? { mode: "create_new" as const, name: input.fileLibrary.name.trim() }
+      : input.fileLibrary
+  };
+}
 
 function isTaskEndpointDrift(error: unknown): boolean {
   return error instanceof ApiError && (

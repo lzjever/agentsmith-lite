@@ -118,6 +118,10 @@ export class WorkspaceService {
     return this.authorization.requireProject(userId, projectId, permission);
   }
 
+  async requireProjectMembershipForUser(userId: string, projectId: string, permission: ProjectPermission = "view"): Promise<Project> {
+    return this.authorization.requireProjectMembership(userId, projectId, permission);
+  }
+
   async projectCapabilities(userId: string, projectId: string): Promise<ProjectCapabilities> {
     return this.authorization.projectCapabilities(userId, projectId);
   }

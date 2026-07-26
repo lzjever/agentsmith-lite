@@ -725,6 +725,27 @@ export interface TaskSandboxReleaseReceipt {
   presentation: TaskPresentation;
 }
 
+export const SERVER_COMMAND_OUTCOMES = [
+  "accepted_in_progress",
+  "completed",
+  "rejected_before_acceptance"
+] as const;
+export type ServerCommandOutcome = typeof SERVER_COMMAND_OUTCOMES[number];
+export type ClientCommandOutcome = ServerCommandOutcome | "outcome_unknown";
+export type CommandKeyDisposition = "retain" | "retire";
+
+export interface RejectedCommandOutcome {
+  outcome:"rejected_before_acceptance";
+  keyDisposition:CommandKeyDisposition;
+  error:string|Record<string,unknown>;
+  code?:string;
+}
+
+export type TaskCreateCommandOutcome =
+  | ({outcome:"completed";keyDisposition:"retire"}&TaskPresentation)
+  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string}
+  | RejectedCommandOutcome;
+
 export type TaskTerminalStartReceipt =
   | { status:"active"; runId:string; presentation:TaskPresentation }
   | { status:"in_progress"; runId:string; presentation:TaskPresentation };
@@ -812,6 +833,10 @@ export interface TaskMessageReceipt {
   presentation: TaskPresentation;
   safeError?: string;
 }
+
+export type TaskMessageCommandOutcome =
+  | ({outcome:"completed";keyDisposition:"retire"}&TaskMessageReceipt)
+  | RejectedCommandOutcome;
 
 export type TaskInteractionConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
 export type TaskAssistantPreviewStatus = "available" | "unavailable";

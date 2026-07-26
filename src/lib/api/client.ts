@@ -4,7 +4,7 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskCreateCommandOutcome, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageCommandOutcome, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
@@ -55,6 +55,38 @@ const readOnlyMutationMessages = new Set([
 
 export function isReadOnlyMutationError(error: unknown): error is ApiError {
   return error instanceof ApiError && (error.status === 403 || (error.status === 409 && readOnlyMutationMessages.has(error.message)));
+}
+
+export function taskCommandOutcomeError(
+  outcome: TaskCommandFailureOutcome
+): Error {
+  if (outcome.error instanceof Error) return outcome.error;
+  const status = taskCommandOutcomeStatuses.get(outcome) ?? 409;
+  const outcomeCode = "code" in outcome && typeof outcome.code === "string"
+    ? outcome.code
+    : undefined;
+  if (typeof outcome.error === "string") {
+    return new ApiError(status, outcome.error, outcomeCode);
+  }
+  const error = outcome.error;
+  const message = typeof error.message === "string"
+    ? error.message
+    : "The Task command was rejected.";
+  const options: {
+    code?: string;
+    retryable?: boolean;
+    details?: unknown;
+    presentation?: TaskPresentation | null;
+  } = {};
+  const code = typeof error.code === "string" ? error.code : outcomeCode;
+  if (code) options.code = code;
+  if (typeof error.retryable === "boolean") options.retryable = error.retryable;
+  if (Object.hasOwn(error, "details")) options.details = error.details;
+  if (error.presentation === null) options.presentation = null;
+  else if (isTaskPresentation(error.presentation)) {
+    options.presentation = error.presentation;
+  }
+  return new ApiError(status, message, options);
 }
 
 export function fileLibraryBoundTask(error: unknown): FileLibraryTaskLink | null {
@@ -140,6 +172,20 @@ export type ProjectFile = ProjectFileListEntry;
 export type TaskListQuery = ApiTaskListQuery;
 export type TaskListPage = ApiTaskListPage;
 export type TaskListItem = TaskListPage["items"][number];
+export type TaskCommandUnknownOutcome = {
+  outcome: "outcome_unknown";
+  keyDisposition: "retain";
+  error: Error;
+};
+export type TaskCreateClientOutcome =
+  | TaskCreateCommandOutcome
+  | TaskCommandUnknownOutcome;
+export type TaskMessageClientOutcome =
+  | TaskMessageCommandOutcome
+  | TaskCommandUnknownOutcome;
+export type TaskCommandFailureOutcome =
+  | Extract<TaskCreateCommandOutcome, { outcome: "rejected_before_acceptance" }>
+  | TaskCommandUnknownOutcome;
 export type ContextScope = ProjectContextScope;
 export type ContextContentType = ProjectContextContentType;
 export type ContextEntry = ProjectContextEntry;
@@ -178,6 +224,7 @@ export interface ProjectPolicyInput {
 export type ProjectPolicyUpdate = ProjectPolicyInput & { expectedUpdatedAt: string };
 
 const apiBasePath = process.env.NEXT_PUBLIC_API_BASE_PATH || "/api/v1";
+const taskCommandOutcomeStatuses = new WeakMap<object, number>();
 
 export function taskArtifactDownloadUrlForApiBase(basePath: string, taskId: string, artifactId: string): string {
   return `${basePath.replace(/\/$/, "")}/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}/download`;
@@ -196,6 +243,15 @@ async function apiResponse(
   init: RequestInit = {},
   sandboxErrorAction?: SandboxErrorAction
 ): Promise<Response> {
+  const response = await rawApiResponse(path, init);
+  if (!response.ok) throw await apiResponseError(response, sandboxErrorAction);
+  return response;
+}
+
+async function rawApiResponse(
+  path: string,
+  init: RequestInit = {}
+): Promise<Response> {
   const method = init.method?.toUpperCase() || "GET";
   const headers = new Headers(init.headers);
   if (method !== "GET" && method !== "HEAD") {
@@ -204,7 +260,6 @@ async function apiResponse(
     headers.set("content-type", "application/json");
   }
   const response = observeSession(await fetch(`${apiBasePath}${path}`, { ...init, headers, credentials: "same-origin" }));
-  if (!response.ok) throw await apiResponseError(response, sandboxErrorAction);
   return response;
 }
 
@@ -255,14 +310,20 @@ async function apiResponseError(
             ? new ApiError(response.status, envelope.message, options)
             : new ApiError(response.status, envelope.message);
         }
-        return new ApiError(response.status, envelope.message, {
-          ...(typeof envelope.code === "string" ? { code: envelope.code } : {}),
-          ...(typeof envelope.retryable === "boolean" ? { retryable: envelope.retryable } : {}),
-          ...(Object.hasOwn(envelope, "details") ? { details: envelope.details } : {}),
-          ...(envelope.presentation === null || isTaskPresentation(envelope.presentation)
-            ? { presentation: envelope.presentation }
-            : {})
-        });
+        const options: {
+          code?: string;
+          retryable?: boolean;
+          details?: unknown;
+          presentation?: TaskPresentation | null;
+        } = {};
+        if (typeof envelope.code === "string") options.code = envelope.code;
+        if (typeof envelope.retryable === "boolean") options.retryable = envelope.retryable;
+        if (Object.hasOwn(envelope, "details")) options.details = envelope.details;
+        if (envelope.presentation === null) options.presentation = null;
+        else if (isTaskPresentation(envelope.presentation)) {
+          options.presentation = envelope.presentation;
+        }
+        return new ApiError(response.status, envelope.message, options);
       }
     }
   } catch {
@@ -287,6 +348,115 @@ function jsonIdempotent<T>(
     { method, headers: { "idempotency-key": idempotencyKey }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) },
     sandboxErrorAction
   );
+}
+
+async function taskCommand<T extends object>(
+  path: string,
+  idempotencyKey: string,
+  body: unknown,
+  parse: (value: unknown) => T | null
+): Promise<T | TaskCommandUnknownOutcome> {
+  let response: Response;
+  try {
+    response = await rawApiResponse(path, {
+      method: "POST",
+      headers: { "idempotency-key": idempotencyKey },
+      body: JSON.stringify(body)
+    });
+  } catch (reason) {
+    return unknownTaskCommandOutcome(
+      reason instanceof Error
+        ? reason
+        : new Error("The Task command outcome is unknown.")
+    );
+  }
+
+  if (response.status === 408) {
+    return unknownTaskCommandOutcome(
+      new Error("The Task command outcome is unknown because the request timed out.")
+    );
+  }
+
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    return unknownTaskCommandOutcome(
+      new Error("The Task command returned an invalid response.")
+    );
+  }
+
+  const outcome = parse(value);
+  if (outcome) {
+    taskCommandOutcomeStatuses.set(outcome, response.status);
+    return outcome;
+  }
+  if (response.status >= 500 && (!isRecord(value) || value.outcome === undefined)) {
+    return unknownTaskCommandOutcome(
+      new Error("The Task command outcome is unknown after a server failure.")
+    );
+  }
+  return unknownTaskCommandOutcome(
+    new Error("The Task command returned an invalid response.")
+  );
+}
+
+function unknownTaskCommandOutcome(error: Error): TaskCommandUnknownOutcome {
+  return {
+    outcome: "outcome_unknown",
+    keyDisposition: "retain",
+    error
+  };
+}
+
+function parseTaskCreateCommandOutcome(
+  value: unknown
+): TaskCreateCommandOutcome | null {
+  if (!isRecord(value)) return null;
+  if (
+    value.outcome === "accepted_in_progress"
+    && value.keyDisposition === "retain"
+    && typeof value.taskId === "string"
+    && value.taskId.length > 0
+  ) return value as unknown as TaskCreateCommandOutcome;
+  if (
+    value.outcome === "completed"
+    && value.keyDisposition === "retire"
+    && isTaskPresentation(value)
+  ) return value as unknown as TaskCreateCommandOutcome;
+  return isRejectedTaskCommandOutcome(value)
+    ? value as unknown as TaskCreateCommandOutcome
+    : null;
+}
+
+function parseTaskMessageCommandOutcome(
+  value: unknown
+): TaskMessageCommandOutcome | null {
+  if (
+    !isRecord(value)
+    || value.outcome !== "completed"
+    || value.keyDisposition !== "retire"
+  ) {
+    return isRejectedTaskCommandOutcome(value)
+      ? value as unknown as TaskMessageCommandOutcome
+      : null;
+  }
+  return isTaskMessageReceipt(value)
+    ? value as unknown as TaskMessageCommandOutcome
+    : null;
+}
+
+function isRejectedTaskCommandOutcome(
+  value: unknown
+): value is Record<string, unknown> {
+  return isRecord(value)
+    && value.outcome === "rejected_before_acceptance"
+    && (value.keyDisposition === "retain" || value.keyDisposition === "retire")
+    && (
+      typeof value.error === "string"
+      || isRecord(value.error)
+    )
+    && (value.code === undefined || typeof value.code === "string");
 }
 
 function directoryQuery(query:{q?:string;role?:string;mode?:string;cursor?:string;limit?:number;userId?:string}):string {
@@ -464,7 +634,16 @@ export const apiClient = {
     if (query.limit) params.set("limit", String(query.limit));
     return request<TaskListPage>(`/projects/${encodeURIComponent(projectId)}/tasks?${params}`);
   },
-  createTask: (projectId: string, input: CreateTaskInput, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/projects/${encodeURIComponent(projectId)}/tasks`, "POST", idempotencyKey, input, "create"),
+  createTask: (
+    projectId: string,
+    input: CreateTaskInput,
+    idempotencyKey: string
+  ): Promise<TaskCreateClientOutcome> => taskCommand(
+    `/projects/${encodeURIComponent(projectId)}/tasks`,
+    idempotencyKey,
+    input,
+    parseTaskCreateCommandOutcome
+  ),
   task: (taskId: string) => request<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`),
   taskDetail: (taskId: string) => request<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}/detail`),
   taskTerminalWebSocketUrl: (taskId:string) => taskTerminalWebSocketUrlForApiBase(apiBasePath,taskId,window.location.href),
@@ -526,7 +705,16 @@ export const apiClient = {
     receive(frames.slice(0, -1));
     if (frames.at(-1)?.trim()) receive([frames.at(-1)!]);
   },
-  sendTaskMessage: (taskId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages`, "POST", idempotencyKey, { content }, "send"),
+  sendTaskMessage: (
+    taskId: string,
+    content: string,
+    idempotencyKey: string
+  ): Promise<TaskMessageClientOutcome> => taskCommand(
+    `/tasks/${encodeURIComponent(taskId)}/messages`,
+    idempotencyKey,
+    { content },
+    parseTaskMessageCommandOutcome
+  ),
   updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
   abortTaskTurn: (taskId: string, idempotencyKey: string) => jsonIdempotent<unknown>(`/tasks/${encodeURIComponent(taskId)}/turn/abort`, "POST", idempotencyKey, {}),
@@ -685,6 +873,31 @@ function isTaskPresentation(value:unknown):value is TaskPresentation{
     &&isRecord(value.currentTurn)&&isStringUnion(value.currentTurn.state,["ready","starting","queued","running","aborting"])
     &&isRecord(value.sandboxState)&&isStringUnion(value.sandboxState.state,["starting","active","release_requested","released","failed"])
     &&isTaskCapabilities(value.capabilities);
+}
+
+function isTaskMessageReceipt(value: unknown): value is TaskMessageReceipt {
+  return isRecord(value)
+    && typeof value.messageId === "string"
+    && value.messageId.length > 0
+    && isStringUnion(value.disposition, [
+      "accepted_by_active_run",
+      "queued_for_active_run",
+      "failed"
+    ])
+    && typeof value.duplicate === "boolean"
+    && (
+      value.queuedMessage === null
+      || isTaskQueuedMessageArray([value.queuedMessage])
+    )
+    && (
+      value.interaction === null
+      || (
+        isTaskInteractionItem(value.interaction)
+        && value.interaction.kind === "user_message"
+      )
+    )
+    && isTaskPresentation(value.presentation)
+    && (value.safeError === undefined || typeof value.safeError === "string");
 }
 
 function strictSandboxErrorOptions(

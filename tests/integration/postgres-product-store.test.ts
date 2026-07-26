@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
+import { createCredentialCrypto, credentialAad } from "../../packages/application/src/credentialCrypto.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import type { ProjectAlertRule } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
@@ -15,6 +19,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   assert.ok(postgresUrl);
   const store=new PostgresProductStore(postgresUrl);
   const at="2026-07-23T00:00:00.000Z";
+  const credentialCrypto=createCredentialCrypto({primary:{id:"test",value:Buffer.alloc(32,1)},previous:[]});
 
   beforeEach(async()=>{
     const client=new pg.Client({connectionString:postgresUrl});await client.connect();
@@ -22,7 +27,8 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     await store.createUser({id:"user_atomic",email:"atomic@example.test",emailVerified:true,passwordHash:"hash",createdAt:at,updatedAt:at});
     await store.createWorkspace({id:"workspace_atomic",name:"Workspace",ownerUserId:"user_atomic",createdAt:at,updatedAt:at});
     await store.createProject({id:"project_atomic",workspaceId:"workspace_atomic",name:"Project",ownerUserId:"user_atomic",rootPath:"workspaces/workspace_atomic/projects/project_atomic",sandboxLimit:1,createdAt:at,updatedAt:at});
-    await store.createProjectCredential({id:"credential_atomic",projectId:"project_atomic",name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:"test",nonce:Buffer.alloc(12),ciphertext:Buffer.from("ciphertext"),authTag:Buffer.alloc(16),fingerprint:"atomic",version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
+    const encrypted=credentialCrypto.encrypt("atomic-api-key",credentialAad({credentialId:"credential_atomic",projectId:"project_atomic",type:"api_key",version:1}));
+    await store.createProjectCredential({id:"credential_atomic",projectId:"project_atomic",name:"Provider",type:"api_key",baseUrl:"https://models.example.test/v1",keyId:encrypted.keyId,nonce:encrypted.nonce,ciphertext:encrypted.ciphertext,authTag:encrypted.authTag,fingerprint:"atomic",version:1,createdAt:at,lastRotatedAt:null,updatedAt:at});
     await store.createEndpoint({id:"endpoint_atomic",projectId:"project_atomic",name:"Endpoint",protocol:"openai_chat_completions",baseUrl:"https://models.example.test/v1",model:"model",credentialId:"credential_atomic",capabilities:["text","tool_calls"],requestTimeoutSecs:30,createdAt:at,updatedAt:at});
   });
 
@@ -506,6 +512,51 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     }
   });
 
+  it("replays a persisted historical TaskPresentation create receipt",async()=>{
+    const dataRoot=await mkdtemp(path.join(tmpdir(),"asl-postgres-legacy-task-receipt-"));
+    try{
+      const endpoint=await store.findEndpoint("endpoint_atomic");
+      assert.ok(endpoint);
+      const checkedAt="2026-07-23T00:00:01.000Z";
+      assert.ok(await store.updateEndpointHealth(
+        endpoint.id,
+        endpoint.projectId,
+        {status:"healthy",checkedAt,errorCategory:null},
+        checkedAt,
+        endpoint.updatedAt
+      ));
+      const services=createApplicationServices({
+        store,
+        dataRoot,
+        builtinAdminPassword:"admin-password"
+      });
+      const input={
+        endpointId:endpoint.id,
+        prompt:"Historical PostgreSQL create receipt",
+        fileLibrary:{mode:"create_new" as const,name:"Historical PostgreSQL files"}
+      };
+      const key="postgres-historical-task-create";
+      const created=await services.tasks.createTask("user_atomic","project_atomic",input,key);
+      const client=new pg.Client({connectionString:postgresUrl});
+      await client.connect();
+      try{
+        const updated=await client.query(
+          "update task_idempotency_records set response_body=$2::jsonb where operation='create' and idempotency_key=$1 and status='completed'",
+          [key,JSON.stringify(created)]
+        );
+        assert.equal(updated.rowCount,1);
+      }finally{
+        await client.end();
+      }
+
+      const replay=await services.tasks.createTask("user_atomic","project_atomic",input,key);
+      assert.equal(replay.task.id,created.task.id);
+      assert.equal(replay.task.projectId,"project_atomic");
+    }finally{
+      await rm(dataRoot,{recursive:true,force:true});
+    }
+  });
+
   it("pages projected Audit rows and isolates actor and subject identity candidates",async()=>{
     const actorId="user_audit_actor";
     const subjectId="user_audit_subject";
@@ -627,7 +678,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.sandboxRuns.get(loser.sandboxRun.runId),null);
     assert.equal(await store.findTaskMessage(loser.initialMessage.id),null);
     assert.equal((await store.findProjectResourceUsage("project_atomic"))?.activeSandboxes,1);
-    assert.deepEqual(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.action==="task.create").map((event)=>event.resourceId),[winner.task.id]);
+    assert.deepEqual(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.action==="task.create"&&event.status==="accepted").map((event)=>event.resourceId),[winner.task.id]);
     const rejected=results.find((result)=>result.kind==="capacity_rejected");
     assert.deepEqual(rejected,{
       kind:"capacity_rejected",
@@ -641,6 +692,206 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     });
     assert.deepEqual(replay,{kind:"replay",responseStatus:409,responseBody:rejected?.responseBody});
     assert.equal(((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items).filter((event)=>event.id===loser.rejectedAuditEvent.id).length,1);
+  });
+
+  it("commits a cold Task business identity with its durable preparation operation",async()=>{
+    const task={...taskRecord("task_cold_atomic","library_cold_atomic","unused"),currentRunId:null};
+    const initialMessage=message("message_cold_atomic",task.id);
+    const idempotency:BeginTaskIdempotencyInput={
+      actorId:"user_atomic",
+      projectId:task.projectId,
+      operation:"create",
+      key:"cold-task-create",
+      requestHash:"cold-task-create-request",
+      resourceId:task.id,
+      claimToken:"cold-task-create-claim",
+      now:at,
+      leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+    };
+    const created=await store.createTaskAtomically({
+      task,
+      initialMessage,
+      initialInteractionChange:{
+        sourceKind:"product",
+        sourceId:`message:${initialMessage.id}`,
+        sourceRevision:0,
+        interaction:{
+          id:"interaction_cold_atomic",
+          revision:1,
+          taskId:task.id,
+          kind:"user_message",
+          title:"You",
+          body:initialMessage.content,
+          contentMode:"full",
+          position:0,
+          occurredAt:at,
+          updatedAt:at,
+          actorId:"user_atomic",
+          status:"accepted"
+        }
+      },
+      newFileLibrary:library(task.fileLibraryId!,"Cold atomic"),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency,
+      auditEvent:{
+        id:"audit_task_cold_atomic",
+        projectId:task.projectId,
+        actorId:"user_atomic",
+        action:"task.create",
+        status:"accepted",
+        resourceKind:"task",
+        resourceId:task.id,
+        detail:{taskId:task.id},
+        createdAt:at
+      }
+    });
+
+    assert.equal(created.kind,"created");
+    assert.equal((await store.findTask(task.id))?.fileLibraryId,task.fileLibraryId);
+    assert.equal((await store.findFileLibrary(task.fileLibraryId!))?.id,task.fileLibraryId);
+    assert.equal((await store.findTaskMessage(initialMessage.id))?.taskId,task.id);
+    assert.equal(
+      (await store.readTaskInteractionSnapshot(task.id,null,20))?.items
+        .filter((item)=>item.id==="interaction_cold_atomic").length,
+      1
+    );
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:idempotency.actorId,
+      projectId:idempotency.projectId,
+      operation:idempotency.operation,
+      key:idempotency.key,
+      requestHash:idempotency.requestHash
+    }),{kind:"in_progress",resourceId:task.id});
+    assert.equal(
+      ((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items)
+        .filter((event)=>event.id==="audit_task_cold_atomic").length,
+      1
+    );
+
+    const replacement={...taskRecord("task_cold_replacement","library_cold_replacement","unused"),currentRunId:null};
+    const resumed=await store.createTaskAtomically({
+      task:replacement,
+      newFileLibrary:library(replacement.fileLibraryId!,"Cold replacement"),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:{
+        ...idempotency,
+        resourceId:replacement.id,
+        claimToken:"cold-task-create-reclaimed",
+        now:"2026-07-23T00:06:00.000Z",
+        leaseExpiresAt:"2026-07-23T00:10:00.000Z"
+      }
+    });
+    assert.equal(resumed.kind,"resume");
+    if(resumed.kind==="resume")assert.equal(resumed.task.id,task.id);
+    assert.equal(await store.findTask(replacement.id),null);
+    assert.equal(await store.findFileLibrary(replacement.fileLibraryId!),null);
+  });
+
+  it("returns the owning PostgreSQL claim with deterministic create rejections",async()=>{
+    const unavailableTask={...taskRecord("task_claim_project_unavailable","library_claim_project_unavailable","unused"),currentRunId:null};
+    const unavailable=createAdmissionReceipt(unavailableTask,"claim-project-unavailable").idempotency;
+    assert.ok(await store.setProjectLifecycleStatus("project_atomic","archived","2026-07-23T00:01:00.000Z"));
+    assert.deepEqual(await store.createTaskAtomically({
+      task:unavailableTask,
+      newFileLibrary:library(unavailableTask.fileLibraryId!,"Unavailable"),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:unavailable
+    }),{kind:"project_unavailable",claimToken:unavailable.claimToken});
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:unavailable.actorId,
+      projectId:unavailable.projectId,
+      operation:unavailable.operation,
+      key:unavailable.key,
+      requestHash:unavailable.requestHash
+    }),{kind:"in_progress",resourceId:unavailableTask.id});
+
+    assert.ok(await store.setProjectLifecycleStatus("project_atomic","active","2026-07-23T00:02:00.000Z"));
+    await store.createFileLibrary(library("library_claim_conflict_existing","Taken after prevalidation"));
+    const conflictTask={...taskRecord("task_claim_library_conflict","library_claim_library_conflict","unused"),currentRunId:null};
+    const conflict=createAdmissionReceipt(conflictTask,"claim-library-conflict").idempotency;
+    assert.deepEqual(await store.createTaskAtomically({
+      task:conflictTask,
+      newFileLibrary:library(conflictTask.fileLibraryId!," taken AFTER prevalidation "),
+      reserveActive:false,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:conflict
+    }),{kind:"library_name_conflict",claimToken:conflict.claimToken});
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:conflict.actorId,
+      projectId:conflict.projectId,
+      operation:conflict.operation,
+      key:conflict.key,
+      requestHash:conflict.requestHash
+    }),{kind:"in_progress",resourceId:conflictTask.id});
+  });
+
+  it("rolls back every Task create identity when the final Audit insert fails",async()=>{
+    const task=taskRecord("task_create_rollback","library_create_rollback","run_create_rollback");
+    const sandboxRun=run(task,task.currentRunId!,"starting");
+    const initialMessage=message("message_create_rollback",task.id);
+    const receipt=createAdmissionReceipt(task,"rollback");
+    await assert.rejects(()=>store.createTaskAtomically({
+      task,
+      reserveActive:true,
+      admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...receipt,
+      newFileLibrary:library(task.fileLibraryId!,"Rollback"),
+      sandboxRun,
+      runtimeState:{botifiedBaseUrl:"http://rollback"},
+      initialMessage,
+      initialInteractionChange:{
+        sourceKind:"product",
+        sourceId:`message:${initialMessage.id}`,
+        sourceRevision:0,
+        interaction:{
+          id:"interaction_create_rollback",
+          revision:1,
+          taskId:task.id,
+          kind:"user_message",
+          title:"You",
+          body:initialMessage.content,
+          contentMode:"full",
+          position:0,
+          occurredAt:at,
+          updatedAt:at,
+          actorId:"user_atomic",
+          status:"pending"
+        }
+      },
+      auditEvent:{
+        id:"audit_task_create_rollback",
+        projectId:task.projectId,
+        actorId:"user_missing",
+        action:"task.create",
+        status:"accepted",
+        resourceKind:"task",
+        resourceId:task.id,
+        detail:{taskId:task.id},
+        createdAt:at
+      }
+    }));
+
+    assert.equal(await store.findTask(task.id),null);
+    assert.equal(await store.findFileLibrary(task.fileLibraryId!),null);
+    assert.equal(await store.sandboxRuns.get(sandboxRun.runId),null);
+    assert.equal(await store.findTaskMessage(initialMessage.id),null);
+    assert.equal(await store.readTaskInteractionSnapshot(task.id,null,20),null);
+    assert.equal(await store.jsonDocs.get("sandbox_runtime_state",task.id),null);
+    assert.equal(
+      ((await store.queryProjectAuditEvents("project_atomic",{limit:100})).items)
+        .some((event)=>event.id==="audit_task_create_rollback"),
+      false
+    );
+    assert.equal(await store.findTaskIdempotency({
+      actorId:receipt.idempotency.actorId,
+      projectId:receipt.idempotency.projectId,
+      operation:receipt.idempotency.operation,
+      key:receipt.idempotency.key,
+      requestHash:receipt.idempotency.requestHash
+    }),null);
   });
 
   it("does not hold PostgreSQL Task or Run locks while the startup operation runs",async()=>{
@@ -801,8 +1052,15 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     first.idempotency={...first.idempotency,resourceId:"message_original",leaseExpiresAt:"2026-07-23T00:01:00.000Z"};
     first.message={...first.message,id:"message_candidate",deliveryKey:"delivery_message_message_candidate"};
 
-    const created=await store.createTaskMessageAtomically(first);
-    assert.equal(created.kind,"created");
+    assert.equal((await store.beginTaskIdempotency(first.idempotency)).kind,"claimed");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:first.idempotency.actorId,
+      projectId:first.idempotency.projectId,
+      operation:first.idempotency.operation,
+      key:first.idempotency.key,
+      requestHash:first.idempotency.requestHash
+    }),{kind:"in_progress",resourceId:"message_original"});
+    assert.equal(await store.findTaskMessage("message_original"),null);
     const retry:AtomicTaskMessageInput={
       ...first,
       message:{...first.message,id:"message_retry",deliveryKey:"delivery_message_message_retry"},

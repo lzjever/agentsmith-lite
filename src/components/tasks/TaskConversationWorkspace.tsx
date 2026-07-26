@@ -19,7 +19,7 @@ import type {
   TaskInteractionStreamEvent,
   TaskMessageReceipt
 } from "../../lib/api/client";
-import { ApiError, apiClient } from "../../lib/api/client";
+import { ApiError, apiClient, taskCommandOutcomeError } from "../../lib/api/client";
 import { TaskComposer } from "./TaskComposer";
 import { TaskInteractionList } from "./TaskInteractionList";
 import {
@@ -32,6 +32,20 @@ import {
 } from "./task-conversation-state";
 import { useTaskMutationKeys } from "./task-mutation-key";
 import { TaskConnectionNotice, TaskPreviewNotice } from "./TaskRunStatus";
+import {
+  readTaskCommandMetadata,
+  retireTaskCommandMetadata,
+  taskCommandRemountDecision,
+  TaskCommandStorageUnavailableError,
+  taskCommandFingerprint
+} from "./task-command-storage";
+import {
+  clearTaskMessageCommandAttempt,
+  clearTaskMessageCommandPair,
+  persistTaskMessageCommandAttempt,
+  restoreTaskDraft,
+  taskDraftStorage
+} from "./task-draft-snapshot";
 
 type WorkspaceHandlers = {
   onPresentationChange: (presentation: TaskDetail) => void;
@@ -111,6 +125,70 @@ export function TaskConversationWorkspace({
   const [historyError, setHistoryError] = useState("");
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [anchorGeneration, setAnchorGeneration] = useState(0);
+  const [messagePayloadLocked, setMessagePayloadLocked] = useState(false);
+  const [messageStorageUnavailable, setMessageStorageUnavailable] = useState(false);
+
+  useEffect(() => {
+    const storage = taskDraftStorage();
+    const identity = { userId, projectId, taskId };
+    const metadataRead = readTaskCommandMetadata(
+      storage,
+      "task-message",
+      identity
+    );
+    if (metadataRead.status === "unavailable") {
+      setMessagePayloadLocked(true);
+      setMessageStorageUnavailable(true);
+      return;
+    }
+    const draftRead = restoreTaskDraft(storage, identity);
+    const draftStatus = draftRead.status === "restored"
+      ? "found"
+      : draftRead.status === "empty"
+        ? "missing"
+        : draftRead.status;
+    const decision = taskCommandRemountDecision(metadataRead, draftStatus);
+    if (decision.status === "locked_unavailable") {
+      setMessagePayloadLocked(true);
+      setMessageStorageUnavailable(true);
+      return;
+    }
+    if (decision.status === "fresh") {
+      mutationKeys.clear("task-message");
+      setMessagePayloadLocked(false);
+      setMessageStorageUnavailable(false);
+      return;
+    }
+    if (decision.status === "cleanup") {
+      const cleared = clearTaskMessageCommandPair(storage, identity);
+      if (cleared) mutationKeys.clear("task-message");
+      setMessagePayloadLocked(!cleared);
+      setMessageStorageUnavailable(!cleared);
+      return;
+    }
+    if (decision.status !== "restore" || draftRead.status !== "restored") return;
+    const metadata = decision.metadata;
+
+    let cancelled = false;
+    setMessagePayloadLocked(true);
+    setMessageStorageUnavailable(false);
+    void taskCommandFingerprint({ content: draftRead.draft.trim() }).then((fingerprint) => {
+      if (cancelled) return;
+      if (fingerprint !== metadata.fingerprint) {
+        const cleared = clearTaskMessageCommandPair(storage, identity);
+        if (cleared) mutationKeys.clear("task-message");
+        setMessagePayloadLocked(!cleared);
+        setMessageStorageUnavailable(!cleared);
+        return;
+      }
+      mutationKeys.restore("task-message", taskId, metadata);
+    }).catch(() => {
+      if (cancelled) return;
+      setMessagePayloadLocked(true);
+      setMessageStorageUnavailable(true);
+    });
+    return () => { cancelled = true; };
+  }, [mutationKeys, projectId, taskId, userId]);
 
   const clearPreviewTimer = useCallback((interactionId?: string) => {
     if (
@@ -350,19 +428,100 @@ export function TaskConversationWorkspace({
     }
   }
 
-  async function send(content: string) {
-    const identity = `${taskId}:${content}`;
-    dispatch({ type: "message_send_requested" });
-    let receipt: TaskMessageReceipt;
+  async function send(content: string, submittedDraft: string) {
+    const storage = taskDraftStorage();
+    const storageIdentity = { userId, projectId, taskId };
+    const fingerprint = await taskCommandFingerprint({ content });
+    const metadataRead = readTaskCommandMetadata(
+      storage,
+      "task-message",
+      storageIdentity
+    );
+    if (
+      metadataRead.status === "unavailable"
+      || metadataRead.status === "corrupt"
+    ) {
+      setMessagePayloadLocked(true);
+      setMessageStorageUnavailable(true);
+      throw new TaskCommandStorageUnavailableError();
+    }
+    const restored = metadataRead.status === "found"
+      ? metadataRead.metadata
+      : null;
+    if (restored) {
+      mutationKeysRef.current.restore("task-message", taskId, restored);
+    }
+    const attempt = mutationKeysRef.current.fingerprintKey(
+      "task-message",
+      taskId,
+      fingerprint
+    );
+    const metadata = {
+      ...storageIdentity,
+      ...attempt,
+      createdAt: restored?.fingerprint === fingerprint
+        ? restored.createdAt
+        : new Date().toISOString()
+    };
     try {
-      receipt = await apiClient.sendTaskMessage(
-        taskId,
-        content,
-        mutationKeysRef.current.key("task-message", identity)
+      persistTaskMessageCommandAttempt(
+        storage,
+        storageIdentity,
+        submittedDraft,
+        metadata
       );
-      mutationKeysRef.current.complete("task-message", identity);
     } catch (reason) {
-      mutationKeysRef.current.completeApiFailure(reason, "task-message", identity);
+      const retain = restored !== null
+        || reason instanceof TaskCommandStorageUnavailableError
+          && reason.attemptDisposition === "retain";
+      if (retain) {
+        setMessagePayloadLocked(true);
+        setMessageStorageUnavailable(true);
+      } else {
+        mutationKeysRef.current.discard("task-message", taskId, attempt);
+        setMessagePayloadLocked(false);
+      }
+      throw reason;
+    }
+    setMessageStorageUnavailable(false);
+    setMessagePayloadLocked(true);
+    dispatch({ type: "message_send_requested" });
+    const outcome = await apiClient.sendTaskMessage(taskId, content, attempt.key);
+    const retireRejection = outcome.outcome === "rejected_before_acceptance"
+      && outcome.keyDisposition === "retire";
+    if (!retireRejection) {
+      mutationKeysRef.current.transition(
+        "task-message",
+        taskId,
+        attempt,
+        outcome
+      );
+    }
+
+    if (outcome.outcome !== "completed") {
+      if (retireRejection) {
+        if (
+          !retireTaskCommandMetadata(
+            storage,
+            "task-message",
+            storageIdentity,
+            attempt
+          )
+        ) {
+          setMessagePayloadLocked(true);
+          setMessageStorageUnavailable(true);
+          throw new TaskCommandStorageUnavailableError("retain");
+        }
+        mutationKeysRef.current.transition(
+          "task-message",
+          taskId,
+          attempt,
+          outcome
+        );
+        setMessagePayloadLocked(false);
+        setMessageStorageUnavailable(false);
+      }
+      const reason = taskCommandOutcomeError(outcome);
       const canonical = reason instanceof ApiError ? reason.presentation ?? undefined : undefined;
       dispatch({ type: "message_rejected", ...(canonical ? { presentation: canonical } : {}) });
       if (canonical) handlers.current.onPresentationChange(canonical);
@@ -377,9 +536,26 @@ export function TaskConversationWorkspace({
       await recoverMutation(reason);
       throw reason;
     }
+
+    const receipt: TaskMessageReceipt = outcome;
     const safeError = taskMessageReceiptError(receipt);
-    if (safeError) throw new Error(safeError);
     dispatch({ type: "message_accepted", receipt });
+    handlers.current.onPresentationChange(receipt.presentation);
+    if (
+      !clearTaskMessageCommandAttempt(
+        storage,
+        storageIdentity,
+        attempt,
+        submittedDraft
+      )
+    ) throw new TaskCommandStorageUnavailableError();
+    mutationKeysRef.current.canonicalAbsorbed(
+      "task-message",
+      taskId,
+      attempt
+    );
+    setMessagePayloadLocked(false);
+    if (safeError) throw new Error(safeError);
     scrollToLatest();
     void refreshAfterMessageMutation();
   }
@@ -622,6 +798,8 @@ export function TaskConversationWorkspace({
         capabilities={capabilities}
         queuedMessages={state.queuedMessages}
         busy={commandBusy}
+        payloadLocked={messagePayloadLocked}
+        storageUnavailable={messageStorageUnavailable}
         unavailableMessage={unavailableMessage}
         onSend={send}
         onUpdateQueued={updateQueued}

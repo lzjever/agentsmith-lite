@@ -50,6 +50,7 @@ import type {
   ProjectSandboxSettlementPage,
   ProjectResourceUsageAdjustment,
   AtomicTaskCreateInput,
+  AtomicTaskCreateDeterministicRejection,
   AtomicTaskCreateResult,
   AtomicTaskSandboxRestartInput,
   AtomicTaskSandboxRestartResult,
@@ -1279,13 +1280,23 @@ export class PostgresProductStore implements ProductStore {
   async createTaskAtomically(input: AtomicTaskCreateInput) {
     validateTaskRunReservation(input);
     try{return await transaction(this.pool, async (client) => {
+      let ownedClaimToken:string|undefined;
+      const reject=(kind:AtomicTaskCreateDeterministicRejection["kind"]):AtomicTaskCreateDeterministicRejection=>
+        ownedClaimToken?{kind,claimToken:ownedClaimToken}:{kind};
       const write=async(insertRun:()=>Promise<void>)=>{
-        if(input.newFileLibrary){const library=input.newFileLibrary;await client.query("insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,lifecycle_status,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",[library.id,library.workspaceId,library.projectId,library.name,library.rootSubPath,library.lifecycleStatus,library.createdByUserId,library.createdAt,library.updatedAt]);}
+        if(input.newFileLibrary){
+          const library=input.newFileLibrary;
+          const inserted=await client.query(
+            "insert into file_libraries(id,workspace_id,project_id,name,root_sub_path,lifecycle_status,created_by_user_id,created_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing returning id",
+            [library.id,library.workspaceId,library.projectId,library.name,library.rootSubPath,library.lifecycleStatus,library.createdByUserId,library.createdAt,library.updatedAt]
+          );
+          if(inserted.rowCount!==1)return reject("library_name_conflict");
+        }
         const library=await client.query<{id:string;lifecycle_status:FileLibrary["lifecycleStatus"]}>("select id,lifecycle_status from file_libraries where id=$1 and workspace_id=$2 and project_id=$3 for update",[input.task.fileLibraryId,input.task.workspaceId,input.task.projectId]);
-        if(!library.rows[0])return{kind:"library_not_found" as const};
-        if(library.rows[0].lifecycle_status==="deleting")return{kind:"library_deleting" as const};
+        if(!library.rows[0])return reject("library_not_found");
+        if(library.rows[0].lifecycle_status==="deleting")return reject("library_deleting");
         const bound=await client.query("select id from agent_tasks where file_library_id=$1",[input.task.fileLibraryId]);
-        if(bound.rows[0])return{kind:"already_bound" as const};
+        if(bound.rows[0])return reject("already_bound");
         const row=await insertTaskWithClient(client,{...input.task,currentRunId:null});
         if(input.runtimeState)await putJsonDocumentWithClient(client,"sandbox_runtime_state",input.task.id,input.runtimeState);
         if(input.sandboxRun){
@@ -1298,19 +1309,38 @@ export class PostgresProductStore implements ProductStore {
         if(input.auditEvent)await insertAuditEventWithClient(client,input.auditEvent);
         return{kind:"created" as const,task:mapTask(row)};
       };
-      if(input.reserveActive){
-        const idempotency=requiredAdmissionCreateIdempotency(input);
+      const idempotency=input.idempotency??(input.reserveActive?requiredAdmissionCreateIdempotency(input):null);
+      if(idempotency){
         const claimed=await claimTaskIdempotencyWithClient(client,idempotency);
+        if(claimed.kind==="in_progress"){
+          const receipt=(await client.query<TaskIdempotencyRow>(
+            "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4",
+            [idempotency.actorId,idempotency.projectId,idempotency.operation,idempotency.key]
+          )).rows[0];
+          if(!receipt)throw new Error("Task create idempotency record is unavailable");
+          return{kind:"in_progress" as const,resourceId:receipt.resource_id};
+        }
         if(claimed.kind!=="claimed")return claimed;
-        if(claimed.row.resource_id!==input.task.id)throw new Error("Task create idempotency resource is inconsistent");
-        return admitSandboxRunWithClient<AtomicTaskCreateResult>(
-          client,input.admission,input.sandboxRun!,input.task.updatedAt,idempotency,input.rejectionPresentation!,input.rejectedAuditEvent!,
-          {kind:"project_unavailable" as const},
-          async()=>({kind:"ready"}),
-          write
-        );
+        ownedClaimToken=claimed.row.claim_token;
+        if(claimed.row.resource_id!==input.task.id){
+          const existing=(await client.query<AgentTaskRow>(
+            "select * from agent_tasks where id=$1",
+            [claimed.row.resource_id]
+          )).rows[0];
+          return existing
+            ?{kind:"resume" as const,task:mapTask(existing),claimToken:claimed.row.claim_token}
+            :{kind:"in_progress" as const,resourceId:claimed.row.resource_id};
+        }
+        if(input.reserveActive){
+          return admitSandboxRunWithClient<AtomicTaskCreateResult>(
+            client,input.admission,input.sandboxRun!,input.task.updatedAt,idempotency,input.rejectionPresentation!,input.rejectedAuditEvent!,
+            reject("project_unavailable"),
+            async()=>({kind:"ready"}),
+            write
+          );
+        }
       }
-      if(!await lockActiveProjectWithClient(client,input.task.projectId))return{kind:"project_unavailable" as const};
+      if(!await lockActiveProjectWithClient(client,input.task.projectId))return reject("project_unavailable");
       return write(async()=>{
         if(!input.sandboxRun||input.sandboxRun.state!=="released")throw new Error("Unreleased Sandbox Run insertion requires admission");
         await insertSandboxRunWithClient(client,input.sandboxRun);
@@ -1728,10 +1758,10 @@ export class PostgresProductStore implements ProductStore {
     return row?{actorId:row.actor_id,projectId:row.project_id,operation:"terminal-start",key:row.idempotency_key,requestHash:row.request_hash,resourceId:row.resource_id,claimToken:row.claim_token}:null;
   }
   async findTaskPreparationOperation(taskId:string):Promise<import("../../ports/src/store.js").TaskPreparationOperation|null>{
-    const rows=await this.queryRows<TaskIdempotencyRow>("select * from task_idempotency_records where operation='create' and resource_id=$1 order by created_at limit 2",[taskId]);
+    const rows=await this.queryRows<TaskIdempotencyRow>("select * from task_idempotency_records where operation='create' and resource_id=$1 and status='in_progress' order by created_at limit 2",[taskId]);
     if(rows.length!==1)return null;
     const row=rows[0]!;
-    return{actorId:row.actor_id,projectId:row.project_id,operation:"create",key:row.idempotency_key,requestHash:row.request_hash,resourceId:row.resource_id};
+    return{actorId:row.actor_id,projectId:row.project_id,operation:"create",key:row.idempotency_key,requestHash:row.request_hash,resourceId:row.resource_id,claimToken:row.claim_token};
   }
 
   async completeTaskIdempotency(input: CompleteTaskIdempotencyInput): Promise<boolean> {

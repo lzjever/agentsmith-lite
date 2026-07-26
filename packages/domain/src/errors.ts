@@ -23,6 +23,13 @@ export class ForbiddenError extends ProductError {
   }
 }
 
+export class ReceiptUncertaintyError extends ProductError {
+  constructor(message:string,code:string) {
+    super(message,409,code);
+    this.name="ReceiptUncertaintyError";
+  }
+}
+
 export class NotFoundError extends ProductError {
   constructor(message = "Not found") {
     super(message, 404);
