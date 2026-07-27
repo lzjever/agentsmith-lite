@@ -529,10 +529,28 @@ The next formal Botified release must provide all of:
 - the external bash executor loopback contract;
 - durable message delivery receipt replay;
 - cold discard for `runtime.resume_unfinished=false`;
-- compatible reading of real legacy Lite journals, including the two-field
-  `accepted_input.delivery` record and `unfinished_work_discarded`, followed by
-  checkpoint canonicalization that preserves canonical state, history, and
-  delivery receipts;
+- compatible reading of the real AgentSmith Lite legacy journal profile:
+  `accepted_input` has `source=user`, normal urgency, no metadata, one Text
+  content part, `message_id=delivery_key`, and a two-field
+  `delivery={delivery_key,request_hash}`; any raw legacy delivery outside this
+  profile stops open with a typed compatibility error without truncating or
+  rewriting the journal, and is not a promise of general old-Botified
+  migration;
+- one delivery authority map whose value is either a complete modern Current
+  admission or a CanonicalLegacy admission with an explicit
+  `schema=canonical_legacy_v1` discriminator and the authority fields
+  `delivery_key`, `request_hash`, `message_id`, and `payload_sha256`; replay
+  normalizes matching raw legacy input in memory, and checkpoint writes only
+  this versioned CanonicalLegacy form rather than restoring or inventing
+  `accepted_kind`, `timeline_cursor`, or `turn_id`;
+- legacy `unfinished_work_discarded` replay with its original selective
+  `message_ids` and `projection_ids` semantics: preserve the completed
+  replay-visible canonical transcript prefix, remove the selected unfinished
+  transcript tail and listed messages from pending/known state, remove their
+  message cursors and the listed projection intents, and clear restart-boundary
+  state; it is not an alias for the new global runtime discard, does
+  not delete delivery authority, and checkpoint plus reopen cannot revive a
+  discarded input;
 - exact compare-and-Abort;
 - exact background Stop with a stable downstream command-key result;
 - explicit per-provider `allow_insecure_http` support so Botified can call the
@@ -543,8 +561,37 @@ The next formal Botified release must provide all of:
 AgentSmith does not supply pseudo-exact behavior, a compatibility facade or
 shim, or a vendor fork for any missing contract. Because a new Run for the same
 Task reuses the PVC and Botified session, draining the old runner cannot remove
-its durable delivery receipt. Legacy compatibility therefore belongs in
+its durable delivery authority. Legacy compatibility therefore belongs in
 upstream Botified replay and checkpoint handling, never in an AgentSmith shim.
+The modern Current journal and HTTP receipt remain strict and complete; their
+fields do not become optional.
+
+For an exact POST replay of a CanonicalLegacy delivery with the same key, hash,
+and canonical payload digest, Botified returns `200` with
+`outcome=completed`, `receipt_kind=canonical_legacy`, `delivery_key`,
+`request_hash`, `message_id`, and `payload_sha256`. This replay performs no
+enqueue, provider call, file bind, journal append, or timeline write. Reusing
+the key with a different hash or digest returns the stable typed `409`
+`delivery_key_payload_mismatch` and leaves the original authority unchanged.
+
+Slice 0 cutover removes AgentSmith's legacy GET delivery-receipt query.
+Lost-response and lease recovery replay the original POST with its original
+downstream key, hash, and payload. The AgentSmith parser strictly accepts either
+the complete modern Current receipt or the CanonicalLegacy receipt; absence of
+cursor, accepted kind, and turn ID is valid only for CanonicalLegacy. Abort
+continues to use only the canonical `state.turn_id` observed for that same Run
+and never derives a turn from a legacy receipt, timeline, cursor, or Run ID.
+
+Focused compatibility checks use a representative journal fixture derived from
+the old production writer contract described above. The plan does not claim
+that a real legacy journal sample exists on the developer's machine. The
+fixture proves the old marker's selective transcript, pending/known message,
+cursor, projection-intent, and restart-boundary result, preservation of delivery
+authority, and no input revival after checkpoint and reopen. A syntactically
+valid raw legacy delivery outside the Lite profile is checked both as a middle
+line and as the physical tail: each open returns the same typed compatibility
+error, leaves the journal byte-identical, and performs no truncate, rewrite, or
+checkpoint.
 
 When that release is available, AgentSmith consumes the official artifact by
 immutable release version and checksum/digest and does not compile Botified
@@ -588,6 +635,9 @@ Focused behavior checks:
   returns the same Task after same-route replay, including after a remount;
 - after official cutover, an accepted Botified delivery receipt survives
   Botified and AgentSmith restart and replays by the same fixed downstream key;
+- after official cutover, lost-response recovery for a CanonicalLegacy delivery
+  replays the original POST and receives the same completed legacy receipt
+  without a GET receipt query or a second execution;
 - the same key with a changed fingerprint is rejected without changing the
   original operation.
 
@@ -773,8 +823,22 @@ The milestone is complete when:
   version and checksum/digest, retains both official artifact PINs, no longer
   compiles vendored source, and has no `third_party/botified`, source PIN/build
   stage, fallback, facade, shim, or fork;
-- a real legacy Lite journal opens successfully and, after checkpoint, retains
-  canonical state, history, and delivery receipts in canonical form;
+- a representative legacy Lite journal derived from the old production writer
+  contract opens successfully and, after checkpoint, retains state, history,
+  and a versioned CanonicalLegacy delivery authority; the canonical form does
+  not imply recovery of a legacy `accepted_kind`, timeline cursor, turn ID, or
+  complete modern HTTP receipt;
+- an exact CanonicalLegacy POST replay returns its stable completed legacy
+  receipt without enqueue, provider, file, journal, or timeline effects, while
+  changed hash or payload returns typed conflict;
+- legacy `unfinished_work_discarded` selectively removes its recorded messages
+  from the unfinished canonical transcript tail, pending/known state, and
+  message cursors, removes its recorded projection intents, clears the
+  restart-boundary state, preserves the completed transcript prefix and delivery
+  authority, and checkpoint plus reopen does not revive those inputs;
+- syntactically valid out-of-profile raw legacy delivery in either a middle line
+  or the physical tail returns the stable typed compatibility error with a
+  byte-identical journal and no truncate, rewrite, or checkpoint;
 - the official x86_64 Botified binary executes on Debian Bookworm and requires
   no GLIBC newer than 2.36;
 - official Botified delivery and exact-control receipts survive restart and
