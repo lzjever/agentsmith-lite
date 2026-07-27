@@ -1,7 +1,7 @@
 # AgentSmith Lite Task Runtime Consistency Plan
 
-Status: Development in progress; official cutover blocked on required Botified
-release
+Status: Development in progress. Official Botified `v0.4.41` is published and
+pinned; non-activating preparation and the atomic cutover remain incomplete.
 
 ## 1. Purpose
 
@@ -175,11 +175,14 @@ client-side command system.
 Commands that call Botified have two durable replay layers. The AgentSmith
 receipt is the product command record and is durably bound to one fixed
 downstream Botified command key before dispatch. The official Botified service
-stores and replays its own receipt for that downstream key. If AgentSmith does
-not know the downstream result, it may only query or replay the same operation
-with that same downstream key against the original exact Run target. It never
-allocates a replacement downstream key, infers acceptance from timeline state,
-or converts an unknown result into success or failure.
+stores and replays its own receipt for that downstream key. After Slice 0B
+activation, if AgentSmith does not know the downstream result, it may only
+replay the same operation with that same downstream key against the original
+exact Run target. Until activation, the selected old runner's legacy delivery
+GET recovery is the sole temporary live exception described in Slice 0A; it is
+never used with the official binary and is deleted at activation. AgentSmith
+never allocates a replacement downstream key, infers acceptance from timeline
+state, or converts an unknown result into success or failure.
 
 ### 5.2 Mutation-key lifetime
 
@@ -412,12 +415,14 @@ Terminal start owns admission, not Kubernetes readiness:
 3. return `202` with the Run identity;
 4. let `syncActiveTasksOnce` be the only startup continuation owner;
 5. under the startup/drain fence, apply the false ConfigMap, make the Pod ready,
-   and complete the first cold process open while the Run remains `starting`;
+   record its Pod UID and config hash, and complete the first cold process open
+   while the Run remains `starting`;
 6. while the Run remains `starting` under that same fence, durably prepare the
    ConfigMap with `runtime.resume_unfinished=true` and change the exact Run Pod
    config hash/spec to create a new generation deterministically;
-7. wait for that new Pod and Botified to become ready, with this process open
-   having actually read `runtime.resume_unfinished=true`;
+7. verify that a different Pod UID with the expected true-config hash is ready,
+   and that its Botified process open actually read
+   `runtime.resume_unfinished=true`;
 8. in one Postgres transaction, mark the Run `active`, persist
    `runtime.resume_unfinished=true`, and complete the original receipt;
 9. allow message dispatch only after that transaction commits.
@@ -434,22 +439,24 @@ does not permit activation.
 
 After user confirmation, Release is unconditional for the exact confirmed Run:
 
-1. commit `release_requested` and advance that Run fence;
+1. atomically commit `release_requested`, advance that Run fence, and persist
+   the Release receipt as `accepted_in_progress + retain`;
 2. reject new work and late activation for the fenced Run;
 3. best-effort abort the matching process-local startup owner;
 4. retain the persistent startup/drain barrier while an external apply result
    is unknown;
 5. after the external call settles or its existing hard deadline expires,
    re-enumerate resources by exact app-owned Run labels and delete again;
-6. record `released` only after the post-drain observation confirms absence.
+6. only after the post-drain observation confirms absence, atomically record
+   `released` and complete the Release receipt as `completed + retire`.
 
 This preserves both product rules: the user does not need to inspect running
 processes, and a late Kubernetes apply cannot recreate a Run already recorded
 as released.
 
-The Release API returns an admitted result; cleanup proceeds in canonical Task
-state. The UI shows one stable releasing state and does not declare failure
-because cleanup is still converging.
+The initial Release response is the admitted in-progress result; cleanup
+proceeds in canonical Task state. The UI shows one stable releasing state and
+does not declare completion or failure while cleanup is still converging.
 
 ### 7.3 Abort and Stop
 
@@ -514,17 +521,27 @@ occupancy or a general connection manager in this milestone.
 
 ## 8. Implementation Slices
 
-Slice 1 and Slice 2 are complete against the existing dependency and are not
-blocked retroactively by the official release wait. Remaining work completes
-Slice 0 when the official release is available and before Slice 3 exact
-controls, then continues the product slices. Each cutover or feature change
-deletes its obsolete competing path in that same change.
+Slice 1 and Slice 2 are complete against the existing dependency. Official
+Botified `v0.4.41` is available. Slice 0 non-activating preparation and Slice 3
+exact lifecycle work may proceed while the old runner remains live, including
+direct validation against the official binary, but no official-only contract is
+sent on the live path until the one atomic activation. That activation deletes
+every obsolete competing path in the same coordinated change.
 
 ### Slice 0: Official Botified prerequisite and cutover
 
-Status: blocked only on the required official Botified release.
+Status: official prerequisite satisfied; preparation may proceed, while live
+activation waits for the exact lifecycle and drain conditions below.
 
-The next formal Botified release must provide all of:
+The official Botified release consumed by AgentSmith is fixed to:
+
+- version: `v0.4.41`;
+- asset: `botified-core-linux-x86_64-gnu.tar.gz`;
+- SHA-256:
+  `8a69eabad03e983f3a3c4779754a149ef6a6d94655142a906cd38d78bb354933`.
+
+This version, asset name, and checksum are one immutable packaging input. The
+official release provides all of:
 
 - the external bash executor loopback contract;
 - durable message delivery receipt replay;
@@ -574,7 +591,7 @@ enqueue, provider call, file bind, journal append, or timeline write. Reusing
 the key with a different hash or digest returns the stable typed `409`
 `delivery_key_payload_mismatch` and leaves the original authority unchanged.
 
-Slice 0 cutover removes AgentSmith's legacy GET delivery-receipt query.
+Slice 0B activation removes AgentSmith's legacy GET delivery-receipt query.
 Lost-response and lease recovery replay the original POST with its original
 downstream key, hash, and payload. The AgentSmith parser strictly accepts either
 the complete modern Current receipt or the CanonicalLegacy receipt; absence of
@@ -593,20 +610,89 @@ line and as the physical tail: each open returns the same typed compatibility
 error, leaves the journal byte-identical, and performs no truncate, rewrite, or
 checkpoint.
 
-When that release is available, AgentSmith consumes the official artifact by
-immutable release version and checksum/digest and does not compile Botified
-source. The same cutover deletes `third_party/botified`, `PINNED_SOURCE.json`,
-every other source PIN or vendor input, the Botified source build stage, and
-every fallback to the vendored path. It retains the official release version
-PIN and checksum/digest PIN. Before cutover, retain the current runnable path;
-after cutover, retain only the official artifact path. This changes neither the
-two active repositories `agentsmith-lite` and `agentsmith-lite-substrates` nor
-the existing deployed service set.
+#### Slice 0A: Non-activating contract and artifact preparation
+
+While the old runner remains live, prepare:
+
+- a strict discriminated receipt union: complete modern Current receipts retain
+  every required field, while CanonicalLegacy requires only its explicit
+  variant and authority fields;
+- POST replay recovery using the persisted original delivery key, request hash,
+  and payload, ready to replace GET recovery at activation;
+- Botified provider config rendering with explicit `allow_insecure_http=true`
+  for the in-cluster AgentSmith broker;
+- runner packaging that downloads only the pinned official asset above and
+  fails fast unless its SHA-256 matches.
+
+These changes may be exercised directly against the official binary without
+selecting it for live Runs. Until atomic activation, the selected live path keeps
+the old delivery GET recovery, old config contract, vendored source build, and
+old runner parser behavior. It must not send the new receipt, replay, config, or
+exact-control contracts to the old runner, and preparing the official image must
+not deploy it. This is temporary source staging for one cutover, not an adapter
+or a supported dual runtime path.
+
+#### Slice 0B: Atomic activation
+
+Activation requires every Slice 3 condition to be implemented first, including
+its common outcome/key contracts, persistent drain barrier and process-local
+startup cancellation, and separate start-new-work and control-existing-work
+predicates. In particular:
+
+- exact Abort and Stop persist the exact Run, exact turn or resolved background
+  target, and one fixed downstream command key before dispatch, replay only that
+  binding, and have no blind, session-wide, inferred-target, or new-key
+  fallback;
+- Terminal connects directly from AgentSmith API to the exact Run's
+  AgentSmith-owned bash executor with the Run handshake and service key; its
+  WebSocket periodically rechecks the exact Run and closes mismatch with `1008`,
+  and the Web disposes transport intent on `1009`;
+- cold startup performs the false then true process-open sequence, verifies the
+  true generation by a new Pod UID and expected config hash, and cannot activate
+  until that second process has actually opened with true;
+- Terminal start has one durable reservation, one startup continuation owner,
+  and one transaction that commits Run activation together with its completed
+  receipt;
+- Release first persists `accepted_in_progress + retain`; only confirmed absence
+  of all exact app-owned Run resources permits `completed + retire`.
+
+All of these implementations can be completed while the old runner is live.
+Slice 0A completes non-activating binary and contract validation directly
+against the official binary. No live official-runner validation occurs while
+admission is fenced; the live path begins with the first admitted Run after the
+coordinated deployment is fully selected.
+
+Perform the activation in this order:
+
+The admission fence is a narrow persistent switch in the existing product or
+deployment configuration. It remains effective across process restarts and
+overlapping rollouts and is not a general maintenance system.
+
+1. enable the fence for every new Run and Terminal start while allowing admitted
+   work and exact controls to converge;
+2. drain and release every old Run, and wait for every nonterminal product or
+   downstream receipt associated with those Runs to reach a durable terminal
+   result;
+3. confirm that no app-owned Run resource remains;
+4. deploy the coordinated AgentSmith app and official runner change once,
+   selecting the strict union/POST/config contracts and simultaneously deleting
+   `third_party/botified`, `PINNED_SOURCE.json`, every source PIN or vendor
+   input, the Botified source build stage, legacy delivery GET recovery and its
+   old receipt/config contracts, and every vendored or binary fallback;
+5. confirm that the old app no longer receives traffic and every serving new app
+   instance has selected the official artifact and new contracts;
+6. clear the fence, then let the first new Run exercise the formal exact
+   lifecycle and official runner path.
+
+After activation, only the pinned official artifact path and new contracts
+remain. Do not retain an adapter, compatibility facade, or long-lived dual path.
+This changes neither the two active repositories `agentsmith-lite` and
+`agentsmith-lite-substrates` nor the existing deployed service set.
 
 ### Slice 1: Typed command convergence
 
-Status: complete against the existing dependency; official artifact validation
-is completed during Slice 0 cutover.
+Status: complete against the existing dependency; official contract and
+artifact validation belongs to Slice 0A, with live acceptance in Slice 0B.
 
 Implement:
 
@@ -687,20 +773,25 @@ User result: visible Task, Terminal, and Files state does not jump backward.
 
 ### Slice 3: Exact runtime lifecycle
 
+Status: required before Slice 0B activation; implementation and official-binary
+validation may complete while the old runner remains selected.
+
 Implement:
 
 - the common outcome/key contract for Terminal start, Release, Abort, and Stop;
 - `202 accepted_in_progress` after durable Terminal-start reservation;
 - one reconciler startup owner;
 - atomic Run activation plus final Terminal-start receipt;
-- `expectedRunId` on Release;
+- `expectedRunId` on Release, with `accepted_in_progress + retain` until exact
+  resources are confirmed absent and only then `completed + retire`;
 - persistent drain barrier plus process-local startup cancellation;
-- exact Botified target identities for Abort and Stop;
+- persisted exact Run, target, and fixed downstream command-key identities for
+  Abort and Stop, with no fallback;
 - official cold discard on the replacement Run's first process open with
   `runtime.resume_unfinished=false`, followed while still `starting` by durable
   true configuration, a config-hash/spec-triggered exact Run Pod generation,
-  and a second ready process open that actually reads true before activation
-  and message dispatch;
+  verification of a new Pod UID and expected config hash, and a second ready
+  process open that actually reads true before activation and message dispatch;
 - separate start-new-work and control-existing-work predicates;
 - direct AgentSmith API-to-executor Terminal transport with exact Run-derived
   endpoint on the existing Service target, handshake, service key, and
@@ -815,14 +906,23 @@ single-node K8s paths one at a time:
 Browser and visual checks are manually initiated validation. They are never
 automatic release gates.
 
+Slice 0A completes non-activating official-binary and contract validation. For
+Slice 0B, keep admission fenced through the coordinated deployment, confirm
+that only the new app receives traffic and that it has fully selected the
+official artifact, then clear the fence. The first new Run follows the formal
+exact lifecycle and naturally validates the live official-runner path. Do not
+add a canary, second deployment path, or default gate.
+
 ## 11. Handoff Completion
 
 The milestone is complete when:
 
-- AgentSmith consumes the required official Botified release by immutable
-  version and checksum/digest, retains both official artifact PINs, no longer
-  compiles vendored source, and has no `third_party/botified`, source PIN/build
-  stage, fallback, facade, shim, or fork;
+- AgentSmith consumes official Botified version `v0.4.41`, asset
+  `botified-core-linux-x86_64-gnu.tar.gz`, and SHA-256
+  `8a69eabad03e983f3a3c4779754a149ef6a6d94655142a906cd38d78bb354933`,
+  retains this immutable artifact pin, no longer compiles vendored source, and
+  has no `third_party/botified`, source PIN/build stage, fallback, facade, shim,
+  or fork;
 - a representative legacy Lite journal derived from the old production writer
   contract opens successfully and, after checkpoint, retains state, history,
   and a versioned CanonicalLegacy delivery authority; the canonical form does
@@ -850,19 +950,32 @@ The milestone is complete when:
   the same key and fingerprint, and never changes a retained command's payload;
 - Task canonical state and Terminal local state have non-overlapping owners;
 - focused out-of-order checks prove stale responses cannot regress the UI;
-- Terminal start returns after reservation while external startup is blocked;
-- Release targets `expectedRunId`, fences late activation, and keeps the drain
-  barrier until a post-settlement/deadline observation confirms absence;
-- Abort and Stop carry exact target identities through the Botified service
-  API, Stop binds the resolved background task, and Abort is unavailable
-  without a canonical Botified turn ID;
+- Terminal start returns `accepted_in_progress + retain` after its durable
+  reservation while external startup is blocked, has one continuation owner,
+  and commits Run activation plus `completed + retire` atomically;
+- Release targets `expectedRunId`, initially returns
+  `accepted_in_progress + retain`, fences late activation, and keeps the drain
+  barrier until a post-settlement/deadline observation confirms absence before
+  committing `completed + retire`;
+- Abort and Stop persist the exact Run, fixed downstream command key, and exact
+  target identities before dispatch, replay without fallback through the
+  Botified service API, Stop binds the resolved background task, and Abort is
+  unavailable without a canonical Botified turn ID;
 - the replacement Run opens once with `runtime.resume_unfinished=false`, then
-  its deterministic true-config Pod generation becomes ready and opens with
-  true before activation; an immediate same-Run process restart still reads
-  true and does not discard new work;
-- cutover drains and releases the old runner before one coordinated app and
-  runner deployment, while legacy journal schema compatibility remains required
-  for the durable state on the reused PVC;
+  a new Pod UID with the expected deterministic true-config hash becomes ready
+  and opens with true before activation; an immediate same-Run process restart
+  still reads true and does not discard new work;
+- cutover uses the narrow persistent admission fence across process restarts and
+  overlapping rollout, drains and releases every old Run, waits for every
+  nonterminal product/downstream receipt to converge, and confirms all app-owned
+  Run resources absent; one coordinated app and official-runner deployment then
+  deletes vendor, legacy GET/receipt/config contracts, and fallbacks;
+- the fence is cleared only after the old app receives no traffic and every
+  serving new app has selected the official artifact; the first admitted Run
+  follows the formal exact lifecycle and naturally validates the live runner,
+  with no canary, second deployment path, general maintenance system, or default
+  gate, while legacy journal schema compatibility remains required for durable
+  state on reused PVCs;
 - Terminal runs Web-to-AgentSmith-to-executor with an exact Run handshake and
   service key, while `1008`/`1009` cannot produce shell/Connect oscillation;
 - file replay never re-enters a recreated source path;
@@ -870,7 +983,8 @@ The milestone is complete when:
 - no new governance layer, generic workflow, repository, service, proxy
   sidecar, Botified Terminal route, or Sandbox provider key exists.
 
-Slice 1 and Slice 2 require no additional handoff. Development continues while
-the official cutover and Slice 3 exact controls wait for the required Botified
-release; no additional planning, evidence, release, or test-governance document
-is required.
+Slice 1 and Slice 2 require no additional handoff. The official `v0.4.41`
+prerequisite is satisfied: Slice 0A and Slice 3 may proceed without selecting
+the official runner, and official live behavior begins only with Slice 0B atomic
+activation. No additional planning, evidence, release, or test-governance
+document is required.
