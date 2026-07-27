@@ -49,6 +49,7 @@ describe("botified runtime integration", () => {
     assert.deepEqual(Object.keys(config.providers[0] ?? {}).sort(), [
       "api_compat",
       "api_key_env",
+      "allow_insecure_http",
       "base_url",
       "capabilities",
       "model",
@@ -62,6 +63,7 @@ describe("botified runtime integration", () => {
       base_url: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/t1/runs/r1/v1",
       model: "gpt-compatible",
       api_key_env: "BOTIFIED_SERVICE_KEY",
+      allow_insecure_http: true,
       request_timeout_secs: 30,
       priority: 10,
       capabilities: ["text", "tool_calls"]

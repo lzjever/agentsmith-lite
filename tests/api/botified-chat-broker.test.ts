@@ -12,7 +12,6 @@ import type {
   BotifiedDeliveryMessageInput,
   BotifiedDeliveryReceipt,
   BotifiedDownloadFileResult,
-  BotifiedPostMessageResult,
   BotifiedRuntimeHttpClient,
   BotifiedTimelineReadResult,
   BotifiedUploadFileInput,
@@ -38,6 +37,7 @@ describe("Botified Chat Completions broker", () => {
       store: createLocalInMemoryProductStore(),
       builtinAdminPassword: "broker-test-admin-password",
       sessionSecret: "broker-test-session-secret-at-least-32-characters",
+      sandboxNamespaceLimit: 100,
       publicBaseUrl: "https://agentsmith.example/app",
       botifiedServiceKeyFactory: ({ taskId, runId }) => `task-key:${taskId}:${runId}`,
       botifiedClient: new AcceptingBotifiedClient(),
@@ -346,24 +346,23 @@ describe("Botified Chat Completions broker", () => {
 });
 
 class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
-  readonly receipts = new Map<string, BotifiedDeliveryReceipt>();
-
   async health() { return { status: "ok" as const }; }
   async readState(_baseUrl: string, serviceKey: string) {
     const sessionId = serviceKey.split(":")[1];
     if (!sessionId) throw new Error("Test service key has no Task session");
     return { sessionId, snapshot: { session_id: sessionId }, state: "running" };
   }
-  async postMessage(_baseUrl: string, _serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
-    return { accepted: true, messageId: message, cursor: "cursor" };
-  }
   async postMessageWithDelivery(_baseUrl: string, _serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
-    const receipt: BotifiedDeliveryReceipt = { accepted: true, deliveryKey: input.deliveryKey, requestHash: input.requestHash, messageId: `message:${input.deliveryKey}`, cursor: `cursor:${input.deliveryKey}` };
-    this.receipts.set(input.deliveryKey, receipt);
-    return receipt;
-  }
-  async queryDeliveryReceipt(_baseUrl: string, _serviceKey: string, deliveryKey: string) {
-    return this.receipts.get(deliveryKey) ?? null;
+    return {
+      receiptKind:"current",
+      outcome:"completed",
+      deliveryKey:input.deliveryKey,
+      requestHash:input.requestHash,
+      messageId:input.deliveryKey,
+      acceptedKind:"queued",
+      timelineCursor:`cursor:${input.deliveryKey}`,
+      turnId:`turn:${input.deliveryKey}`
+    };
   }
   async readTimeline(_baseUrl: string, _serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
     return { status: "ok", events: [], ...(cursor ? { nextCursor: cursor } : {}) };

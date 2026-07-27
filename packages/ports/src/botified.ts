@@ -3,9 +3,7 @@ import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 export interface BotifiedRuntimeHttpClient {
   health(baseUrl: string, serviceKey?: string, signal?:AbortSignal): Promise<{ status: "ok" }>;
   readState(baseUrl: string, serviceKey: string, signal?:AbortSignal): Promise<BotifiedRuntimeStateResult>;
-  postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult>;
-  postMessageWithDelivery?(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt>;
-  queryDeliveryReceipt?(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null>;
+  postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt>;
   readTimeline(
     baseUrl: string,
     serviceKey: string,
@@ -23,25 +21,32 @@ export interface BotifiedRuntimeHttpClient {
   ): AsyncIterable<BotifiedLlmTextPreviewFrame>;
 }
 
-export interface BotifiedPostMessageResult {
-  accepted: boolean;
-  kind?: string;
-  messageId?: string;
-  cursor?: string;
-}
-
 export interface BotifiedDeliveryMessageInput {
   text: string;
   deliveryKey: string;
   requestHash: string;
 }
 
-export interface BotifiedDeliveryReceipt {
-  accepted: boolean;
+export type BotifiedDeliveryReceipt = BotifiedCurrentDeliveryReceipt | BotifiedCanonicalLegacyDeliveryReceipt;
+
+export interface BotifiedCurrentDeliveryReceipt {
+  receiptKind: "current";
+  outcome: "completed";
   deliveryKey: string;
   requestHash: string;
-  messageId?: string;
-  cursor?: string;
+  messageId: string;
+  acceptedKind: "started" | "queued";
+  timelineCursor: string;
+  turnId: string;
+}
+
+export interface BotifiedCanonicalLegacyDeliveryReceipt {
+  receiptKind: "canonical_legacy";
+  outcome: "completed";
+  deliveryKey: string;
+  requestHash: string;
+  messageId: string;
+  payloadSha256: string;
 }
 
 export interface BotifiedRuntimeStateResult {
@@ -226,34 +231,6 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return result;
   }
 
-  async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
-    const body = await this.requestJson(baseUrl, "/v1/messages", {
-      method: "POST",
-      serviceKey,
-      body: JSON.stringify({ text: message }),
-      headers: {
-        "content-type": "application/json"
-      }
-    });
-    const record = asRecord(body);
-    const result: BotifiedPostMessageResult = {
-      accepted: record?.ok === true
-    };
-    const kind = stringField(record, "kind");
-    const messageId = stringField(record, "message_id");
-    const cursor = stringField(record, "timeline_cursor");
-    if (kind !== undefined) {
-      result.kind = kind;
-    }
-    if (messageId !== undefined) {
-      result.messageId = messageId;
-    }
-    if (cursor !== undefined) {
-      result.cursor = cursor;
-    }
-    return result;
-  }
-
   async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
     const body = await this.requestJson(baseUrl, "/v1/messages", {
       method: "POST",
@@ -262,21 +239,6 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
       headers: { "content-type": "application/json" }
     });
     return deliveryReceiptFromBody(body);
-  }
-
-  async queryDeliveryReceipt(baseUrl: string, serviceKey: string, deliveryKey: string): Promise<BotifiedDeliveryReceipt | null> {
-    try {
-      const body = await this.requestJson(baseUrl, "/v1/deliveries/" + encodeURIComponent(deliveryKey), {
-        method: "GET",
-        serviceKey
-      });
-      const record = asRecord(body);
-      if (record?.found === false) return null;
-      return deliveryReceiptFromBody(body);
-    } catch (error) {
-      if (error instanceof BotifiedHttpError && error.status === 404) return null;
-      throw error;
-    }
   }
 
   async readTimeline(
@@ -575,8 +537,17 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { snapshot: {}, state: "idle" };
   }
 
-  async postMessage(): Promise<BotifiedPostMessageResult> {
-    return { accepted: true, cursor: "dry-run" };
+  async postMessageWithDelivery(_baseUrl:string,_serviceKey:string,input:BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+    return {
+      receiptKind:"current",
+      outcome:"completed",
+      deliveryKey:input.deliveryKey,
+      requestHash:input.requestHash,
+      messageId:input.deliveryKey,
+      acceptedKind:"queued",
+      timelineCursor:"dry-run",
+      turnId:"dry-run"
+    };
   }
 
   async readTimeline(): Promise<BotifiedTimelineReadResult> {
@@ -808,23 +779,72 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function deliveryReceiptFromBody(body: unknown): BotifiedDeliveryReceipt {
   const record = asRecord(body);
-  const deliveryKey = stringField(record, "delivery_key");
-  const requestHash = stringField(record, "request_hash");
-  if (!deliveryKey || !requestHash || record?.ok !== true) {
-    throw new BotifiedHttpError({
-      status: 200,
-      code: "invalid_delivery_receipt",
-      message: "Botified delivery response did not contain an accepted receipt",
-      retryable: true,
-      responseBody: body
-    });
+  if (!record || record.outcome !== "completed") {
+    throw invalidDeliveryReceipt(body);
   }
-  const result: BotifiedDeliveryReceipt = { accepted: true, deliveryKey, requestHash };
-  const messageId = stringField(record, "message_id");
-  const cursor = stringField(record, "timeline_cursor");
-  if (messageId !== undefined) result.messageId = messageId;
-  if (cursor !== undefined) result.cursor = cursor;
-  return result;
+  if (record.receipt_kind === "canonical_legacy") {
+    if (!hasExactFields(record, ["outcome", "receipt_kind", "delivery_key", "request_hash", "message_id", "payload_sha256"])) {
+      throw invalidDeliveryReceipt(body);
+    }
+    const deliveryKey = requiredStringField(record, "delivery_key");
+    const requestHash = requiredStringField(record, "request_hash");
+    const messageId = requiredStringField(record, "message_id");
+    const payloadSha256 = requiredStringField(record, "payload_sha256");
+    if (!deliveryKey || !requestHash || !messageId || !payloadSha256 || !/^[a-f0-9]{64}$/.test(payloadSha256)) {
+      throw invalidDeliveryReceipt(body);
+    }
+    return {
+      receiptKind:"canonical_legacy",
+      outcome:"completed",
+      deliveryKey,
+      requestHash,
+      messageId,
+      payloadSha256
+    };
+  }
+  if (record.receipt_kind !== undefined || !hasExactFields(record, ["outcome", "delivery_key", "request_hash", "message_id", "accepted_kind", "timeline_cursor", "turn_id"])) {
+    throw invalidDeliveryReceipt(body);
+  }
+  const deliveryKey = requiredStringField(record, "delivery_key");
+  const requestHash = requiredStringField(record, "request_hash");
+  const messageId = requiredStringField(record, "message_id");
+  const timelineCursor = requiredStringField(record, "timeline_cursor");
+  const turnId = requiredStringField(record, "turn_id");
+  const acceptedKind = record.accepted_kind;
+  if (!deliveryKey || !requestHash || !messageId || !timelineCursor || !turnId || (acceptedKind !== "started" && acceptedKind !== "queued")) {
+    throw invalidDeliveryReceipt(body);
+  }
+  return {
+    receiptKind:"current",
+    outcome:"completed",
+    deliveryKey,
+    requestHash,
+    messageId,
+    acceptedKind,
+    timelineCursor,
+    turnId
+  };
+}
+
+function invalidDeliveryReceipt(body:unknown):BotifiedHttpError {
+  return new BotifiedHttpError({
+    status:200,
+    code:"invalid_delivery_receipt",
+    message:"Botified delivery response did not contain a complete receipt",
+    retryable:true,
+    responseBody:body
+  });
+}
+
+function hasExactFields(record:Record<string,unknown>,fields:readonly string[]):boolean {
+  const actual=Object.keys(record).sort();
+  const expected=[...fields].sort();
+  return actual.length===expected.length&&actual.every((field,index)=>field===expected[index]);
+}
+
+function requiredStringField(record:Record<string,unknown>,key:string):string|undefined {
+  const value=record[key];
+  return typeof value==="string"&&value.length>0?value:undefined;
 }
 
 function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {

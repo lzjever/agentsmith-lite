@@ -11,7 +11,6 @@ import {
   type BotifiedAbortResult,
   type BotifiedDeliveryMessageInput,
   type BotifiedDeliveryReceipt,
-  type BotifiedPostMessageResult,
   type BotifiedRuntimeHttpClient,
   type BotifiedLlmTextPreviewOptions,
   type BotifiedTimelineReadResult,
@@ -677,6 +676,96 @@ describe("task interactions API", () => {
     assert.equal((await store.listTaskMessages(task.id)).filter((message)=>message.content===content).length,1);
     assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
   });
+
+  it("replays an expired delivery lease by POST with the persisted key, hash, and payload",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"lease replay",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Lease replay files"}});
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    botified.deliveryCalls.length=0;
+    botified.legacyPayloadSha256="d86500d18e1b86cf7a2b8e900f5b0462843b45791b608c462457530c88d70d34";
+    const timestamp=new Date(Date.now()-120_000).toISOString();
+    const content="persisted delivery payload";
+    const message=await store.createPendingTaskMessage(
+      {id:"message_expired_delivery",taskId:task.id,actorId:task.createdByUserId??null,content,deliveryKey:"delivery_message_expired",requestHash:"persisted-request-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+      {sourceKind:"product",sourceId:"message:message_expired_delivery",sourceRevision:0,interaction:{id:"interaction_message_expired_delivery",revision:1,taskId:task.id,kind:"user_message",title:"You",body:content,contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+    );
+    assert.ok(message);
+    const claimed=await store.claimTaskMessage({id:message.id,claimToken:"expired-claim",claimedAt:timestamp,leaseExpiresAt:new Date(Date.now()-60_000).toISOString()});
+    assert.ok(claimed);
+    const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
+
+    await background.tasks.syncActiveTasksOnce();
+
+    assert.deepEqual(botified.deliveryCalls,[{
+      baseUrl:"http://botified.internal",
+      serviceKey:task.id,
+      input:{text:content,deliveryKey:"delivery_message_expired",requestHash:"persisted-request-hash"}
+    }]);
+    const accepted=await store.findTaskMessage(message.id);
+    assert.equal(accepted?.deliveryStatus,"accepted");
+    assert.equal(accepted?.attemptCount,1);
+    assert.deepEqual(accepted?.receipt,{
+      accepted:true,
+      deliveryKey:"delivery_message_expired",
+      requestHash:"persisted-request-hash",
+      messageId:"delivery_message_expired"
+    });
+    assert.equal(accepted?.timelineCursor,null);
+
+    botified.legacyPayloadSha256="b".repeat(64);
+    const mismatched=await store.createPendingTaskMessage(
+      {id:"message_mismatched_digest",taskId:task.id,actorId:task.createdByUserId??null,content:"different persisted payload",deliveryKey:"delivery_message_mismatched",requestHash:"mismatched-request-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+      {sourceKind:"product",sourceId:"message:message_mismatched_digest",sourceRevision:0,interaction:{id:"interaction_message_mismatched_digest",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"different persisted payload",contentMode:"full",position:2,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+    );
+    assert.ok(mismatched);
+    assert.ok(await store.claimTaskMessage({id:mismatched.id,claimToken:"mismatched-claim",claimedAt:timestamp,leaseExpiresAt:new Date(Date.now()-60_000).toISOString()}));
+
+    await background.tasks.syncActiveTasksOnce();
+
+    const rejected=await store.findTaskMessage(mismatched.id);
+    assert.equal(rejected?.deliveryStatus,"failed");
+    assert.equal(rejected?.receipt,null);
+  });
+
+  for(const receiptKind of ["current","canonical_legacy"] as const){
+    it(`rejects a ${receiptKind} delivery receipt whose message ID differs from its delivery key`,async()=>{
+      const store=createLocalInMemoryProductStore();
+      const botified=new FakeBotifiedClient([]);
+      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
+      const auth=await createProjectWithEndpoint(api.baseUrl);
+      const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:`${receiptKind} identity`,endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:`${receiptKind} identity files`}});
+      const task=await store.findTask(created.task.id as string);assert.ok(task);
+      await makeTaskRunActive(store,task,"http://botified.internal");
+      botified.deliveryCalls.length=0;
+      botified.deliveryMessageId="different-message-id";
+      if(receiptKind==="canonical_legacy")botified.legacyPayloadSha256="d86500d18e1b86cf7a2b8e900f5b0462843b45791b608c462457530c88d70d34";
+      const timestamp=new Date().toISOString();
+      const messageId=`message_${receiptKind}_identity_mismatch`;
+      const deliveryKey=`delivery_${receiptKind}_identity_mismatch`;
+      const message=await store.createPendingTaskMessage(
+        {id:messageId,taskId:task.id,actorId:task.createdByUserId??null,content:"persisted delivery payload",deliveryKey,requestHash:`${receiptKind}-identity-hash`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+        {sourceKind:"product",sourceId:`message:${messageId}`,sourceRevision:0,interaction:{id:`interaction_${messageId}`,revision:1,taskId:task.id,kind:"user_message",title:"You",body:"persisted delivery payload",contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+      );
+      assert.ok(message);
+      const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
+
+      await background.tasks.syncActiveTasksOnce();
+
+      const rejected=await store.findTaskMessage(message.id);
+      assert.equal(rejected?.deliveryStatus,"failed");
+      assert.equal(rejected?.receipt,null);
+      assert.match(rejected?.safeError??"",/delivery receipt identity mismatch/);
+      assert.equal(botified.deliveryCalls.length,1);
+
+      await background.tasks.syncActiveTasksOnce();
+
+      assert.equal(botified.deliveryCalls.length,1);
+    });
+  }
 
   it("leaves a pending message unclaimed while its current Run is not startup-ready",async()=>{
     const store=createLocalInMemoryProductStore();
@@ -2089,6 +2178,7 @@ async function waitForTerminalCapability(auth:Awaited<ReturnType<typeof createPr
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
+  readonly deliveryCalls: Array<{ baseUrl:string;serviceKey:string;input:BotifiedDeliveryMessageInput }> = [];
   readonly readStateCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
   readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
@@ -2103,6 +2193,8 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   previewWaitForAbort = false;
   timelineSessionId: string | undefined;
   stateSessionId: string | undefined;
+  legacyPayloadSha256: string | undefined;
+  deliveryMessageId: string | undefined;
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
 
@@ -2111,18 +2203,29 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     return { status: "ok" };
   }
 
-  async postMessage(baseUrl: string, serviceKey: string, message: string): Promise<BotifiedPostMessageResult> {
-    this.postMessageCalls.push({ baseUrl, serviceKey, message });
-    return { accepted: true, messageId: "msg_1", cursor: "post-cursor" };
-  }
-
   async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
-    const posted = await this.postMessage(baseUrl, serviceKey, input.text);
-    return { accepted: posted.accepted, deliveryKey: input.deliveryKey, requestHash: input.requestHash, ...(posted.messageId ? { messageId: posted.messageId } : {}), ...(posted.cursor ? { cursor: posted.cursor } : {}) };
-  }
-
-  async queryDeliveryReceipt(): Promise<BotifiedDeliveryReceipt | null> {
-    return null;
+    this.deliveryCalls.push({baseUrl,serviceKey,input:structuredClone(input)});
+    this.postMessageCalls.push({baseUrl,serviceKey,message:input.text});
+    if(this.legacyPayloadSha256){
+      return {
+        receiptKind:"canonical_legacy",
+        outcome:"completed",
+        deliveryKey:input.deliveryKey,
+        requestHash:input.requestHash,
+        messageId:this.deliveryMessageId??input.deliveryKey,
+        payloadSha256:this.legacyPayloadSha256
+      };
+    }
+    return {
+      receiptKind:"current",
+      outcome:"completed",
+      deliveryKey:input.deliveryKey,
+      requestHash:input.requestHash,
+      messageId:this.deliveryMessageId??input.deliveryKey,
+      acceptedKind:"queued",
+      timelineCursor:"post-cursor",
+      turnId:`turn:${input.deliveryKey}`
+    };
   }
 
   async readState(baseUrl: string, serviceKey: string) {

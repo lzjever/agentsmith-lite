@@ -48,6 +48,7 @@ import type {
   BeginTaskIdempotencyInput,
   PersistTaskArtifactProjectionInput,
   PersistedAgentTask,
+  PersistedDeliveryReceipt,
   PersistedSandboxRunState,
   PersistedTaskArtifact,
   PersistedTaskInteractionChange,
@@ -1326,14 +1327,9 @@ export class TaskService {
       if(run.state!=="active")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
       await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
       const receipt = await this.postDeliveryMessage(runtime.baseUrl, serviceKey, message.content, message.deliveryKey!, message.requestHash!);
-      if (!receipt.accepted) {
-        const failed = await this.store.failTaskMessage({ id:message.id, claimToken, safeError:"Botified did not accept task message", updatedAt:nowIso() });
-        if (failed) await this.persistMessageInteraction(failed);
-        if (completeIdempotency && failed) await this.completeMessageIdempotency(failed);
-        return failed ?? message;
-      }
-      const receiptCursor = safeRuntimeCursor(receipt.cursor) ?? null;
-      const accepted = await this.store.recordTaskMessageReceipt({ id:message.id, claimToken, receipt, timelineCursor:receiptCursor, updatedAt:nowIso() });
+      const persistedReceipt=persistedDeliveryReceipt(receipt);
+      const receiptCursor = receipt.receiptKind==="current" ? safeRuntimeCursor(receipt.timelineCursor) ?? null : null;
+      const accepted = await this.store.recordTaskMessageReceipt({ id:message.id, claimToken, receipt:persistedReceipt, timelineCursor:receiptCursor, updatedAt:nowIso() });
       if (!accepted) throw new ProductError("Task message delivery claim changed before receipt persistence", 409);
       await this.persistMessageInteraction(accepted);
       await this.bestEffortSyncTaskTimeline(source);
@@ -1388,12 +1384,10 @@ export class TaskService {
     const serviceKey = this.serviceKeyForTask(source);
     const state = await this.readRuntimeState(source, serviceKey);
     await this.readVerifiedBotifiedState(source,state.baseUrl,serviceKey);
-    if (!this.botified.queryDeliveryReceipt) throw new ProductError("Botified delivery query API is required", 502);
-    const receipt=await this.callBotified("send message",()=>this.botified.queryDeliveryReceipt!(state.baseUrl,serviceKey,message.deliveryKey!));
-    if (!receipt) return null;
-    if (receipt.deliveryKey !== message.deliveryKey || receipt.requestHash !== message.requestHash) throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
-    const receiptCursor = safeRuntimeCursor(receipt.cursor) ?? null;
-    return await this.store.recordTaskMessageReceipt({ id:message.id, claimToken:message.claimToken, receipt, timelineCursor:receiptCursor, updatedAt:nowIso() })
+    const receipt=await this.postDeliveryMessage(state.baseUrl,serviceKey,message.content,message.deliveryKey,message.requestHash);
+    const persistedReceipt=persistedDeliveryReceipt(receipt);
+    const receiptCursor = receipt.receiptKind==="current" ? safeRuntimeCursor(receipt.timelineCursor) ?? null : null;
+    return await this.store.recordTaskMessageReceipt({ id:message.id, claimToken:message.claimToken, receipt:persistedReceipt, timelineCursor:receiptCursor, updatedAt:nowIso() })
       ?? await this.store.findTaskMessage(message.id);
   }
 
@@ -1971,9 +1965,9 @@ export class TaskService {
   }
 
   private async postDeliveryMessage(baseUrl:string,serviceKey:string,text:string,deliveryKey:string,requestHash:string):Promise<BotifiedDeliveryReceipt>{
-    if (!this.botified.postMessageWithDelivery) throw new ProductError("Botified delivery API is required",502);
-    const receipt=await this.callBotified("send message",()=>this.botified.postMessageWithDelivery!(baseUrl,serviceKey,{text,deliveryKey,requestHash}));
-    if(receipt.deliveryKey!==deliveryKey||receipt.requestHash!==requestHash)throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
+    const receipt=await this.callBotified("send message",()=>this.botified.postMessageWithDelivery(baseUrl,serviceKey,{text,deliveryKey,requestHash}));
+    if(receipt.deliveryKey!==deliveryKey||receipt.requestHash!==requestHash||receipt.messageId!==receipt.deliveryKey)throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
+    if(receipt.receiptKind==="canonical_legacy"&&receipt.payloadSha256!==botifiedTextPayloadSha256(text))throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
     return receipt;
   }
 
@@ -3473,6 +3467,24 @@ function safeRuntimeCursor(cursor: string | null | undefined): string | undefine
     return undefined;
   }
   return cursor;
+}
+
+function persistedDeliveryReceipt(receipt:BotifiedDeliveryReceipt):PersistedDeliveryReceipt {
+  return {
+    accepted:true,
+    deliveryKey:receipt.deliveryKey,
+    requestHash:receipt.requestHash,
+    messageId:receipt.messageId,
+    ...(receipt.receiptKind==="current"?{cursor:receipt.timelineCursor}:{})
+  };
+}
+
+function botifiedTextPayloadSha256(text:string):string {
+  const payload=JSON.stringify({items:[{type:"text",text}],urgency:"normal"});
+  return createHash("sha256")
+    .update("botified:delivery-public-payload:v1\0")
+    .update(payload)
+    .digest("hex");
 }
 
 function deadlineIso(baseIso: string, durationMs: number): string {

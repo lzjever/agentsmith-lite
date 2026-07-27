@@ -73,6 +73,7 @@ export interface BotifiedProviderConfig {
   base_url: string;
   model: string;
   api_key_env: string;
+  allow_insecure_http: true;
   request_timeout_secs: number;
   priority: number;
   capabilities: EndpointCapability[];
@@ -185,6 +186,7 @@ function providerConfig(endpoint: ModelEndpoint, task: BotifiedTaskRuntimeInput)
     base_url: task.providerBaseUrl,
     model: endpoint.model,
     api_key_env: task.providerApiKeyEnv,
+    allow_insecure_http: true,
     request_timeout_secs: endpoint.requestTimeoutSecs,
     priority: 10,
     capabilities: endpoint.capabilities
