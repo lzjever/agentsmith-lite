@@ -34,11 +34,15 @@ import {
 import { useTaskMutationKeys } from "./task-mutation-key";
 import { TaskConnectionNotice, TaskPreviewNotice } from "./TaskRunStatus";
 import {
+  clearTaskCommandMetadata,
+  persistTaskCommandMetadata,
   readTaskCommandMetadata,
   retireTaskCommandMetadata,
   taskCommandRemountDecision,
+  taskRuntimeCommandRemountDecision,
   TaskCommandStorageUnavailableError,
-  taskCommandFingerprint
+  taskCommandFingerprint,
+  type TaskBackgroundWorkStopCommandMetadata
 } from "./task-command-storage";
 import {
   clearTaskMessageCommandAttempt,
@@ -125,6 +129,7 @@ export function TaskConversationWorkspace({
   const latestPreview = useRef<TaskAssistantPreview>(null);
   const stateRef = useRef<TaskPresentationState>(state);
   stateRef.current = state;
+  const restoredStopRoute=useRef<string|null>(null);
 
   useEffect(() => {
     streamCursor.current = state.streamCursor;
@@ -717,22 +722,63 @@ export function TaskConversationWorkspace({
     }
   }, [recoverFreshSnapshot]);
 
-  const stopWork = useCallback(async (interactionId: string) => {
+  const stopWork = useCallback(async(interactionId:string,restored?:TaskBackgroundWorkStopCommandMetadata)=>{
+    const presentation=stateRef.current.presentation;
+    const expectedRunId=restored?.request.expectedRunId??presentation?.sandboxState.runId;
+    const exactInteractionId=restored?.request.interactionId??interactionId;
+    if(!expectedRunId||!exactInteractionId)throw new Error("Background work no longer has an exact Run target.");
+    const request={expectedRunId,interactionId:exactInteractionId};
+    const fingerprint=JSON.stringify(request);
+    const identity={userId,projectId,taskId};
+    if(restored&&restored.fingerprint!==fingerprint)throw new Error("Stored background Stop identity is invalid.");
+    if(restored)mutationKeysRef.current.restore("task-work-stop",taskId,restored);
+    const attempt=mutationKeysRef.current.fingerprintKey("task-work-stop",taskId,fingerprint);
     const commandFence = captureCommandFence();
     try {
-      await apiClient.stopTaskWork(
-        taskId,
-        interactionId,
-        mutationKeysRef.current.key("task-work-stop", interactionId)
-      );
-      mutationKeysRef.current.complete("task-work-stop", interactionId);
+      if(!restored)persistTaskCommandMetadata(taskDraftStorage(),"task-work-stop",{
+        ...identity,...attempt,request,createdAt:new Date().toISOString()
+      });
+      const outcome=await apiClient.stopTaskWork(taskId,request,attempt.key);
+      mutationKeysRef.current.transition("task-work-stop",taskId,attempt,outcome);
+      if(outcome.outcome==="outcome_unknown")throw outcome.error;
+      if(outcome.keyDisposition==="retire"){
+        retireTaskCommandMetadata(taskDraftStorage(),"task-work-stop",identity,attempt);
+        mutationKeysRef.current.canonicalAbsorbed("task-work-stop",taskId,attempt);
+      }
+      if(outcome.outcome==="rejected_before_acceptance")throw taskCommandOutcomeError(outcome);
+      if(outcome.outcome==="completed"&&outcome.result==="conflict"){
+        throw new ApiError(409,"The exact background work target is no longer active.",outcome.code);
+      }
       stateRef.current = acceptCanonicalMutation("stop", commandFence);
     } catch (reason) {
-      mutationKeysRef.current.completeApiFailure(reason, "task-work-stop", interactionId);
       await recoverMutation(reason);
       throw reason;
     }
-  }, [acceptCanonicalMutation, captureCommandFence, recoverMutation, taskId]);
+  },[acceptCanonicalMutation,captureCommandFence,projectId,recoverMutation,taskId,userId]);
+
+  useEffect(()=>{
+    if(!state.initialized||!state.presentation)return;
+    const route=`${userId}:${projectId}:${taskId}`;
+    if(restoredStopRoute.current===route)return;
+    restoredStopRoute.current=route;
+    const storage=taskDraftStorage(),identity={userId,projectId,taskId};
+    const decision=taskRuntimeCommandRemountDecision(
+      readTaskCommandMetadata(storage,"task-work-stop",identity)
+    );
+    if(decision.status==="cleanup"){
+      clearTaskCommandMetadata(storage,"task-work-stop",identity);
+      mutationKeysRef.current.clear("task-work-stop");
+      return;
+    }
+    if(decision.status!=="restore")return;
+    const metadata=decision.metadata;
+    if(metadata.fingerprint!==JSON.stringify(metadata.request)){
+      clearTaskCommandMetadata(storage,"task-work-stop",identity);
+      mutationKeysRef.current.clear("task-work-stop");
+      return;
+    }
+    void stopWork(metadata.request.interactionId,metadata).catch(()=>undefined);
+  },[projectId,state.initialized,state.presentation,stopWork,taskId,userId]);
 
   function retry() {
     reconnectCount.current = 0;

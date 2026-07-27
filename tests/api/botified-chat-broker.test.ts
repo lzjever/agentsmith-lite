@@ -369,7 +369,12 @@ class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
   }
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> { return { files: [] }; }
   async downloadFile(_baseUrl: string, _serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult> { return { bytes: new Uint8Array(), sizeBytes: 0, filename: fileId }; }
-  async abort(): Promise<BotifiedAbortResult> { return { aborted: true }; }
+  async abort(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTurnId:string}):Promise<BotifiedAbortResult>{
+    return{commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:"completed"};
+  }
+  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTaskId:string}){
+    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:"completed" as const};
+  }
 }
 
 class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {

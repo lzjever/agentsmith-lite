@@ -67,6 +67,9 @@ import type {
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
   BeginTaskIdempotencyInput,
+  BeginTaskControlCommandInput,
+  BeginTaskControlCommandResult,
+  InProgressTaskControlCommand,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
@@ -1459,6 +1462,73 @@ export class InMemoryProductStore implements ProductStore {
     return { kind: "claimed", resourceId: input.resourceId, claimToken: input.claimToken };
   }
 
+  async beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const key=taskIdempotencyKey(input.idempotency);
+      const existing=this.taskIdempotency.get(key);
+      if(existing){
+        if(existing.requestHash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
+        if(existing.status==="completed")return{
+          kind:"replay",
+          responseStatus:existing.responseStatus!,
+          responseBody:clone(existing.responseBody)
+        };
+        const command=inMemoryTaskControlCommand(existing);
+        if(!command)return{kind:"hash_mismatch"};
+        if(existing.leaseExpiresAt>input.idempotency.now)return{kind:"in_progress",command:taskControlEnvelope(command)};
+        const claimed={...existing,claimToken:input.idempotency.claimToken,leaseExpiresAt:input.idempotency.leaseExpiresAt,updatedAt:input.idempotency.now};
+        this.taskIdempotency.set(key,claimed);
+        return{kind:"claimed",command:{...command,claimToken:claimed.claimToken}};
+      }
+
+      const task=this.tasks.get(input.taskId);
+      const run=await this.sandboxRunRecords.get(input.expectedRunId);
+      if(
+        input.idempotency.resourceId!==input.taskId||
+        !task||task.deletedAt||task.archivedAt||
+        task.projectId!==input.idempotency.projectId||
+        task.currentRunId!==input.expectedRunId||
+        !run||run.state!=="active"||!taskRunScopeMatches(task,run)
+      )return{kind:"target_conflict"};
+
+      let downstreamTargetId=input.downstreamTargetId;
+      if(input.idempotency.operation==="abort-turn"){
+        if(input.interactionId!==null||!downstreamTargetId)return{kind:"target_conflict"};
+      }else{
+        if(!input.interactionId||downstreamTargetId!==null)return{kind:"target_conflict"};
+        const change=this.interactionChanges
+          .filter((candidate)=>candidate.interaction.taskId===input.taskId&&candidate.interaction.id===input.interactionId)
+          .sort((left,right)=>right.interaction.revision-left.interaction.revision||right.changeSeq-left.changeSeq)[0];
+        if(!change||change.interaction.kind!=="background_task")return{kind:"interaction_not_found"};
+        if(change.interaction.executionStatus!=="running"||!change.interaction.canStop||!change.correlation?.workTaskId)return{kind:"target_not_stoppable"};
+        downstreamTargetId=change.correlation.workTaskId;
+      }
+      const record:InMemoryTaskIdempotencyRecord={
+        ...input.idempotency,
+        status:"in_progress",
+        responseStatus:null,
+        responseBody:null,
+        updatedAt:input.idempotency.now,
+        expectedRunId:input.expectedRunId,
+        interactionId:input.interactionId,
+        downstreamCommandKey:input.downstreamCommandKey,
+        downstreamTargetId
+      };
+      this.taskIdempotency.set(key,record);
+      return{kind:"claimed",command:inMemoryTaskControlCommand(record)!};
+    });
+  }
+
+  async listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>{
+    return[...this.taskIdempotency.values()]
+      .filter((record)=>record.status==="in_progress"&&(record.operation==="abort-turn"||record.operation==="work-stop"))
+      .sort((left,right)=>left.updatedAt.localeCompare(right.updatedAt))
+      .slice(0,Math.max(1,Math.floor(limit)))
+      .map(inMemoryTaskControlCommand)
+      .filter((command):command is InProgressTaskControlCommand=>command!==null)
+      .map(clone);
+  }
+
   async findTaskIdempotency(input:TaskIdempotencyLookupInput):Promise<TaskIdempotencyBeginResult|null>{
     const row=this.taskIdempotency.get(taskIdempotencyKey(input));
     if(!row)return null;
@@ -1510,16 +1580,39 @@ export class InMemoryProductStore implements ProductStore {
     return true;
   }
   async requestTaskSandboxRelease(input:TaskSandboxReleaseMutationInput){
-    const key=taskIdempotencyKey(input.idempotency),record=this.taskIdempotency.get(key);
-    if(!record||record.status!=="in_progress"||record.requestHash!==input.idempotency.requestHash||record.claimToken!==input.idempotency.claimToken)return"conflict" as const;
-    const task=this.tasks.get(input.taskId),project=this.projects.get(input.idempotency.projectId);
-    if(
-      !task||task.deletedAt||task.projectId!==input.idempotency.projectId||task.currentRunId!==input.runId||
-      !project||!taskRunScopeMatches(task,input.run)||record.resourceId!==input.runId
-    )return"conflict" as const;
-    return this.sandboxRunRecords.requestExplicitCleanup(input,()=>{
-      this.terminalizeTerminalStartOwner(input.run,input.idempotency.updatedAt);
-      this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
+    return this.atomicTaskMessageMutation([],async()=>{
+      const key=taskIdempotencyKey(input.idempotency),record=this.taskIdempotency.get(key);
+      if(!record||record.status!=="in_progress"||record.requestHash!==input.idempotency.requestHash||record.claimToken!==input.idempotency.claimToken)return"conflict" as const;
+      const task=this.tasks.get(input.taskId),project=this.projects.get(input.idempotency.projectId);
+      if(
+        !task||task.deletedAt||task.projectId!==input.idempotency.projectId||task.currentRunId!==input.runId||
+        !project||!taskRunScopeMatches(task,input.run)||record.resourceId!==input.runId
+      )return"conflict" as const;
+      const controls=[...this.taskIdempotency.entries()]
+        .filter(([,candidate])=>
+          candidate.status==="in_progress"&&candidate.resourceId===input.taskId&&
+          (candidate.operation==="abort-turn"||candidate.operation==="work-stop")
+        )
+        .sort(([left],[right])=>compareC(left,right));
+      const terminalControls=controls.map(([controlKey,control])=>{
+        const command=inMemoryTaskControlCommand(control);
+        if(
+          !command||command.taskId!==input.taskId||
+          command.projectId!==input.idempotency.projectId
+        )throw new Error("Exact Task control envelope is inconsistent with released Run");
+        return command.expectedRunId===input.runId
+          ?[controlKey,control,supersededTaskControlReceipt(command)] as const
+          :null;
+      }).filter((control):control is NonNullable<typeof control>=>control!==null);
+      return this.sandboxRunRecords.requestExplicitCleanup(input,()=>{
+        this.terminalizeTerminalStartOwner(input.run,input.idempotency.updatedAt);
+        for(const [controlKey,control,responseBody] of terminalControls){
+          this.taskIdempotency.set(controlKey,{
+            ...control,status:"completed",responseStatus:409,responseBody,updatedAt:input.idempotency.updatedAt
+          });
+        }
+        this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.idempotency.responseStatus,responseBody:clone(input.idempotency.responseBody),updatedAt:input.idempotency.updatedAt});
+      });
     });
   }
   async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.projectId!==input.projectId||record.operation!==input.operation||record.resourceId!==input.resourceId||record.status!=="in_progress")continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.responseStatus,responseBody:clone(input.responseBody),updatedAt:input.updatedAt});completed+=1;}return completed;}
@@ -2410,6 +2503,57 @@ interface InMemoryTaskIdempotencyRecord {
   now: string;
   updatedAt: string;
   fileDeletion?: FileDeletionOperationState;
+  expectedRunId?:string|null;
+  interactionId?:string|null;
+  downstreamCommandKey?:string|null;
+  downstreamTargetId?:string|null;
+}
+
+function inMemoryTaskControlCommand(record:InMemoryTaskIdempotencyRecord):InProgressTaskControlCommand|null{
+  if(
+    (record.operation!=="abort-turn"&&record.operation!=="work-stop")||
+    !record.expectedRunId||!record.downstreamCommandKey||!record.downstreamTargetId||
+    (record.operation==="abort-turn"&&record.interactionId!==null)||
+    (record.operation==="work-stop"&&!record.interactionId)
+  )return null;
+  return{
+    actorId:record.actorId,
+    projectId:record.projectId,
+    operation:record.operation,
+    key:record.key,
+    requestHash:record.requestHash,
+    resourceId:record.resourceId,
+    claimToken:record.claimToken,
+    taskId:record.resourceId,
+    expectedRunId:record.expectedRunId,
+    interactionId:record.interactionId??null,
+    downstreamCommandKey:record.downstreamCommandKey,
+    downstreamTargetId:record.downstreamTargetId
+  };
+}
+
+function taskControlEnvelope(command:InProgressTaskControlCommand){
+  return{
+    taskId:command.taskId,
+    expectedRunId:command.expectedRunId,
+    interactionId:command.interactionId,
+    downstreamCommandKey:command.downstreamCommandKey,
+    downstreamTargetId:command.downstreamTargetId
+  };
+}
+
+function supersededTaskControlReceipt(command:InProgressTaskControlCommand){
+  return{
+    outcome:"completed",
+    keyDisposition:"retire",
+    taskId:command.taskId,
+    runId:command.expectedRunId,
+    ...(command.operation==="abort-turn"
+      ?{turnId:command.downstreamTargetId}
+      :{interactionId:command.interactionId!}),
+    result:"conflict",
+    code:"task_control_superseded_by_release"
+  };
 }
 
 interface InMemoryFileLibraryDeletion {

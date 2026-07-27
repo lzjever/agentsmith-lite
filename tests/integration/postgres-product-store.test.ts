@@ -1612,6 +1612,143 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,1);
   });
 
+  it("atomically freezes and reclaims an exact background control envelope",async()=>{
+    const task=taskRecord("task_exact_stop","library_exact_stop","run_exact_stop");
+    const activeRun={
+      ...run(task,task.currentRunId!,"starting"),
+      state:"active" as const,
+      startedAt:at,
+      startupReadyAt:at,
+      fencingToken:2
+    };
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...createAdmissionReceipt(task,"exact-stop"),
+      newFileLibrary:library(task.fileLibraryId!,"Exact stop"),
+      sandboxRun:activeRun
+    })).kind,"created");
+    const interaction={
+      id:"interaction_exact_stop",revision:1,taskId:task.id,kind:"background_task" as const,
+      title:"Background task",body:null,contentMode:"none" as const,position:1,
+      occurredAt:at,updatedAt:at,executionStatus:"running" as const,deliveryStatus:null,
+      label:"Compile",workSummary:null,result:null,error:null,detailsOmitted:false,canStop:true
+    };
+    await store.persistTaskInteractionMutation({
+      taskId:task.id,
+      changes:[{sourceKind:"botified",sourceId:"event_exact_stop_1",sourceRevision:0,interaction,correlation:{workTaskId:"work-exact-original"}}]
+    });
+
+    const first=await store.beginTaskControlCommand({
+      taskId:task.id,expectedRunId:activeRun.runId,interactionId:interaction.id,
+      downstreamCommandKey:"downstream-exact-original",downstreamTargetId:null,
+      idempotency:{
+        actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
+        key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
+        claimToken:"exact-stop-first",now:"2026-07-23T00:01:00.000Z",leaseExpiresAt:"2026-07-23T00:02:00.000Z"
+      }
+    });
+    assert.equal(first.kind,"claimed");
+    assert.deepEqual(first.kind==="claimed"?first.command:null,{
+      actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
+      key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
+      claimToken:"exact-stop-first",taskId:task.id,expectedRunId:activeRun.runId,
+      interactionId:interaction.id,downstreamCommandKey:"downstream-exact-original",
+      downstreamTargetId:"work-exact-original"
+    });
+
+    await store.persistTaskInteractionMutation({
+      taskId:task.id,
+      changes:[{
+        sourceKind:"botified",sourceId:"event_exact_stop_2",sourceRevision:0,
+        interaction:{...interaction,revision:2,updatedAt:"2026-07-23T00:02:00.000Z"},
+        correlation:{workTaskId:"work-must-not-rebind"}
+      }]
+    });
+    const reclaimed=await store.beginTaskControlCommand({
+      taskId:task.id,expectedRunId:activeRun.runId,interactionId:interaction.id,
+      downstreamCommandKey:"downstream-must-not-rebind",downstreamTargetId:null,
+      idempotency:{
+        actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
+        key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
+        claimToken:"exact-stop-reclaimed",now:"2026-07-23T00:03:00.000Z",leaseExpiresAt:"2026-07-23T00:04:00.000Z"
+      }
+    });
+    assert.equal(reclaimed.kind,"claimed");
+    assert.deepEqual(
+      reclaimed.kind==="claimed"?{
+        ...reclaimed.command,
+        claimToken:"exact-stop-first"
+      }:null,
+      first.kind==="claimed"?first.command:null
+    );
+  });
+
+  it("keeps completed exact control history from blocking Task purge or Project deletion",async()=>{
+    const createReleasedTaskWithControl=async(label:string)=>{
+      const task=taskRecord(`task_exact_delete_${label}`,`library_exact_delete_${label}`,`run_exact_delete_${label}`);
+      const active={
+        ...run(task,task.currentRunId!,"starting"),
+        state:"active" as const,startedAt:at,startupReadyAt:at,fencingToken:2
+      };
+      assert.equal((await store.createTaskAtomically({
+        task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
+        ...createAdmissionReceipt(task,`exact-delete-${label}`),
+        newFileLibrary:library(task.fileLibraryId!,`Exact delete ${label}`),sandboxRun:active
+      })).kind,"created");
+      const control=await store.beginTaskControlCommand({
+        taskId:task.id,expectedRunId:active.runId,interactionId:null,
+        downstreamCommandKey:`downstream-delete-${label}`,downstreamTargetId:`turn-delete-${label}`,
+        idempotency:{
+          actorId:"user_atomic",projectId:task.projectId,operation:"abort-turn",
+          key:`product-delete-${label}`,requestHash:`product-delete-hash-${label}`,resourceId:task.id,
+          claimToken:`control-delete-claim-${label}`,now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
+        }
+      });
+      assert.equal(control.kind,"claimed");
+      assert.equal(control.kind==="claimed"&&await store.completeTaskIdempotency({
+        actorId:control.command.actorId,projectId:control.command.projectId,operation:control.command.operation,
+        key:control.command.key,requestHash:control.command.requestHash,claimToken:control.command.claimToken,
+        responseStatus:200,
+        responseBody:{
+          outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:active.runId,
+          turnId:`turn-delete-${label}`,result:"completed"
+        },
+        updatedAt:"2026-07-23T00:01:00.000Z"
+      }),true);
+      const releasedAt="2026-07-23T00:02:00.000Z";
+      const released={
+        ...active,state:"released" as const,releaseReason:"requested" as const,
+        releaseRequestedAt:releasedAt,releasedAt,fencingToken:3,updatedAt:releasedAt
+      };
+      assert.equal(await store.completeSandboxRunRelease({
+        runId:active.runId,expectedFencingToken:active.fencingToken,run:released,
+        settlement:{
+          runId:active.runId,workspaceId:active.workspaceId,projectId:active.projectId,
+          taskId:active.taskId,fileLibraryId:active.fileLibraryId,startedByUserId:active.startedByUserId,
+          startedAt:active.startedAt,releasedAt,durationSeconds:120,resources:active.resourceSnapshot,
+          releaseReason:"requested"
+        },
+        auditEvent:{
+          id:`audit_exact_delete_release_${label}`,projectId:task.projectId,actorId:null,
+          subjectUserId:active.startedByUserId,action:"sandbox.released",status:"accepted",
+          resourceKind:"sandbox",resourceId:task.id,
+          detail:{taskId:task.id,runId:active.runId,releaseReason:"requested"},createdAt:releasedAt
+        }
+      }),"applied");
+      return task;
+    };
+
+    const purged=await createReleasedTaskWithControl("task");
+    assert.equal((await store.beginTaskDeletion(purged.id,"2026-07-23T00:03:00.000Z")).kind,"ready");
+    assert.equal(await store.purgeDeletedTaskData(purged.id),true);
+    assert.equal(await store.findTask(purged.id),null);
+
+    await createReleasedTaskWithControl("project");
+    assert.equal((await store.beginProjectDeletion("project_atomic","2026-07-23T00:03:00.000Z","user_atomic")).kind,"ready");
+    assert.equal(await store.finalizeProjectDeletion("project_atomic"),"deleted");
+    assert.equal(await store.findProject("project_atomic"),null);
+  });
+
   it("keeps a PostgreSQL pending-message crash window out of due and claim paths",async()=>{
     const task={...taskRecord("task_dispatch_guard","library_dispatch_guard","unused"),currentRunId:null};
     assert.equal((await store.createTaskAtomically({

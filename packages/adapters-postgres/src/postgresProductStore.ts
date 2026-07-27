@@ -73,6 +73,9 @@ import type {
   TaskDeliveryDeferInput,
   TaskDeliveryFailureInput,
   BeginTaskIdempotencyInput,
+  BeginTaskControlCommandInput,
+  BeginTaskControlCommandResult,
+  InProgressTaskControlCommand,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
@@ -1732,6 +1735,83 @@ export class PostgresProductStore implements ProductStore {
     });
   }
 
+  async beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>{
+    return transaction(this.pool,async(client)=>{
+      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+      let receipt=(await client.query<TaskIdempotencyRow>(
+        "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",
+        [input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key]
+      )).rows[0];
+      if(receipt){
+        if(receipt.request_hash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
+        if(receipt.status==="completed")return{
+          kind:"replay",
+          responseStatus:receipt.response_status!,
+          responseBody:mapTaskIdempotencyResponseBody(receipt.operation,receipt.response_body)
+        };
+        const command=postgresTaskControlCommand(receipt);
+        if(!command)return{kind:"hash_mismatch"};
+        if(toIso(receipt.lease_expires_at)>input.idempotency.now)return{kind:"in_progress",command:taskControlEnvelope(command)};
+        receipt=(await client.query<TaskIdempotencyRow>(
+          `update task_idempotency_records
+              set claim_token=$5,lease_expires_at=$6,updated_at=$7
+            where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
+            returning *`,
+          [input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key,input.idempotency.claimToken,input.idempotency.leaseExpiresAt,input.idempotency.now]
+        )).rows[0]!;
+        return{kind:"claimed",command:postgresTaskControlCommand(receipt)!};
+      }
+
+      if(
+        input.idempotency.resourceId!==input.taskId||
+        !task||task.deleted_at||task.archived_at||
+        task.project_id!==input.idempotency.projectId||
+        task.current_run_id!==input.expectedRunId
+      )return{kind:"target_conflict"};
+      const run=(await client.query<SandboxRunRow>("select * from sandbox_runs where run_id=$1 for update",[input.expectedRunId])).rows[0];
+      if(!run||run.state!=="active"||run.task_id!==task.id||run.project_id!==task.project_id||run.workspace_id!==task.workspace_id||run.file_library_id!==task.file_library_id)return{kind:"target_conflict"};
+
+      let downstreamTargetId=input.downstreamTargetId;
+      if(input.idempotency.operation==="abort-turn"){
+        if(input.interactionId!==null||!downstreamTargetId)return{kind:"target_conflict"};
+      }else{
+        if(!input.interactionId||downstreamTargetId!==null)return{kind:"target_conflict"};
+        const interaction=(await client.query<TaskInteractionChangeRow>(
+          "select * from task_interaction_changes where task_id=$1 and interaction_id=$2 order by revision desc,change_seq desc limit 1 for update",
+          [input.taskId,input.interactionId]
+        )).rows[0];
+        if(!interaction||interaction.interaction_kind!=="background_task")return{kind:"interaction_not_found"};
+        const projected=mapTaskInteractionChange(interaction);
+        if(projected.interaction.kind!=="background_task"||projected.interaction.executionStatus!=="running"||!projected.interaction.canStop||!projected.correlation?.workTaskId)return{kind:"target_not_stoppable"};
+        downstreamTargetId=projected.correlation.workTaskId;
+      }
+      receipt=(await client.query<TaskIdempotencyRow>(
+        `insert into task_idempotency_records
+           (actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,claim_token,
+            lease_expires_at,created_at,updated_at,expected_run_id,interaction_id,downstream_command_key,downstream_target_id)
+         values ($1,$2,$3,$4,$5,$6,'in_progress',$7,$8,$9,$9,$10,$11,$12,$13)
+         returning *`,
+        [
+          input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key,
+          input.idempotency.requestHash,input.idempotency.resourceId,input.idempotency.claimToken,
+          input.idempotency.leaseExpiresAt,input.idempotency.now,input.expectedRunId,input.interactionId,
+          input.downstreamCommandKey,downstreamTargetId
+        ]
+      )).rows[0]!;
+      return{kind:"claimed",command:postgresTaskControlCommand(receipt)!};
+    });
+  }
+
+  async listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>{
+    const rows=await this.queryRows<TaskIdempotencyRow>(
+      `select * from task_idempotency_records
+        where operation in ('abort-turn','work-stop') and status='in_progress'
+        order by updated_at,idempotency_key collate "C" limit $1`,
+      [Math.max(1,Math.floor(limit))]
+    );
+    return rows.map(postgresTaskControlCommand).filter((command):command is InProgressTaskControlCommand=>command!==null);
+  }
+
   async findTaskIdempotencyByResource(input:TaskIdempotencyResourceLookupInput):Promise<TaskIdempotencyBeginResult|null>{
     const rows=await this.queryRows<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and operation=$2 and idempotency_key=$3 and resource_id=$4 order by updated_at desc limit 1",[input.actorId,input.operation,input.key,input.resourceId]);
     const row=rows[0];
@@ -1827,6 +1907,24 @@ export class PostgresProductStore implements ProductStore {
       !claim||claim.status!=="in_progress"||claim.request_hash!==idem.requestHash||
       claim.claim_token!==idem.claimToken||claim.resource_id!==input.runId
     )return"conflict" as const;
+    const controlRows=(await client.query<TaskIdempotencyRow>(
+      `select * from task_idempotency_records
+        where resource_id=$1 and status='in_progress'
+          and operation in ('abort-turn','work-stop')
+        order by actor_id collate "C",project_id collate "C",operation collate "C",idempotency_key collate "C"
+        for update`,
+      [input.taskId]
+    )).rows;
+    const controls=controlRows.map((row)=>{
+      const command=postgresTaskControlCommand(row);
+      if(
+        !command||command.taskId!==input.taskId||
+        command.projectId!==idem.projectId
+      )throw new Error("Exact Task control envelope is inconsistent with released Run");
+      return command.expectedRunId===input.runId
+        ?{row,responseBody:supersededTaskControlReceipt(command)}
+        :null;
+    }).filter((control):control is NonNullable<typeof control>=>control!==null);
     const already=current.state==="release_requested"||current.state==="released";
     if(current.state!=="released"){
       if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1)return"conflict" as const;
@@ -1838,6 +1936,20 @@ export class PostgresProductStore implements ProductStore {
       });
     }else{
       await terminalizeTerminalStartOwnerWithClient(client,input.taskId,current,idem.updatedAt);
+    }
+    for(const control of controls){
+      const result=await client.query(
+        `update task_idempotency_records
+            set status='completed',response_status=409,response_body=$7::jsonb,updated_at=$8
+          where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
+            and request_hash=$5 and claim_token=$6 and status='in_progress'`,
+        [
+          control.row.actor_id,control.row.project_id,control.row.operation,
+          control.row.idempotency_key,control.row.request_hash,control.row.claim_token,
+          JSON.stringify(control.responseBody),idem.updatedAt
+        ]
+      );
+      if(result.rowCount!==1)throw new Error("Exact Task control supersession lost its locked receipt");
     }
     await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
     return already?"already_requested" as const:"applied" as const;
@@ -2812,7 +2924,7 @@ interface AgentTaskArtifactRow {
 }
 interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; content:string; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
 interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
-interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;terminal_task_id:string|null;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
+interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;terminal_task_id:string|null;expected_run_id:string|null;interaction_id:string|null;downstream_command_key:string|null;downstream_target_id:string|null;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
@@ -3006,6 +3118,52 @@ function mapTaskInteractionChange(row: TaskInteractionChangeRow): PersistedTaskI
   const sourceRevision = parseTaskInteractionSourceRevision(row.source_revision);
   if (interaction.id !== row.interaction_id || interaction.taskId !== row.task_id || interaction.revision !== row.revision || interaction.kind !== row.interaction_kind || interaction.position !== Number(row.position) || (row.source_kind === "botified" && sourceRevision !== 0)) throw new Error("Stored task interaction is inconsistent");
   return { changeSeq:Number(row.change_seq),sourceKind:row.source_kind,sourceId:row.source_id,sourceRevision,interaction,correlation:{toolCallId:row.tool_call_id,workTaskId:row.work_task_id,callbackId:row.callback_id} };
+}
+
+function postgresTaskControlCommand(row:TaskIdempotencyRow):InProgressTaskControlCommand|null{
+  if(
+    (row.operation!=="abort-turn"&&row.operation!=="work-stop")||
+    !row.expected_run_id||!row.downstream_command_key||!row.downstream_target_id||
+    (row.operation==="abort-turn"&&row.interaction_id!==null)||
+    (row.operation==="work-stop"&&!row.interaction_id)
+  )return null;
+  return{
+    actorId:row.actor_id,
+    projectId:row.project_id,
+    operation:row.operation,
+    key:row.idempotency_key,
+    requestHash:row.request_hash,
+    resourceId:row.resource_id,
+    claimToken:row.claim_token,
+    taskId:row.resource_id,
+    expectedRunId:row.expected_run_id,
+    interactionId:row.interaction_id,
+    downstreamCommandKey:row.downstream_command_key,
+    downstreamTargetId:row.downstream_target_id
+  };
+}
+
+function taskControlEnvelope(command:InProgressTaskControlCommand){
+  return{
+    taskId:command.taskId,
+    expectedRunId:command.expectedRunId,
+    interactionId:command.interactionId,
+    downstreamCommandKey:command.downstreamCommandKey,
+    downstreamTargetId:command.downstreamTargetId
+  };
+}
+function supersededTaskControlReceipt(command:InProgressTaskControlCommand){
+  return{
+    outcome:"completed",
+    keyDisposition:"retire",
+    taskId:command.taskId,
+    runId:command.expectedRunId,
+    ...(command.operation==="abort-turn"
+      ?{turnId:command.downstreamTargetId}
+      :{interactionId:command.interactionId!}),
+    result:"conflict",
+    code:"task_control_superseded_by_release"
+  };
 }
 function parseTaskInteractionSourceRevision(value:string|number):number {
   const revision=Number(value);

@@ -25,6 +25,10 @@ import type {
   TaskRuntimeReachability,
   TaskSandboxReleaseReceipt,
   TaskSandboxReleaseRequest,
+  TaskTurnAbortReceipt,
+  TaskTurnAbortRequest,
+  TaskBackgroundWorkStopReceipt,
+  TaskBackgroundWorkStopRequest,
   TaskTerminalStartReceipt,
   TaskTerminalStartRequest,
   TaskArtifactKind,
@@ -42,10 +46,11 @@ import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
 import type { FileLibraryService } from "./fileLibraryService.js";
-import { BotifiedHttpError, type BotifiedDeliveryReceipt, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
+import { BotifiedHttpError, type BotifiedControlOutcome, type BotifiedDeliveryReceipt, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
 import type {
   AtomicTaskCreateInput,
   BeginTaskIdempotencyInput,
+  InProgressTaskControlCommand,
   PersistTaskArtifactProjectionInput,
   PersistedAgentTask,
   PersistedDeliveryReceipt,
@@ -131,6 +136,7 @@ export interface TaskServiceConfig {
   modelCa?: ModelCaReference;
   sandboxLifecycle?: SandboxLifecycleService;
   deliveryLeaseMs?: number;
+  controlLeaseMs?: number;
   retryDelayMs?: number;
   contexts?: ContextService;
 }
@@ -139,6 +145,8 @@ export interface BotifiedTaskAddressInput {
   namespace: string;
   taskId: string;
   port: number;
+  runId?: string;
+  serviceName?: string;
 }
 
 export interface BotifiedBrokerAddressInput extends BotifiedServiceKeyInput {}
@@ -164,18 +172,6 @@ export interface TaskInteractionChangePage {
   streamCursor: string;
   done: boolean;
   state: TaskInteractionState;
-}
-
-export interface TaskTurnAbortResult {
-  aborted: true;
-  presentation: TaskPresentation;
-}
-
-export interface TaskBackgroundWorkStopResult {
-  interactionId: string;
-  workTaskId: string;
-  state: "running" | "cancelling" | "completed" | "failed" | "timed_out" | "cancelled" | "lost";
-  presentation: TaskPresentation;
 }
 
 export type TaskAssistantPreviewUpdate =
@@ -284,7 +280,6 @@ function isTaskCreateReceiptContention(error:unknown):boolean{
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
   private readonly occupiedTerminalTaskIds = new Set<string>();
-  private readonly abortingTaskIds = new Set<string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
   private readonly startupOperationsByRunId = new Map<string, Promise<PersistedAgentTask>>();
   private readonly startupExternalActionsByRunId = new Map<string,Promise<unknown>>();
@@ -1186,6 +1181,7 @@ export class TaskService {
     };
     await this.reconcileTaskPreparations(result.failedTaskIds);
     await this.reconcileTerminalStartups(result.failedTaskIds);
+    await this.reconcileTaskControlCommands(result.failedTaskIds);
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
     const activeSandboxes = await this.store.listActiveTasks();
     result.activeTaskCount=activeSandboxes.length;
@@ -1252,6 +1248,35 @@ export class TaskService {
         await this.beginSandboxStartupOperation(task,true,run).promise;
       }catch{
         failedTaskIds.push(run.taskId);
+      }
+    }
+  }
+
+  private async reconcileTaskControlCommands(failedTaskIds:string[]):Promise<void>{
+    for(const command of await this.store.listInProgressTaskControlCommands(100)){
+      try{
+        const timestamp=nowIso();
+        const begun=await this.store.beginTaskControlCommand({
+          taskId:command.taskId,
+          expectedRunId:command.expectedRunId,
+          interactionId:command.interactionId,
+          downstreamCommandKey:command.downstreamCommandKey,
+          downstreamTargetId:command.operation==="abort-turn"?command.downstreamTargetId:null,
+          idempotency:{
+            actorId:command.actorId,
+            projectId:command.projectId,
+            operation:command.operation,
+            key:command.key,
+            requestHash:command.requestHash,
+            resourceId:command.resourceId,
+            claimToken:newId("idempotency_claim"),
+            now:timestamp,
+            leaseExpiresAt:deadlineIso(timestamp,this.controlLeaseMs())
+          }
+        });
+        if(begun.kind==="claimed")await this.continueTaskControlCommand(begun.command);
+      }catch{
+        failedTaskIds.push(command.taskId);
       }
     }
   }
@@ -1391,11 +1416,8 @@ export class TaskService {
       ?? await this.store.findTaskMessage(message.id);
   }
 
-  private async bestEffortAbort(task:PersistedAgentTask):Promise<void>{
-    try{const serviceKey=this.serviceKeyForTask(task);const state=await this.readRuntimeState(task,serviceKey);await this.botified.abort(state.baseUrl,serviceKey);}catch{}
-  }
-
   private deliveryLeaseMs():number{return resolveDurationMs(this.config.deliveryLeaseMs,DEFAULT_DELIVERY_LEASE_MS);}
+  private controlLeaseMs():number{return resolveDurationMs(this.config.controlLeaseMs,IDEMPOTENCY_LEASE_MS);}
   private retryDelayMs():number{return resolveDurationMs(this.config.retryDelayMs,DEFAULT_TASK_RETRY_DELAY_MS);}
 
   async taskInteractions(userId: string, taskId: string, query: { cursor?: string; limit?: number } = {}): Promise<TaskInteractionSnapshot> {
@@ -1478,54 +1500,149 @@ export class TaskService {
     }
   }
 
-  async abortTaskTurn(userId: string, taskId: string, idempotencyKey?: string): Promise<TaskTurnAbortResult> {
-    const task = await this.requireTaskRecordForUser(userId, taskId, "write");
-    return this.runIdempotentTaskOperation({ actorId:userId, projectId:task.projectId, operation:taskOperation("abort-turn"), key:idempotencyKey, request:{taskId} }, task.id, async () => {
-      const current = await this.store.findTask(task.id);
-      if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
-      if (!await this.activeSandboxRun(current)) throw new ProductError("Task has no active turn to stop", 409);
-      if (!await this.taskExecutionEligible(current)) throw new ProductError("Task is no longer eligible to stop a turn", 409);
-      if (this.abortingTaskIds.has(current.id)) throw new ProductError("Task turn abort is already in progress", 409);
-      this.abortingTaskIds.add(current.id);
-      try {
-        const serviceKey = this.serviceKeyForTask(current);
-        const runtime = await this.readRuntimeState(current, serviceKey);
-        const state = await this.readVerifiedBotifiedState(current,runtime.baseUrl,serviceKey);
-        if (state.state !== "running") throw new ProductError("Task has no active turn to stop", 409);
-        const turnId = activeTurnIdentity(state, current);
-        const result = await this.callBotified("abort", () => this.botified.abort(runtime.baseUrl, serviceKey));
-        if (!result.aborted) throw new ProductError("Botified did not stop the active turn", 409);
-        await this.persistProductInteraction(turnAbortedProductSource(current, turnId, nowIso()), current);
-        return { aborted:true as const, presentation:await this.taskPresentation(userId,current,{turn:"ready"}) };
-      } finally {
-        this.abortingTaskIds.delete(current.id);
-      }
-    });
+  async abortTaskTurn(userId:string,taskId:string,request:TaskTurnAbortRequest,idempotencyKey?:string):Promise<TaskTurnAbortReceipt>{
+    const task=await this.requireTaskRecordForUser(userId,taskId,"write");
+    const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.abort.expectedRunId");
+    const turnId=requireNonEmptyString(request.turnId,"task.abort.turnId");
+    return this.beginTaskControlCommand({
+      userId,task,expectedRunId,interactionId:null,downstreamTargetId:turnId,
+      operation:"abort-turn",...(idempotencyKey?{idempotencyKey}:{}),request:{taskId,expectedRunId,turnId}
+    }) as Promise<TaskTurnAbortReceipt>;
   }
 
-  async stopTaskBackgroundWork(userId: string, taskId: string, interactionId: string, idempotencyKey?: string): Promise<TaskBackgroundWorkStopResult> {
-    const task = await this.requireTaskRecordForUser(userId, taskId, "write");
-    return this.runIdempotentTaskOperation({ actorId:userId, projectId:task.projectId, operation:taskOperation("work-stop"), key:idempotencyKey, request:{taskId,interactionId} }, interactionId, async () => {
-      const current = await this.store.findTask(task.id);
-      if (!current || current.deletedAt) throw new ProductError("Task not found", 404);
-      if (!await this.activeSandboxRun(current)) throw new ProductError("Background work cannot be stopped for this task", 409);
-      if (!await this.taskExecutionEligible(current)) throw new ProductError("Background work can no longer be stopped for this task", 409);
-      const change = await this.store.findLatestTaskInteractionChange(task.id, interactionId);
-      if (!change || change.interaction.kind !== "background_task") throw new ProductError("Background work interaction not found", 404);
-      if (!change.interaction.canStop || change.interaction.executionStatus !== "running" || !change.correlation?.workTaskId) throw new ProductError("Background work is no longer stoppable", 409);
-      const workTaskId = change.correlation.workTaskId;
-      if (!this.botified.stopBackgroundTask) throw new ProductError("Botified background work stop API is required", 502);
-      const serviceKey = this.serviceKeyForTask(current);
-      const runtime = await this.readRuntimeState(current, serviceKey);
-      const stopped = await this.callBotified("stop background work", () => this.botified.stopBackgroundTask!(runtime.baseUrl, serviceKey, workTaskId));
-      if (stopped.taskId !== workTaskId) throw new ProductError("Botified background work stop response did not match the requested task", 502);
-      await this.persistProductInteraction(
-        backgroundWorkStoppedProductSource(current, change, stopped.state, nowIso()),
-        current,
-        change
-      );
-      return { interactionId, workTaskId, state:stopped.state, presentation:await this.taskPresentation(userId,current) };
+  async stopTaskBackgroundWork(userId:string,taskId:string,request:TaskBackgroundWorkStopRequest,idempotencyKey?:string):Promise<TaskBackgroundWorkStopReceipt>{
+    const task=await this.requireTaskRecordForUser(userId,taskId,"write");
+    const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.stop.expectedRunId");
+    const interactionId=requireNonEmptyString(request.interactionId,"task.stop.interactionId");
+    return this.beginTaskControlCommand({
+      userId,task,expectedRunId,interactionId,downstreamTargetId:null,
+      operation:"work-stop",...(idempotencyKey?{idempotencyKey}:{}),request:{taskId,expectedRunId,interactionId}
+    }) as Promise<TaskBackgroundWorkStopReceipt>;
+  }
+
+  private async beginTaskControlCommand(input:{
+    userId:string;
+    task:PersistedAgentTask;
+    expectedRunId:string;
+    interactionId:string|null;
+    downstreamTargetId:string|null;
+    operation:"abort-turn"|"work-stop";
+    idempotencyKey?:string;
+    request:unknown;
+  }):Promise<TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt>{
+    const key=normalizeIdempotencyKey(input.idempotencyKey);
+    const requestHash=canonicalRequestHash(input.request);
+    const timestamp=nowIso();
+    const begun=await this.store.beginTaskControlCommand({
+      taskId:input.task.id,
+      expectedRunId:input.expectedRunId,
+      interactionId:input.interactionId,
+      downstreamCommandKey:newId(input.operation==="abort-turn"?"botified_abort":"botified_stop"),
+      downstreamTargetId:input.downstreamTargetId,
+      idempotency:{
+        actorId:input.userId,
+        projectId:input.task.projectId,
+        operation:input.operation,
+        key,
+        requestHash,
+        resourceId:input.task.id,
+        claimToken:newId("idempotency_claim"),
+        now:timestamp,
+        leaseExpiresAt:deadlineIso(timestamp,this.controlLeaseMs())
+      }
     });
+    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(begun.kind==="replay")return replayTaskCommandOutcome(begun.responseStatus,begun.responseBody);
+    if(begun.kind==="target_conflict")throw taskRunTargetConflictError();
+    if(begun.kind==="interaction_not_found")throw new ProductError("Background work interaction not found",404,"task_interaction_not_found");
+    if(begun.kind==="target_not_stoppable")throw new ProductError("Background work is no longer stoppable",409,"task_control_target_conflict");
+    if(begun.kind==="in_progress")return acceptedTaskControlReceipt(input.operation,begun.command);
+    if(begun.kind!=="claimed")throw new ReceiptUncertaintyError("Exact Task control admission is unknown","task_control_admission_unknown");
+    return this.continueTaskControlCommand(begun.command);
+  }
+
+  private async continueTaskControlCommand(command:InProgressTaskControlCommand):Promise<TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt>{
+    const task=await this.store.findTask(command.taskId);
+    const run=await this.store.sandboxRuns.get(command.expectedRunId);
+    if(!task||!run||run.taskId!==task.id||run.workspaceId!==task.workspaceId||run.projectId!==task.projectId||run.fileLibraryId!==task.fileLibraryId){
+      throw new ReceiptUncertaintyError("Exact Task control runtime is unavailable","task_control_runtime_unknown");
+    }
+    const serviceKey=this.serviceKeyForRun(task,run);
+    const baseUrl=this.botifiedBaseUrlForRun(run);
+    let outcome:BotifiedControlOutcome;
+    try{
+      if(command.operation==="abort-turn"){
+        const receipt=await this.botified.abort(baseUrl,serviceKey,{
+          commandKey:command.downstreamCommandKey,
+          expectedTurnId:command.downstreamTargetId
+        });
+        if(receipt.commandKey!==command.downstreamCommandKey||receipt.turnId!==command.downstreamTargetId)throw new Error("Botified abort receipt identity mismatch");
+        outcome=receipt.outcome;
+      }else{
+        const receipt=await this.botified.stopBackgroundTask(baseUrl,serviceKey,{
+          commandKey:command.downstreamCommandKey,
+          expectedTaskId:command.downstreamTargetId
+        });
+        if(receipt.commandKey!==command.downstreamCommandKey||receipt.taskId!==command.downstreamTargetId)throw new Error("Botified background stop receipt identity mismatch");
+        outcome=receipt.outcome;
+      }
+    }catch(error){
+      const authority=await this.readTaskControlAuthority(command);
+      if(authority.kind==="replay")return authority.receipt;
+      throw new ReceiptUncertaintyError(
+        `Exact Task control outcome is unknown: ${safeTaskStageError(error)}`,
+        "task_control_outcome_unknown"
+      );
+    }
+    if(outcome==="accepted"){
+      const authority=await this.readTaskControlAuthority(command);
+      return authority.kind==="replay"
+        ?authority.receipt
+        :acceptedTaskControlReceipt(command.operation,command);
+    }
+    const response=completedTaskControlReceipt(command,outcome);
+    const responseStatus=outcome==="conflict"?409:200;
+    if(!await this.store.completeTaskIdempotency({
+      actorId:command.actorId,
+      projectId:command.projectId,
+      operation:command.operation,
+      key:command.key,
+      requestHash:command.requestHash,
+      claimToken:command.claimToken,
+      responseStatus,
+      responseBody:response,
+      updatedAt:nowIso()
+    })){
+      const replay=await this.store.findTaskIdempotency({
+        actorId:command.actorId,
+        projectId:command.projectId,
+        operation:command.operation,
+        key:command.key,
+        requestHash:command.requestHash
+      });
+      if(replay?.kind==="replay")return replayTaskCommandOutcome(replay.responseStatus,replay.responseBody);
+      throw new ReceiptUncertaintyError("Exact Task control receipt lost its claim","task_control_receipt_unknown");
+    }
+    if(outcome!=="conflict")await this.bestEffortSyncTaskTimeline(task);
+    return response;
+  }
+
+  private async readTaskControlAuthority(command:InProgressTaskControlCommand):Promise<
+    {kind:"replay";receipt:TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt}|
+    {kind:"in_progress"}
+  >{
+    const authority=await this.store.findTaskIdempotency({
+      actorId:command.actorId,
+      projectId:command.projectId,
+      operation:command.operation,
+      key:command.key,
+      requestHash:command.requestHash
+    });
+    if(authority?.kind==="replay"){
+      return{kind:"replay",receipt:replayTaskCommandOutcome(authority.responseStatus,authority.responseBody)};
+    }
+    if(authority?.kind==="in_progress")return{kind:"in_progress"};
+    throw new Error("Exact Task control idempotency authority is unavailable");
   }
 
   async listTaskArtifacts(userId: string, taskId: string, query: TaskArtifactListQuery = {}): Promise<TaskArtifactListPage> {
@@ -1697,7 +1814,6 @@ export class TaskService {
     const task=await this.requireTaskForUser(userId,taskId,"write");
     const run=await this.activeSandboxRun(task);
     if(!run||run.state!=="active"||run.runId!==expectedRunId)throw taskRunTargetConflictError();
-    if(this.abortingTaskIds.has(task.id))throw new ProductError("Task terminal is unavailable while the current turn is aborting",409);
     const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);const state=await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
     if(!botifiedStateAllowsTerminal(state.state))throw new ProductError("Task terminal is available only while Botified is running or idle",409);
     return task;
@@ -1914,6 +2030,18 @@ export class TaskService {
     return serviceKey;
   }
 
+  private serviceKeyForRun(task:PersistedAgentTask,run:PersistedSandboxRunState):string{
+    const serviceKey=this.generateServiceKey({
+      namespace:run.namespace,
+      workspaceId:run.workspaceId,
+      projectId:run.projectId,
+      taskId:task.id,
+      runId:run.runId
+    });
+    requireBotifiedServiceKey(serviceKey);
+    return serviceKey;
+  }
+
   private generateServiceKey(input: BotifiedServiceKeyInput): string | undefined {
     return this.config.botifiedServiceKeyFactory?.(input) ?? createBotifiedServiceKey(this.config.botifiedServiceKeySecret, input);
   }
@@ -1921,6 +2049,17 @@ export class TaskService {
   private botifiedBaseUrlForTask(taskId: string, port: number, namespace = this.config.namespace): string {
     const input = { namespace, taskId, port };
     return (this.config.botifiedBaseUrlForTask ?? defaultBotifiedBaseUrlForTask)(input);
+  }
+
+  private botifiedBaseUrlForRun(run:PersistedSandboxRunState):string{
+    const input:BotifiedTaskAddressInput={
+      namespace:run.namespace,
+      taskId:run.taskId,
+      port:run.botifiedPort,
+      runId:run.runId,
+      serviceName:run.resourceNames.service
+    };
+    return (this.config.botifiedBaseUrlForTask??defaultBotifiedBaseUrlForTask)(input);
   }
 
   private botifiedBrokerBaseUrlForTask(task: PersistedAgentTask): string {
@@ -2557,19 +2696,19 @@ export class TaskService {
     };
   }
 
-  private async taskRuntimePresentation(task: PersistedAgentTask,knownRun?:PersistedSandboxRunState|null): Promise<{ turn: TaskCurrentTurnProjection["state"]; reachability: TaskRuntimeReachability }> {
+  private async taskRuntimePresentation(task:PersistedAgentTask,knownRun?:PersistedSandboxRunState|null):Promise<{turn:TaskCurrentTurnProjection["state"];turnId:string|null;reachability:TaskRuntimeReachability}>{
     const run=knownRun===undefined?(task.currentRunId?await this.store.sandboxRuns.get(task.currentRunId):null):knownRun;
-    if(!run||run.taskId!==task.id||run.state==="released")return{turn:"ready",reachability:"unreachable"};
-    if(run.state==="starting")return{turn:"starting",reachability:"unknown"};
-    if(run.state!=="active")return{turn:"ready",reachability:"unreachable"};
-    const turn = this.abortingTaskIds.has(task.id) ? "aborting" : null;
+    if(!run||run.taskId!==task.id||run.state==="released")return{turn:"ready",turnId:null,reachability:"unreachable"};
+    if(run.state==="starting")return{turn:"starting",turnId:null,reachability:"unknown"};
+    if(run.state!=="active")return{turn:"ready",turnId:null,reachability:"unreachable"};
     try {
       const serviceKey = this.serviceKeyForTask(task);
       const runtime = await this.readRuntimeState(task, serviceKey);
       const state = await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
-      return { turn:turn ?? botifiedTaskTurnState(state.state), reachability:"reachable" };
+      const turn=botifiedTaskTurnState(state.state);
+      return{turn,turnId:turn==="running"||turn==="aborting"?state.turnId??null:null,reachability:"reachable"};
     } catch {
-      return { turn:turn ?? "starting", reachability:"unreachable" };
+      return{turn:"starting",turnId:null,reachability:"unreachable"};
     }
   }
 
@@ -2579,6 +2718,7 @@ export class TaskService {
     known:{
       run?:PersistedSandboxRunState|null;
       turn?:TaskCurrentTurnProjection["state"];
+      turnId?:string|null;
       reachability?:TaskRuntimeReachability;
       queued?:PersistedTaskMessage[];
       projectAccess?:ProjectAccessSnapshot;
@@ -2589,12 +2729,13 @@ export class TaskService {
     const unavailableRunId=task.currentRunId&&!run?task.currentRunId:null;
     const queued=known.queued??await this.store.listTaskMessages(task.id);
     const runtime=known.turn!==undefined
-      ?{turn:known.turn,reachability:known.reachability??(run?.state==="active"?"reachable":"unreachable")}
+      ?{turn:known.turn,turnId:known.turnId??null,reachability:known.reachability??(run?.state==="active"?"reachable":"unreachable")}
       :await this.taskRuntimePresentation(task,run);
     const turn=unavailableRunId
       ?"ready"
       :runtime.turn==="ready"&&await this.hasQueuedTurnMessage(task.id,queued)?"queued":runtime.turn;
-    const state=projectTaskState({archivedAt:task.archivedAt,run,unavailableRunId,turn});
+    const turnId=turn===runtime.turn?runtime.turnId:null;
+    const state=projectTaskState({archivedAt:task.archivedAt,run,unavailableRunId,turn,turnId});
     const [projectAccess,executionEligible]=await Promise.all([
       known.projectAccess??this.workspaces.projectAccessForUser(userId,task.projectId),
       this.taskExecutionEligible(task)
@@ -2606,8 +2747,7 @@ export class TaskService {
     const runtimeUsable=run?.state==="released"||run?.state==="starting"||(run?.state==="active"&&runtime.reachability==="reachable");
     const canInteract=canWrite&&retained&&executionEligible&&!cleanupPending&&Boolean(runtimeUsable);
     const canStartNewWork=canWrite&&retained&&executionEligible;
-    const canControlCurrentWork=canWrite&&retained&&run?.state==="active"&&
-      runtime.reachability==="reachable"&&(turn==="running"||turn==="ready");
+    const canControlCurrentWork=canWrite&&retained&&run?.state==="active"&&runtime.reachability==="reachable";
     const capabilities:TaskCapabilities = unavailableRunId ? {
       sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,
       releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false
@@ -2617,8 +2757,8 @@ export class TaskService {
     } : {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
-      abortTurn: canInteract && turn === "running",
-      stopWork:canInteract&&turn==="running",
+      abortTurn:canControlCurrentWork&&turn==="running"&&turnId!==null,
+      stopWork:canControlCurrentWork,
       openTerminal: !cleanupPending&&(
         canStartNewWork&&(releaseConfirmed||run?.state==="starting")||
         canControlCurrentWork
@@ -2758,6 +2898,57 @@ function replayTaskCommandOutcome<T>(statusCode:number,responseBody:unknown):T{
     return structuredClone(responseBody) as T;
   }
   return replayTaskOperationResponse<T>(statusCode,responseBody);
+}
+
+function acceptedTaskControlReceipt(
+  operation:"abort-turn"|"work-stop",
+  command:{
+    taskId:string;
+    expectedRunId:string;
+    interactionId:string|null;
+    downstreamTargetId:string;
+  }
+):TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt{
+  if(operation==="abort-turn"){
+    return{
+      outcome:"accepted_in_progress",
+      keyDisposition:"retain",
+      taskId:command.taskId,
+      runId:command.expectedRunId,
+      turnId:command.downstreamTargetId
+    };
+  }
+  if(!command.interactionId)throw new Error("Exact background control interaction identity is missing");
+  return{
+    outcome:"accepted_in_progress",
+    keyDisposition:"retain",
+    taskId:command.taskId,
+    runId:command.expectedRunId,
+    interactionId:command.interactionId
+  };
+}
+
+function completedTaskControlReceipt(
+  command:InProgressTaskControlCommand,
+  result:Exclude<BotifiedControlOutcome,"accepted">
+):TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt{
+  const common={
+    outcome:"completed" as const,
+    keyDisposition:"retire" as const,
+    taskId:command.taskId,
+    runId:command.expectedRunId,
+    result,
+    ...(result==="conflict"?{code:"task_control_target_conflict"}:{})
+  };
+  if(command.operation==="abort-turn")return{
+    ...common,
+    turnId:command.downstreamTargetId
+  };
+  if(!command.interactionId)throw new Error("Exact background control interaction identity is missing");
+  return{
+    ...common,
+    interactionId:command.interactionId
+  };
 }
 
 function sandboxRetryableEnvelope(value:unknown):SandboxRetryableErrorEnvelope|null{
@@ -2902,6 +3093,7 @@ function requireMatchingTaskCreateReceipt(
 }
 
 function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTask,projectId:string):void{
+  value=normalizeHistoricalTaskCreatePresentation(value);
   if(!isUnknownRecord(value)||!hasExactKeys(value,["capabilities","currentTurn","lifecycle","sandboxState","task"])){
     throw invalidTaskCreateIdempotencyError();
   }
@@ -2933,8 +3125,9 @@ function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTa
     !hasExactKeys(lifecycle,["state"])||
     !["active","archived"].includes(String(lifecycle.state))||
     !isUnknownRecord(currentTurn)||
-    !hasExactKeys(currentTurn,["state"])||
+    !hasExactKeys(currentTurn,["state","turnId"])||
     !["ready","starting","queued","running","aborting"].includes(String(currentTurn.state))||
+    !(currentTurn.turnId===null||typeof currentTurn.turnId==="string")||
     !isUnknownRecord(sandboxState)||
     !hasExactKeys(sandboxState,["cause","runId","state"])||
     !["starting","active","release_requested","released","failed"].includes(String(sandboxState.state))||
@@ -2947,6 +3140,11 @@ function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTa
     ])||
     !Object.values(capabilities).every((candidate)=>typeof candidate==="boolean")
   )throw invalidTaskCreateIdempotencyError();
+}
+
+function normalizeHistoricalTaskCreatePresentation(value:unknown):unknown{
+  if(!isUnknownRecord(value)||!isUnknownRecord(value.currentTurn)||"turnId" in value.currentTurn)return value;
+  return{...value,currentTurn:{...value.currentTurn,turnId:null}};
 }
 
 function validLegacySandboxCause(value:unknown):boolean{
@@ -3025,59 +3223,6 @@ function messageProductSource(message: PersistedTaskMessage): ProductTaskInterac
     content: message.content,
     status: projectedStatus
   };
-}
-
-function turnAbortedProductSource(task: PersistedAgentTask, turnId: string, occurredAt: string): ProductTaskInteractionSource {
-  const sourceId = `turn:${turnId}:abort`;
-  return {
-    sourceKind: "product",
-    type: "turn_aborted",
-    taskId: task.id,
-    sourceId,
-    sourceRevision: 1,
-    occurredAt,
-    position: productPosition(occurredAt, sourceId),
-    turnId
-  };
-}
-
-function backgroundWorkStoppedProductSource(
-  task: PersistedAgentTask,
-  previous: PersistedTaskInteractionChange,
-  status: TaskBackgroundWorkStopResult["state"],
-  occurredAt: string
-): ProductTaskInteractionSource {
-  if (previous.interaction.kind !== "background_task" || !previous.correlation?.workTaskId) {
-    throw new ProductError("Background work interaction not found", 404);
-  }
-  const workTaskId = previous.correlation.workTaskId;
-  return {
-    sourceKind: "product",
-    type: "background_work_stopped",
-    taskId: task.id,
-    sourceId: `background-work:${workTaskId}:stop`,
-    sourceRevision: backgroundWorkStopRevision(status),
-    occurredAt,
-    position: previous.interaction.position,
-    workTaskId,
-    ...(previous.correlation.toolCallId ? { toolCallId:previous.correlation.toolCallId } : {}),
-    status
-  };
-}
-
-function backgroundWorkStopRevision(status: TaskBackgroundWorkStopResult["state"]): number {
-  if (status === "running") return 1;
-  if (status === "cancelling") return 2;
-  return 3;
-}
-
-function activeTurnIdentity(state: BotifiedRuntimeStateResult, task: PersistedAgentTask): string {
-  for (const item of state.activeItems ?? []) {
-    if (!isUnknownRecord(item) || item.type !== "cycle" || item.status !== "running") continue;
-    const id = stringValue(item.id);
-    if (id) return id;
-  }
-  return state.timelineCursor ?? requireCurrentRunId(task);
 }
 
 function queuedMessage(message: PersistedTaskMessage): TaskQueuedMessage {
@@ -3230,7 +3375,7 @@ function deliveryRequestHash(prompt: string): string {
 }
 
 function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string {
-  return `http://${sandboxServiceNameForTask(input.taskId)}.${input.namespace}.svc.cluster.local:${input.port}`;
+  return `http://${input.serviceName??sandboxServiceNameForTask(input.taskId)}.${input.namespace}.svc.cluster.local:${input.port}`;
 }
 
 function defaultBotifiedBrokerBaseUrlForTask(input: BotifiedBrokerAddressInput): string {

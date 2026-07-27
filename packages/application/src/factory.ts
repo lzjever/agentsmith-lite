@@ -48,6 +48,7 @@ export interface CreateApplicationServicesInput {
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   taskDeliveryLeaseMs?: number;
+  taskControlLeaseMs?: number;
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
 }
@@ -97,6 +98,7 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     sandboxLifecycle,
     ...(input.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: input.sandboxNamespaceLimit } : {}),
     ...(input.taskDeliveryLeaseMs !== undefined ? { deliveryLeaseMs: input.taskDeliveryLeaseMs } : {}),
+    ...(input.taskControlLeaseMs !== undefined ? { controlLeaseMs: input.taskControlLeaseMs } : {}),
     ...(input.taskRetryDelayMs !== undefined ? { retryDelayMs: input.taskRetryDelayMs } : {}),
     contexts,
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),

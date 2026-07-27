@@ -807,6 +807,8 @@ export interface ProductStore {
   beginTaskDeletion(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<SandboxGuardedDeletionResult<PersistedAgentTask>>;
   purgeDeletedTaskData(taskId: string, idempotency?: CompleteTaskIdempotencyInput): Promise<boolean>;
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
+  beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>;
+  listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>;
   findTaskIdempotency(input: TaskIdempotencyLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   findTaskIdempotencyByResource(input: TaskIdempotencyResourceLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   findFileDeletionOperation(owner: FileDeletionOperationOwner): Promise<FileDeletionOperationState | null>;
@@ -1096,6 +1098,33 @@ export interface ClaimedTaskIdempotencyOperation extends TaskIdempotencyScope {
   resourceId: string;
   claimToken: string;
 }
+
+export interface TaskControlCommandEnvelope {
+  taskId:string;
+  expectedRunId:string;
+  interactionId:string|null;
+  downstreamCommandKey:string;
+  downstreamTargetId:string;
+}
+
+export interface BeginTaskControlCommandInput {
+  taskId:string;
+  expectedRunId:string;
+  interactionId:string|null;
+  downstreamCommandKey:string;
+  downstreamTargetId:string|null;
+  idempotency:BeginTaskIdempotencyInput&{operation:"abort-turn"|"work-stop"};
+}
+
+export interface InProgressTaskControlCommand extends TaskControlCommandEnvelope, ClaimedTaskIdempotencyOperation {
+  operation:"abort-turn"|"work-stop";
+}
+
+export type BeginTaskControlCommandResult =
+  | {kind:"claimed";command:InProgressTaskControlCommand}
+  | {kind:"in_progress";command:TaskControlCommandEnvelope}
+  | {kind:"replay";responseStatus:number;responseBody:unknown}
+  | {kind:"hash_mismatch"|"target_conflict"|"interaction_not_found"|"target_not_stoppable"};
 
 export type TaskIdempotencyBeginResult =
   | { kind: "claimed"; resourceId: string; claimToken: string }

@@ -12,8 +12,8 @@ export interface BotifiedRuntimeHttpClient {
   ): Promise<BotifiedTimelineReadResult>;
   uploadFile(baseUrl: string, serviceKey: string, file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult>;
   downloadFile(baseUrl: string, serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult>;
-  abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult>;
-  stopBackgroundTask?(baseUrl: string, serviceKey: string, taskId: string): Promise<BotifiedBackgroundTaskStopResult>;
+  abort(baseUrl: string, serviceKey: string, input: BotifiedAbortInput): Promise<BotifiedAbortResult>;
+  stopBackgroundTask(baseUrl: string, serviceKey: string, input: BotifiedBackgroundTaskStopInput): Promise<BotifiedBackgroundTaskStopResult>;
   streamLlmTextPreview?(
     baseUrl: string,
     serviceKey: string,
@@ -53,6 +53,7 @@ export interface BotifiedRuntimeStateResult {
   snapshot: unknown;
   sessionId?: string;
   state?: string;
+  turnId?: string;
   timelineCursor?: string;
   activeItems?: unknown[];
 }
@@ -87,9 +88,17 @@ export interface BotifiedTimelineGapResult {
   historyBoundary: "expired";
 }
 
+export type BotifiedControlOutcome = "accepted" | "completed" | "already_terminal" | "conflict";
+
+export interface BotifiedBackgroundTaskStopInput {
+  commandKey: string;
+  expectedTaskId: string;
+}
+
 export interface BotifiedBackgroundTaskStopResult {
+  commandKey: string;
   taskId: string;
-  state: "running" | "cancelling" | "completed" | "failed" | "timed_out" | "cancelled" | "lost";
+  outcome: BotifiedControlOutcome;
 }
 
 export interface BotifiedLlmTextPreviewOptions {
@@ -134,10 +143,15 @@ export interface BotifiedDownloadFileResult {
   sha256?: string;
 }
 
+export interface BotifiedAbortInput {
+  commandKey: string;
+  expectedTurnId: string;
+}
+
 export interface BotifiedAbortResult {
-  aborted: boolean;
-  queueLength?: number;
-  state?: unknown;
+  commandKey: string;
+  turnId: string;
+  outcome: BotifiedControlOutcome;
 }
 
 export type BotifiedFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -214,6 +228,7 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     };
     const sessionId = stringField(record, "session_id");
     const state = stringField(record, "state");
+    const turnId = stringField(record, "turn_id");
     const timelineCursor = stringField(record, "timeline_cursor");
     const activeItems = arrayFieldOrUndefined(record, "active_items");
     if (sessionId !== undefined) {
@@ -221,6 +236,9 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     }
     if (state !== undefined) {
       result.state = state;
+    }
+    if (turnId !== undefined) {
+      result.turnId = turnId;
     }
     if (timelineCursor !== undefined) {
       result.timelineCursor = timelineCursor;
@@ -318,47 +336,32 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return result;
   }
 
-  async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {
-    const body = await this.requestJson(baseUrl, "/v1/abort", {
-      method: "POST",
-      serviceKey
+  async abort(baseUrl: string, serviceKey: string, input: BotifiedAbortInput): Promise<BotifiedAbortResult> {
+    const { status, body } = await this.requestExactControl(baseUrl, "/v1/abort", serviceKey, {
+      command_key:input.commandKey,
+      expected_turn_id:input.expectedTurnId
     });
-    const record = asRecord(body);
-    const result: BotifiedAbortResult = {
-      aborted: record?.ok === true
-    };
-    const queueLength = numberField(record, "queue_length");
-    if (queueLength !== undefined) {
-      result.queueLength = queueLength;
+    const receipt=exactAbortReceipt(status,body);
+    if(receipt.commandKey!==input.commandKey||receipt.turnId!==input.expectedTurnId){
+      throw invalidControlReceipt("invalid_abort_response","Botified abort response identity did not match the request",status,body);
     }
-    if (record !== undefined && "state" in record) {
-      result.state = record.state;
-    }
-    return result;
+    return receipt;
   }
 
   async stopBackgroundTask(
     baseUrl: string,
     serviceKey: string,
-    taskId: string
+    input: BotifiedBackgroundTaskStopInput
   ): Promise<BotifiedBackgroundTaskStopResult> {
-    const body = await this.requestJson(baseUrl, `/v1/background-tasks/${encodeURIComponent(taskId)}/stop`, {
-      method: "POST",
-      serviceKey
+    const { status, body } = await this.requestExactControl(baseUrl, "/v1/tasks/stop", serviceKey, {
+      command_key:input.commandKey,
+      expected_task_id:input.expectedTaskId
     });
-    const record = asRecord(body);
-    const responseTaskId = stringField(record, "task_id");
-    const state = backgroundTaskStateField(record, "state");
-    if (record?.ok !== true || responseTaskId === undefined || state === undefined) {
-      throw new BotifiedHttpError({
-        status: 200,
-        code: "invalid_background_task_stop_response",
-        message: "Botified background task stop response was invalid",
-        retryable: true,
-        responseBody: body
-      });
+    const receipt=exactBackgroundStopReceipt(status,body);
+    if(receipt.commandKey!==input.commandKey||receipt.taskId!==input.expectedTaskId){
+      throw invalidControlReceipt("invalid_background_task_stop_response","Botified background task stop response identity did not match the request",status,body);
     }
-    return { taskId: responseTaskId, state };
+    return receipt;
   }
 
   async *streamLlmTextPreview(
@@ -462,6 +465,24 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return body;
   }
 
+  private async requestExactControl(
+    baseUrl:string,
+    path:string,
+    serviceKey:string,
+    body:Record<string,string>
+  ):Promise<{status:number;body:unknown}>{
+    const response=await this.#fetchImpl(buildUrl(baseUrl,path),{
+      method:"POST",
+      headers:authHeaders(serviceKey,{"content-type":"application/json"}),
+      body:JSON.stringify(body),
+      signal:AbortSignal.timeout(this.#requestTimeoutMs)
+    });
+    const responseBody=await readJsonBody(response);
+    if(![200,202,409].includes(response.status))throw this.httpError(response,responseBody);
+    if(response.status===409&&asRecord(responseBody)?.error!==undefined)throw this.httpError(response,responseBody);
+    return{status:response.status,body:responseBody};
+  }
+
   private timelineOkResult(response: Response, text: string): BotifiedTimelineOkResult {
     const result: BotifiedTimelineOkResult = {
       status: "ok",
@@ -562,12 +583,12 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { bytes: new Uint8Array(), sizeBytes: 0 };
   }
 
-  async abort(): Promise<BotifiedAbortResult> {
-    return { aborted: true };
+  async abort(_baseUrl:string,_serviceKey:string,input:BotifiedAbortInput): Promise<BotifiedAbortResult> {
+    return { commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:"completed" };
   }
 
-  async stopBackgroundTask(_baseUrl: string, _serviceKey: string, taskId: string): Promise<BotifiedBackgroundTaskStopResult> {
-    return { taskId, state: "cancelled" };
+  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:BotifiedBackgroundTaskStopInput):Promise<BotifiedBackgroundTaskStopResult>{
+    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:"completed"};
   }
 
   async *streamLlmTextPreview(): AsyncIterable<BotifiedLlmTextPreviewFrame> {}
@@ -615,10 +636,51 @@ function llmTextPreviewPath(options: BotifiedLlmTextPreviewOptions): string {
   return query ? `/v1/llm-text-preview?${query}` : "/v1/llm-text-preview";
 }
 
-function authHeaders(serviceKey: string): Headers {
-  const headers = new Headers();
+function authHeaders(serviceKey:string,initial?:HeadersInit):Headers {
+  const headers = new Headers(initial);
   headers.set("authorization", `Bearer ${serviceKey}`);
   return headers;
+}
+
+function exactAbortReceipt(status:number,body:unknown):BotifiedAbortResult{
+  const record=asRecord(body);
+  const commandKey=stringField(record,"command_key");
+  const turnId=stringField(record,"turn_id");
+  const outcome=controlOutcomeField(record,"outcome");
+  if(!record||Object.keys(record).sort().join(",")!=="command_key,outcome,turn_id"||
+    !commandKey||!turnId||!outcome||!controlStatusMatches(status,outcome)){
+    throw invalidControlReceipt("invalid_abort_response","Botified abort response was invalid",status,body);
+  }
+  return{commandKey,turnId,outcome};
+}
+
+function exactBackgroundStopReceipt(status:number,body:unknown):BotifiedBackgroundTaskStopResult{
+  const record=asRecord(body);
+  const commandKey=stringField(record,"command_key");
+  const taskId=stringField(record,"task_id");
+  const outcome=controlOutcomeField(record,"outcome");
+  if(!record||Object.keys(record).sort().join(",")!=="command_key,outcome,task_id"||
+    !commandKey||!taskId||!outcome||!controlStatusMatches(status,outcome)){
+    throw invalidControlReceipt("invalid_background_task_stop_response","Botified background task stop response was invalid",status,body);
+  }
+  return{commandKey,taskId,outcome};
+}
+
+function controlOutcomeField(record:Record<string,unknown>|undefined,key:string):BotifiedControlOutcome|undefined{
+  const value=stringField(record,key);
+  return value&&["accepted","completed","already_terminal","conflict"].includes(value)
+    ?value as BotifiedControlOutcome
+    :undefined;
+}
+
+function controlStatusMatches(status:number,outcome:BotifiedControlOutcome):boolean{
+  return outcome==="accepted"?status===202
+    :outcome==="conflict"?status===409
+    :status===200;
+}
+
+function invalidControlReceipt(code:string,message:string,status:number,body:unknown):BotifiedHttpError{
+  return new BotifiedHttpError({status,code,message,retryable:true,responseBody:body});
 }
 
 function fileBlob(file: BotifiedUploadFileInput): Blob {
@@ -860,17 +922,6 @@ function numberField(record: Record<string, unknown> | undefined, key: string): 
 function boolField(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
   const value = record?.[key];
   return typeof value === "boolean" ? value : undefined;
-}
-
-function backgroundTaskStateField(
-  record: Record<string, unknown> | undefined,
-  key: string
-): BotifiedBackgroundTaskStopResult["state"] | undefined {
-  const value = stringField(record, key);
-  return value === "running" || value === "cancelling" || value === "completed" || value === "failed" ||
-    value === "timed_out" || value === "cancelled" || value === "lost"
-    ? value
-    : undefined;
 }
 
 function splitSseEvents(value: string): { events: string[]; remaining: string } {

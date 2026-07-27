@@ -32,7 +32,7 @@ const createIdentity = { userId: "user_1", projectId: "project_1" };
 const messageIdentity = { ...createIdentity, taskId: "task_1" };
 
 describe("Task command session storage", () => {
-  it("restores exact Terminal and Release identities only on the same Task route",()=>{
+  it("restores exact runtime-control identities only on the same Task route",()=>{
     const storage=new MemoryStorage();
     const terminal={
       ...messageIdentity,key:"terminal-key",fingerprint:"terminal-fingerprint",
@@ -45,8 +45,20 @@ describe("Task command session storage", () => {
       createdAt:"2026-07-26T12:01:00.000Z",
       request:{expectedRunId:"run_b"}
     };
+    const abort={
+      ...messageIdentity,key:"abort-key",fingerprint:"abort-fingerprint",
+      createdAt:"2026-07-26T12:02:00.000Z",
+      request:{expectedRunId:"run_b",turnId:"turn_1"}
+    };
+    const stop={
+      ...messageIdentity,key:"stop-key",fingerprint:"stop-fingerprint",
+      createdAt:"2026-07-26T12:03:00.000Z",
+      request:{expectedRunId:"run_b",interactionId:"interaction_1"}
+    };
     assert.equal(writeTaskCommandMetadata(storage,"task-terminal-start",terminal),"saved");
     assert.equal(writeTaskCommandMetadata(storage,"task-sandbox-release",release),"saved");
+    assert.equal(writeTaskCommandMetadata(storage,"task-turn-abort",abort),"saved");
+    assert.equal(writeTaskCommandMetadata(storage,"task-work-stop",stop),"saved");
     assert.deepEqual(
       taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-terminal-start",messageIdentity)),
       {status:"restore",metadata:terminal}
@@ -54,6 +66,14 @@ describe("Task command session storage", () => {
     assert.deepEqual(
       taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-sandbox-release",messageIdentity)),
       {status:"restore",metadata:release}
+    );
+    assert.deepEqual(
+      taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-turn-abort",messageIdentity)),
+      {status:"restore",metadata:abort}
+    );
+    assert.deepEqual(
+      taskRuntimeCommandRemountDecision(readTaskCommandMetadata(storage,"task-work-stop",messageIdentity)),
+      {status:"restore",metadata:stop}
     );
     assert.equal(
       readTaskCommandMetadata(storage,"task-terminal-start",{...messageIdentity,taskId:"task_2"}).status,

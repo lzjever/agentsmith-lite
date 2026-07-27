@@ -339,7 +339,7 @@ describe("task interactions API", () => {
     assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
   });
 
-  it("resolves background work stop through server-side interaction correlation", async () => {
+  it("freezes exact background work stop through server-side interaction correlation", async () => {
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
     api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
@@ -347,12 +347,472 @@ describe("task interactions API", () => {
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"background", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
     await makeTaskRunActive(store, task, "http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
     const interaction = { id:"interaction-work", revision:1, taskId:task.id, kind:"background_task" as const, title:"Background task", body:null, contentMode:"none" as const, position:1, occurredAt:task.createdAt, updatedAt:task.createdAt, executionStatus:"running" as const, deliveryStatus:null, label:"Compile", workSummary:null, result:null, error:null, detailsOmitted:false, canStop:true };
-    await store.persistTaskInteractionMutation({ taskId:task.id, changes:[{ sourceKind:"botified", sourceId:"evt_test_1", sourceRevision:0, interaction, correlation:{workTaskId:"botified-work-1"} }] });
+    await store.persistTaskInteractionMutation({ taskId:task.id, changes:[{ sourceKind:"botified", sourceId:"evt_test_1", sourceRevision:0, interaction, correlation:{workTaskId:"t_0123456789abcdef"} }] });
 
-    const stopped = await auth.requestJson("POST", `/api/v1/tasks/${task.id}/work/${interaction.id}/stop`, {});
-    assert.equal(stopped.workTaskId, "botified-work-1");
-    assert.deepEqual(botified.stopCalls, ["botified-work-1"]);
+    const stopped = await auth.requestJson("POST", `/api/v1/tasks/${task.id}/work/${interaction.id}/stop`, {
+      expectedRunId:current.currentRunId,
+      interactionId:interaction.id
+    });
+    assert.equal(stopped.outcome,"completed");
+    assert.equal(stopped.keyDisposition,"retire");
+    assert.equal(stopped.interactionId,interaction.id);
+    assert.equal("workTaskId" in stopped,false);
+    assert.deepEqual(botified.stopCalls,[{
+      commandKey:botified.stopCalls[0]?.commandKey,
+      expectedTaskId:"t_0123456789abcdef"
+    }]);
+  });
+
+  it("aborts only the projected canonical turn on the frozen run after endpoint drift", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"abort exact turn", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://frozen-botified.internal");
+    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
+    const run = await store.sandboxRuns.get(current.currentRunId); assert.ok(run);
+    const projection = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
+    assert.deepEqual(projection.presentation.currentTurn, { state:"running", turnId:"turn-current" });
+    assert.equal(projection.presentation.capabilities.abortTurn, true);
+
+    const endpoint = await store.findEndpoint(task.endpointId); assert.ok(endpoint);
+    await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
+    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"exact-abort-product-key"};
+    const abortResponse=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",headers,body:JSON.stringify({
+        expectedRunId:current.currentRunId,
+        turnId:projection.presentation.currentTurn.turnId
+      })
+    });
+    assert.equal(abortResponse.status,200);
+    const aborted=await abortResponse.json() as Record<string,unknown>;
+
+    assert.equal(aborted.outcome,"completed");
+    assert.equal(aborted.keyDisposition,"retire");
+    assert.equal(aborted.runId,current.currentRunId);
+    assert.equal(aborted.turnId,"turn-current");
+    assert.deepEqual(botified.abortCalls,[{
+      baseUrl:`http://${run.resourceNames.service}.${run.namespace}.svc.cluster.local:${run.botifiedPort}`,
+      serviceKey:task.id,
+      commandKey:botified.abortCalls[0]?.commandKey,
+      expectedTurnId:"turn-current"
+    }]);
+
+    const changedPayload=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",headers,body:JSON.stringify({
+        expectedRunId:current.currentRunId,
+        turnId:"turn-must-not-rebind"
+      })
+    });
+    assert.equal(changedPayload.status,409);
+    assert.deepEqual(await changedPayload.json(),{
+      outcome:"rejected_before_acceptance",
+      keyDisposition:"retain",
+      error:"Idempotency-Key was already used with a different request",
+      code:"idempotency_payload_mismatch"
+    });
+    assert.equal(botified.abortCalls.length,1);
+
+    const staleRun=await auth.request("POST", `/api/v1/tasks/${task.id}/turn/abort`, {
+      expectedRunId:"run-stale",
+      turnId:"turn-current"
+    });
+    assert.equal(staleRun.status,409);
+    const staleReceipt=await staleRun.json();
+    assert.equal(staleReceipt.outcome,"rejected_before_acceptance");
+    assert.equal(staleReceipt.keyDisposition,"retire");
+    assert.equal(staleReceipt.code,"task_run_target_conflict");
+    assert.equal(botified.abortCalls.length,1);
+  });
+
+  it("does not expose Abort capability without an official canonical turn id", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    botified.stateTurnId = undefined;
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"legacy state", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
+
+    const projection = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
+    assert.deepEqual(projection.presentation.currentTurn, { state:"running", turnId:null });
+    assert.equal(projection.presentation.capabilities.abortTurn, false);
+  });
+
+  it("maps an exact Botified Abort conflict to a terminal product receipt", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    botified.abortOutcome = "conflict";
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"abort conflict", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
+    const task = await store.findTask(created.task.id as string); assert.ok(task);
+    await makeTaskRunActive(store, task, "http://botified.internal");
+    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
+
+    const response = await auth.request("POST", `/api/v1/tasks/${task.id}/turn/abort`, {
+      expectedRunId:current.currentRunId,
+      turnId:"turn-current"
+    });
+    assert.equal(response.status,409);
+    const receipt = await response.json();
+    assert.equal(receipt.outcome,"completed");
+    assert.equal(receipt.result,"conflict");
+    assert.equal(receipt.keyDisposition,"retire");
+    assert.equal(receipt.turnId,"turn-current");
+  });
+
+  it("recovers a durable exact Abort through the existing runtime sync owner", async () => {
+    const store = createLocalInMemoryProductStore();
+    const botified = new FakeBotifiedClient([]);
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, runtimeTickIntervalMs:60_000, store });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"recover abort", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
+    const task = await store.findTask(created.task.id as string); assert.ok(task?.createdByUserId);
+    await makeTaskRunActive(store, task, "http://botified.internal");
+    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
+    const timestamp = new Date(Date.now()-120_000).toISOString();
+    const claimed = await store.beginTaskControlCommand({
+      taskId:task.id,
+      expectedRunId:current.currentRunId,
+      interactionId:null,
+      downstreamCommandKey:"botified-abort-recovery-key",
+      downstreamTargetId:"turn-recovery",
+      idempotency:{
+        actorId:task.createdByUserId,
+        projectId:task.projectId,
+        operation:"abort-turn",
+        key:"product-abort-recovery-key",
+        requestHash:"product-abort-recovery-hash",
+        resourceId:task.id,
+        claimToken:"crashed-control-owner",
+        now:timestamp,
+        leaseExpiresAt:new Date(Date.now()-60_000).toISOString()
+      }
+    });
+    assert.equal(claimed.kind,"claimed");
+
+    const background=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    await background.tasks.syncActiveTasksOnce();
+
+    assert.deepEqual(botified.abortCalls,[{
+      baseUrl:botified.abortCalls[0]?.baseUrl,
+      serviceKey:task.id,
+      commandKey:"botified-abort-recovery-key",
+      expectedTurnId:"turn-recovery"
+    }]);
+    const replay=await store.beginTaskControlCommand({
+      taskId:task.id,
+      expectedRunId:current.currentRunId,
+      interactionId:null,
+      downstreamCommandKey:"must-not-replace",
+      downstreamTargetId:"turn-recovery",
+      idempotency:{
+        actorId:task.createdByUserId,
+        projectId:task.projectId,
+        operation:"abort-turn",
+        key:"product-abort-recovery-key",
+        requestHash:"product-abort-recovery-hash",
+        resourceId:task.id,
+        claimToken:"must-not-claim",
+        now:new Date().toISOString(),
+        leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
+      }
+    });
+    assert.equal(replay.kind,"replay");
+    assert.deepEqual(replay.kind==="replay"?replay.responseBody:null,{
+      outcome:"completed",
+      keyDisposition:"retire",
+      taskId:task.id,
+      runId:current.currentRunId,
+      turnId:"turn-recovery",
+      result:"completed"
+    });
+  });
+
+  it("recovers unknown Abort and Stop POSTs with only their frozen command keys and targets",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      taskControlLeaseMs:5,runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"recover exact controls",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task?.createdByUserId);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const controlHeaders=(key:string)=>({
+      "content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":key
+    });
+    const background=()=>createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,taskControlLeaseMs:5,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+
+    const abortBody=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
+    botified.abortError=new TypeError("response lost after POST");
+    const unknownAbort=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",headers:controlHeaders("unknown-abort-key"),body:abortBody
+    });
+    assert.equal(unknownAbort.status,409);
+    assert.equal((await unknownAbort.json()).code,"task_control_outcome_unknown");
+    assert.equal(botified.abortCalls.length,1);
+    const firstAbort=botified.abortCalls[0]!;
+    botified.abortError=undefined;
+    await new Promise((resolve)=>setTimeout(resolve,10));
+    await background().tasks.syncActiveTasksOnce();
+    assert.equal(botified.abortCalls.length,2);
+    assert.deepEqual(botified.abortCalls[1],firstAbort);
+    const abortReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",headers:controlHeaders("unknown-abort-key"),body:abortBody
+    });
+    assert.equal(abortReplay.status,200);
+    assert.equal(botified.abortCalls.length,2);
+
+    const interaction={
+      id:"interaction-stop-recovery",revision:1,taskId:task.id,kind:"background_task" as const,
+      title:"Background task",body:null,contentMode:"none" as const,position:1,
+      occurredAt:task.createdAt,updatedAt:task.createdAt,executionStatus:"running" as const,
+      deliveryStatus:null,label:"Compile",workSummary:null,result:null,error:null,
+      detailsOmitted:false,canStop:true
+    };
+    await store.persistTaskInteractionMutation({
+      taskId:task.id,
+      changes:[{sourceKind:"botified",sourceId:"stop-recovery-event",sourceRevision:0,interaction,correlation:{workTaskId:"t_0123456789abcdef"}}]
+    });
+    const stopBody=JSON.stringify({expectedRunId:current.currentRunId,interactionId:interaction.id});
+    botified.stopError=new TypeError("response lost after POST");
+    const unknownStop=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/work/${interaction.id}/stop`,{
+      method:"POST",headers:controlHeaders("unknown-stop-key"),body:stopBody
+    });
+    assert.equal(unknownStop.status,409);
+    assert.equal((await unknownStop.json()).code,"task_control_outcome_unknown");
+    assert.equal(botified.stopCalls.length,1);
+    const firstStop=botified.stopCalls[0]!;
+    botified.stopError=undefined;
+    await new Promise((resolve)=>setTimeout(resolve,10));
+    await background().tasks.syncActiveTasksOnce();
+    assert.equal(botified.stopCalls.length,2);
+    assert.deepEqual(botified.stopCalls[1],firstStop);
+    const stopReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/work/${interaction.id}/stop`,{
+      method:"POST",headers:controlHeaders("unknown-stop-key"),body:stopBody
+    });
+    assert.equal(stopReplay.status,200);
+    assert.equal(botified.stopCalls.length,2);
+  });
+
+  it("replays an accepted exact control until Botified completes the same command",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    botified.abortOutcomes=["accepted","completed"];
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      taskControlLeaseMs:5,runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"accepted exact control",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"accepted-abort-key"};
+    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
+
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body})).status,202);
+    const first=botified.abortCalls[0]!;
+    await new Promise((resolve)=>setTimeout(resolve,10));
+    const recovered=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,taskControlLeaseMs:5,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    await recovered.tasks.syncActiveTasksOnce();
+    assert.deepEqual(botified.abortCalls,[first,first]);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body})).status,200);
+    assert.equal(botified.abortCalls.length,2);
+  });
+
+  it("release supersedes a pending exact control before restart can call Botified",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"release pending control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task?.createdByUserId);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const expired=new Date(Date.now()-60_000).toISOString();
+    assert.equal((await store.beginTaskControlCommand({
+      taskId:task.id,expectedRunId:current.currentRunId,interactionId:null,
+      downstreamCommandKey:"release-frozen-command",downstreamTargetId:"turn-current",
+      idempotency:{
+        actorId:task.createdByUserId,projectId:task.projectId,operation:"abort-turn",
+        key:"release-pending-product",requestHash:"release-pending-hash",resourceId:task.id,
+        claimToken:"release-pending-claim",now:expired,leaseExpiresAt:expired
+      }
+    })).kind,"claimed");
+
+    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
+      expectedRunId:current.currentRunId
+    })).status,200);
+    const recovered=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    await recovered.tasks.syncActiveTasksOnce();
+    assert.deepEqual(botified.abortCalls,[]);
+    const replay=await store.findTaskIdempotency({
+      actorId:task.createdByUserId,projectId:task.projectId,operation:"abort-turn",
+      key:"release-pending-product",requestHash:"release-pending-hash"
+    });
+    assert.equal(replay?.kind,"replay");
+    if(replay?.kind==="replay"){
+      assert.equal(replay.responseStatus,409);
+      assert.equal((replay.responseBody as {code:string}).code,"task_control_superseded_by_release");
+    }
+  });
+
+  it("release wins after an exact control POST starts and its completion cannot overwrite authority",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    let unblock!:()=>void;
+    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"release in-flight control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",
+      headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"in-flight-abort"},
+      body:JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"})
+    });
+    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
+    assert.equal(botified.abortCalls.length,1);
+    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
+      expectedRunId:current.currentRunId
+    })).status,200);
+    unblock();
+    const response=await abortResponse;
+    assert.equal(response.status,409);
+    assert.deepEqual(await response.json(),{
+      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
+      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
+    });
+  });
+
+  it("returns the superseded receipt when Botified accepts after Release commits",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    botified.abortOutcome="accepted";
+    let unblock!:()=>void;
+    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"late accepted control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"late-accepted-abort"};
+    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
+    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
+    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
+    assert.equal(botified.abortCalls.length,1);
+    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
+      expectedRunId:current.currentRunId
+    })).status,200);
+    unblock();
+
+    const expected={
+      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
+      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
+    };
+    const response=await abortResponse;
+    assert.equal(response.status,409);
+    assert.deepEqual(await response.json(),expected);
+    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
+    assert.equal(replay.status,409);
+    assert.deepEqual(await replay.json(),expected);
+    assert.equal(botified.abortCalls.length,1);
+  });
+
+  it("returns the superseded receipt when Botified fails after Release commits",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    botified.abortError=new TypeError("late network failure");
+    let unblock!:()=>void;
+    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"late failed control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"late-failed-abort"};
+    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
+    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
+    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
+    assert.equal(botified.abortCalls.length,1);
+    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
+      expectedRunId:current.currentRunId
+    })).status,200);
+    unblock();
+
+    const expected={
+      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
+      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
+    };
+    const response=await abortResponse;
+    assert.equal(response.status,409);
+    assert.deepEqual(await response.json(),expected);
+    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
+    assert.equal(replay.status,409);
+    assert.deepEqual(await replay.json(),expected);
+    assert.equal(botified.abortCalls.length,1);
   });
 
   it("rejects a second interactive terminal and releases occupancy after an abnormal close", async () => {
@@ -574,7 +1034,7 @@ describe("task interactions API", () => {
     await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
     const endpointDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(endpointDisabled.items.length,initial.items.length);
-    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
+    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:true,stopWork:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
     const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
@@ -590,6 +1050,8 @@ describe("task interactions API", () => {
     assert.equal(credentialDisabled.items.length,initial.items.length);
     assert.equal(credentialDisabled.presentation.capabilities.sendMessage,false);
     assert.equal(credentialDisabled.presentation.capabilities.openTerminal,true);
+    assert.equal(credentialDisabled.presentation.capabilities.abortTurn,true);
+    assert.equal(credentialDisabled.presentation.capabilities.stopWork,true);
   });
 
   it("replays the fixed accepted message receipt after background and capability changes",async()=>{
@@ -2182,15 +2644,20 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly readStateCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
   readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
-  readonly abortCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
-  readonly stopCalls: string[] = [];
+  readonly abortCalls:Array<{baseUrl:string;serviceKey:string;commandKey:string;expectedTurnId:string}>=[];
+  readonly stopCalls:Array<{commandKey:string;expectedTaskId:string}>=[];
   readonly downloads: Record<string, Uint8Array> = {};
   abortError: unknown;
+  stopError: unknown;
   abortWait: Promise<void> | undefined;
   previewFailure: unknown;
   healthFailure: unknown;
   previewSignal: AbortSignal | undefined;
   previewWaitForAbort = false;
+  stateTurnId: string | undefined = "turn-current";
+  abortOutcome: BotifiedAbortResult["outcome"] = "completed";
+  abortOutcomes:BotifiedAbortResult["outcome"][]=[];
+  stopOutcomes:BotifiedAbortResult["outcome"][]=[];
   timelineSessionId: string | undefined;
   stateSessionId: string | undefined;
   legacyPayloadSha256: string | undefined;
@@ -2231,7 +2698,12 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   async readState(baseUrl: string, serviceKey: string) {
     this.readStateCalls.push({ baseUrl, serviceKey });
     const sessionId=this.stateSessionId??serviceKey;
-    return { sessionId, snapshot: { session_id: sessionId }, state: "running" };
+    return{
+      sessionId,
+      snapshot:this.stateTurnId===undefined?{session_id:sessionId}:{session_id:sessionId,turn_id:this.stateTurnId},
+      state:"running" as const,
+      ...(this.stateTurnId===undefined?{}:{turnId:this.stateTurnId})
+    };
   }
 
   async readTimeline(baseUrl: string, serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
@@ -2263,16 +2735,20 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     };
   }
 
-  async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {
-    this.abortCalls.push({ baseUrl, serviceKey });
+  async abort(baseUrl:string,serviceKey:string,input:{commandKey:string;expectedTurnId:string}):Promise<BotifiedAbortResult>{
+    this.abortCalls.push({baseUrl,serviceKey,...input});
+    await this.abortWait;
     if (this.abortError) {
       throw this.abortError;
     }
-    await this.abortWait;
-    return { aborted: true };
+    return{commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:this.abortOutcomes.shift()??this.abortOutcome};
   }
 
-  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,taskId:string){this.stopCalls.push(taskId);return{taskId,state:"cancelling" as const};}
+  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTaskId:string}){
+    this.stopCalls.push(structuredClone(input));
+    if(this.stopError)throw this.stopError;
+    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:this.stopOutcomes.shift()??"completed" as const};
+  }
 
   async *streamLlmTextPreview(_baseUrl:string,_serviceKey:string,options:BotifiedLlmTextPreviewOptions={}) {
     this.previewSignal = options.signal;

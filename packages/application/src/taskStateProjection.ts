@@ -11,6 +11,7 @@ export function projectTaskState(input: {
   run: Pick<PersistedSandboxRunState, "runId" | "state" | "failureCode" | "lastCleanupError"> | null;
   unavailableRunId?: string | null;
   turn: TaskCurrentTurnProjection["state"];
+  turnId?:string|null;
 }): TaskStateProjection {
   const cause=input.run?.lastCleanupError
     ? failureCause("cleanup_failed")
@@ -19,7 +20,7 @@ export function projectTaskState(input: {
       : null;
   return {
     lifecycle:{ state:input.archivedAt ? "archived" : "active" },
-    currentTurn:{ state:input.turn },
+    currentTurn:{ state:input.turn,turnId:input.turnId??null },
     sandboxState:input.run ? {
       state:input.run.state,
       runId:input.run.runId,

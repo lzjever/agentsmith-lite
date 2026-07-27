@@ -49,6 +49,7 @@ interface CommonApiServerOptions {
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   taskDeliveryLeaseMs?: number;
+  taskControlLeaseMs?: number;
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
   terminalAccessRecheckMs?: number;
@@ -124,6 +125,7 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
     ...(options.taskDeliveryLeaseMs !== undefined ? { taskDeliveryLeaseMs: options.taskDeliveryLeaseMs } : {}),
+    ...(options.taskControlLeaseMs !== undefined ? { taskControlLeaseMs: options.taskControlLeaseMs } : {}),
     ...(options.taskRetryDelayMs !== undefined ? { taskRetryDelayMs: options.taskRetryDelayMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
@@ -774,8 +776,24 @@ async function routeApi(
     }
     if (segments[4] === "interactions" && !segments[5] && method === "GET") { assertOnlySearchParams(url,["cursor","limit"]);return sendJson(res,200,await services.tasks.taskInteractions(user.id,taskId,{...(url.searchParams.get("cursor")?{cursor:url.searchParams.get("cursor")!}:{}),...(url.searchParams.get("limit")?{limit:asPositiveQueryInteger(url.searchParams.get("limit")!,"limit")}:{})})); }
     if (segments[4] === "interactions" && segments[5] === "stream" && method === "GET") { assertOnlySearchParams(url,["cursor"]);return sendTaskInteractionStream(req,res,services,user.id,taskId,url); }
-    if (segments[4] === "turn" && segments[5] === "abort" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.abortTaskTurn(user.id,taskId,requireIdempotencyKey(req))); }
-    if (segments[4] === "work" && segments[5] && segments[6] === "stop" && method === "POST") { assertOnlySearchParams(url,[]);const body=await readJson(req);assertOnlyKeys(body,[]);return sendJson(res,200,await services.tasks.stopTaskBackgroundWork(user.id,taskId,segments[5],requireIdempotencyKey(req))); }
+    if(segments[4]==="turn"&&segments[5]==="abort"&&method==="POST"){
+      assertOnlySearchParams(url,[]);
+      const body=await readJson(req);
+      assertOnlyKeys(body,["expectedRunId","turnId"]);
+      return sendTaskRuntimeCommand(res,()=>services.tasks.abortTaskTurn(
+        user.id,taskId,{expectedRunId:asString(body.expectedRunId),turnId:asString(body.turnId)},requireIdempotencyKey(req)
+      ));
+    }
+    if(segments[4]==="work"&&segments[5]&&segments[6]==="stop"&&method==="POST"){
+      assertOnlySearchParams(url,[]);
+      const body=await readJson(req);
+      assertOnlyKeys(body,["expectedRunId","interactionId"]);
+      const interactionId=asString(body.interactionId);
+      if(interactionId!==segments[5])throw new ProductError("Background work interaction target does not match the route",409,"task_control_target_conflict");
+      return sendTaskRuntimeCommand(res,()=>services.tasks.stopTaskBackgroundWork(
+        user.id,taskId,{expectedRunId:asString(body.expectedRunId),interactionId},requireIdempotencyKey(req)
+      ));
+    }
     if (segments[4] === "artifacts" && segments[5] && segments[6] === "download" && method === "GET") {
       try {
         assertOnlySearchParams(url, []);
@@ -1420,11 +1438,22 @@ async function sendTaskMessageCommand(
 
 async function sendTaskRuntimeCommand(
   res:ServerResponse,
-  command:()=>Promise<import("../../contracts/src/api.js").TaskTerminalStartReceipt|import("../../contracts/src/api.js").TaskSandboxReleaseReceipt>
+  command:()=>Promise<
+    import("../../contracts/src/api.js").TaskTerminalStartReceipt|
+    import("../../contracts/src/api.js").TaskSandboxReleaseReceipt|
+    import("../../contracts/src/api.js").TaskTurnAbortReceipt|
+    import("../../contracts/src/api.js").TaskBackgroundWorkStopReceipt
+  >
 ):Promise<void>{
   try{
     const outcome=await command();
-    const status=outcome.outcome==="accepted_in_progress"?202:"error" in outcome?502:200;
+    const status=outcome.outcome==="accepted_in_progress"
+      ?202
+      :"error" in outcome
+        ?502
+        :"result" in outcome&&outcome.result==="conflict"
+          ?409
+          :200;
     return sendJson(res,status,outcome);
   }catch(error){
     return sendRejectedTaskCommand(res,error);

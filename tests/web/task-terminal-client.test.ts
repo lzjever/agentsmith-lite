@@ -107,7 +107,7 @@ function presentation(state:"active"|"released"|"failed"):TaskDetail{
   return{
     task:{id:"task_1",workspaceId:"workspace_1",projectId:"project_1",endpointId:"endpoint_1",fileLibraryId:"library_1",title:"Task",prompt:"Prompt",createdAt:"2026-07-25T00:00:00.000Z",updatedAt:"2026-07-25T00:00:00.000Z"},
     lifecycle:{state:"active"},
-    currentTurn:{state:state==="active"?"running":"ready"},
+    currentTurn:{state:state==="active"?"running":"ready",turnId:state==="active"?"turn_1":null},
     sandboxState:{state,runId:"run_1",cause:state==="failed"?{code:"startup_failed",message:"Startup failed"}:null},
     capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:state==="active",editTask:true,archiveTask:true,deleteTask:true}
   };

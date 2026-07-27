@@ -32,7 +32,8 @@ import {
   readTaskCommandMetadata,
   retireTaskCommandMetadata,
   taskRuntimeCommandRemountDecision,
-  type TaskSandboxReleaseCommandMetadata
+  type TaskSandboxReleaseCommandMetadata,
+  type TaskTurnAbortCommandMetadata
 } from "./task-command-storage";
 import {
   createTerminalIntentState,
@@ -112,6 +113,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const taskLoadVersion = useRef(0);
   const restoredReleaseRoute=useRef<string|null>(null);
+  const restoredAbortRoute=useRef<string|null>(null);
   const artifactsLoadVersion = useRef(0);
   const taskWorkspaceRef = useRef<HTMLDivElement>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -358,20 +360,37 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
     }
   }
 
-  async function abortTaskTurn() {
+  async function abortTaskTurn(restored?:TaskTurnAbortCommandMetadata) {
     const detail = taskPresentationRef.current.presentation;
-    if (!detail?.capabilities.abortTurn || turnAborting) return;
+    if((!restored&&!detail?.capabilities.abortTurn)||turnAborting)return;
+    const expectedRunId=restored?.request.expectedRunId??detail?.sandboxState.runId;
+    const turnId=restored?.request.turnId??detail?.currentTurn.turnId;
+    if(!expectedRunId||!turnId)return;
+    const request={expectedRunId,turnId};
+    const fingerprint=JSON.stringify(request);
+    const identity={userId:currentUser.id,projectId,taskId};
+    if(restored&&restored.fingerprint!==fingerprint)return;
+    if(restored)mutationKeys.restore("task-turn-abort",taskId,restored);
+    const attempt=mutationKeys.fingerprintKey("task-turn-abort",taskId,fingerprint);
     const fence = captureCommandFence();
     setTurnAborting(true);
     try {
-      await apiClient.abortTaskTurn(
-        taskId,
-        mutationKeys.key("task-turn-abort", taskId)
-      );
-      mutationKeys.complete("task-turn-abort", taskId);
+      if(!restored)persistTaskCommandMetadata(taskDraftStorage(),"task-turn-abort",{
+        ...identity,...attempt,request,createdAt:new Date().toISOString()
+      });
+      const outcome=await apiClient.abortTaskTurn(taskId,request,attempt.key);
+      mutationKeys.transition("task-turn-abort",taskId,attempt,outcome);
+      if(outcome.outcome==="outcome_unknown")throw outcome.error;
+      if(outcome.keyDisposition==="retire"){
+        retireTaskCommandMetadata(taskDraftStorage(),"task-turn-abort",identity,attempt);
+        mutationKeys.canonicalAbsorbed("task-turn-abort",taskId,attempt);
+      }
+      if(outcome.outcome==="rejected_before_acceptance")throw taskCommandOutcomeError(outcome);
+      if(outcome.outcome==="completed"&&outcome.result==="conflict"){
+        throw new ApiError(409,"The exact turn is no longer active.",outcome.code);
+      }
       acceptCanonicalMutation("abort", fence);
     } catch (reason) {
-      mutationKeys.completeApiFailure(reason, "task-turn-abort", taskId);
       if (
         reason instanceof ApiError
         && (reason.status === 403 || reason.status === 404 || reason.status === 409)
@@ -381,6 +400,30 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       if (mounted.current) setTurnAborting(false);
     }
   }
+
+  useEffect(()=>{
+    if(!taskPresentation.initialized||!taskPresentation.presentation)return;
+    const route=`${currentUser.id}:${projectId}:${taskId}`;
+    if(restoredAbortRoute.current===route)return;
+    restoredAbortRoute.current=route;
+    const storage=taskDraftStorage(),identity={userId:currentUser.id,projectId,taskId};
+    const decision=taskRuntimeCommandRemountDecision(
+      readTaskCommandMetadata(storage,"task-turn-abort",identity)
+    );
+    if(decision.status==="cleanup"){
+      clearTaskCommandMetadata(storage,"task-turn-abort",identity);
+      mutationKeys.clear("task-turn-abort");
+      return;
+    }
+    if(decision.status!=="restore")return;
+    const metadata=decision.metadata;
+    if(metadata.fingerprint!==JSON.stringify(metadata.request)){
+      clearTaskCommandMetadata(storage,"task-turn-abort",identity);
+      mutationKeys.clear("task-turn-abort");
+      return;
+    }
+    void abortTaskTurn(metadata).catch(()=>undefined);
+  },[currentUser.id,mutationKeys,projectId,taskId,taskPresentation.initialized,taskPresentation.presentation]);
 
   async function releaseSandbox(expectedRunId:string,restored?:TaskSandboxReleaseCommandMetadata) {
     const detail = taskPresentationRef.current.presentation;

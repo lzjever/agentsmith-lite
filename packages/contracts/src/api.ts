@@ -565,7 +565,10 @@ export interface TaskArtifactListPage {
   nextCursor: string | null;
 }
 export interface TaskLifecycleProjection { state: "active" | "archived"; }
-export interface TaskCurrentTurnProjection { state: "ready" | "starting" | "queued" | "running" | "aborting"; }
+export interface TaskCurrentTurnProjection {
+  state: "ready" | "starting" | "queued" | "running" | "aborting";
+  turnId: string | null;
+}
 export type SandboxFailureCode = "startup_failed" | "runtime_unreachable" | "runner_failed" | "cleanup_failed";
 export interface TaskSandboxFailureCause {
   code: SandboxFailureCode;
@@ -758,6 +761,28 @@ export interface TaskSandboxReleaseRequest {
 
 export type TaskSandboxReleaseReceipt =
   | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;presentation:TaskPresentation}
+  | RejectedCommandOutcome;
+
+export interface TaskTurnAbortRequest {
+  expectedRunId:string;
+  turnId:string;
+}
+
+export interface TaskBackgroundWorkStopRequest {
+  expectedRunId:string;
+  interactionId:string;
+}
+
+export type TaskControlFinalResult = "completed" | "already_terminal" | "conflict";
+
+export type TaskTurnAbortReceipt =
+  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string;runId:string;turnId:string}
+  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;turnId:string;result:TaskControlFinalResult;code?:string}
+  | RejectedCommandOutcome;
+
+export type TaskBackgroundWorkStopReceipt =
+  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string;runId:string;interactionId:string}
+  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;interactionId:string;result:TaskControlFinalResult;code?:string}
   | RejectedCommandOutcome;
 
 export interface TaskPresentation extends TaskStateProjection {

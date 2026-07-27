@@ -220,7 +220,7 @@ describe("Botified HTTP client", () => {
     });
   });
 
-  it("reads runtime state with bearer auth and parses the bootstrap cursor", async () => {
+  it("reads runtime state with bearer auth and parses the canonical turn identity", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(String(input), "http://botified.local/v1/state");
       assert.equal(init.method, "GET");
@@ -228,6 +228,7 @@ describe("Botified HTTP client", () => {
       return jsonResponse({
         session_id: "session_1",
         state: "running",
+        turn_id: "turn_1",
         timeline_cursor: "timeline:main:4",
         active_items: [{ id: "service", type: "service_status", status: "running" }]
       });
@@ -237,11 +238,13 @@ describe("Botified HTTP client", () => {
       snapshot: {
         session_id: "session_1",
         state: "running",
+        turn_id: "turn_1",
         timeline_cursor: "timeline:main:4",
         active_items: [{ id: "service", type: "service_status", status: "running" }]
       },
       sessionId: "session_1",
       state: "running",
+      turnId: "turn_1",
       timelineCursor: "timeline:main:4",
       activeItems: [{ id: "service", type: "service_status", status: "running" }]
     });
@@ -314,7 +317,7 @@ describe("Botified HTTP client", () => {
     ]);
   });
 
-  it("streams typed LLM previews and stops background work through separate service calls", async () => {
+  it("streams typed LLM previews and stops exact background work with a durable command key", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
       if (String(input) === "http://botified.local/v1/llm-text-preview?provider_request_id=request_1&cycle_id=cycle_1&input_id=input_1") {
@@ -327,18 +330,17 @@ describe("Botified HTTP client", () => {
         ].join(""), { headers: { "content-type": "text/event-stream" } });
       }
 
-      assert.equal(String(input), "http://botified.local/v1/background-tasks/work%2F1/stop");
+      assert.equal(String(input), "http://botified.local/v1/tasks/stop");
       assert.equal(init.method, "POST");
+      assert.equal(init.body, JSON.stringify({
+        command_key: "stop-command-1",
+        expected_task_id: "work/1"
+      }));
       return jsonResponse({
-        ok: true,
-        kind: "task_cancel",
+        command_key: "stop-command-1",
         task_id: "work/1",
-        state: "cancelling",
-        task: {
-          task_id: "work/1",
-          state: "cancelling"
-        }
-      });
+        outcome: "accepted"
+      }, { status: 202 });
     });
 
     assert.deepEqual(await collect(client.streamLlmTextPreview("http://botified.local", "service-secret", {
@@ -364,13 +366,17 @@ describe("Botified HTTP client", () => {
         delta: "hello"
       }
     ]);
-    assert.deepEqual(await client.stopBackgroundTask("http://botified.local", "service-secret", "work/1"), {
+    assert.deepEqual(await client.stopBackgroundTask("http://botified.local", "service-secret", {
+      commandKey: "stop-command-1",
+      expectedTaskId: "work/1"
+    }), {
+      commandKey: "stop-command-1",
       taskId: "work/1",
-      state: "cancelling"
+      outcome: "accepted"
     });
   });
 
-  it("uploads files and aborts with bearer auth", async () => {
+  it("uploads files and aborts an exact turn with a durable command key", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
 
@@ -385,7 +391,15 @@ describe("Botified HTTP client", () => {
 
       assert.equal(String(input), "http://botified.local/v1/abort");
       assert.equal(init.method, "POST");
-      return jsonResponse({ ok: true, queue_length: 0, state: "stopped" });
+      assert.equal(init.body, JSON.stringify({
+        command_key: "abort-command-1",
+        expected_turn_id: "turn_1"
+      }));
+      return jsonResponse({
+        command_key: "abort-command-1",
+        turn_id: "turn_1",
+        outcome: "completed"
+      });
     });
 
     assert.deepEqual(await client.uploadFile("http://botified.local", "service-secret", {
@@ -395,11 +409,44 @@ describe("Botified HTTP client", () => {
     }), {
       files: [{ file_id: "file_1", filename: "note.txt" }]
     });
-    assert.deepEqual(await client.abort("http://botified.local", "service-secret"), {
-      aborted: true,
-      queueLength: 0,
-      state: "stopped"
+    assert.deepEqual(await client.abort("http://botified.local", "service-secret", {
+      commandKey: "abort-command-1",
+      expectedTurnId: "turn_1"
+    }), {
+      commandKey: "abort-command-1",
+      turnId: "turn_1",
+      outcome: "completed"
     });
+  });
+
+  it("parses stable exact-control conflicts and rejects mismatched receipt identity", async () => {
+    const conflict = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse({
+      command_key: "abort-command-2",
+      turn_id: "turn_stale",
+      outcome: "conflict"
+    }, { status: 409 }));
+    assert.deepEqual(await conflict.abort("http://botified.local", "service-secret", {
+      commandKey: "abort-command-2",
+      expectedTurnId: "turn_stale"
+    }), {
+      commandKey: "abort-command-2",
+      turnId: "turn_stale",
+      outcome: "conflict"
+    });
+
+    const mismatch = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse({
+      command_key: "different-command",
+      task_id: "work/1",
+      outcome: "already_terminal"
+    }));
+    await assert.rejects(
+      mismatch.stopBackgroundTask("http://botified.local", "service-secret", {
+        commandKey: "stop-command-2",
+        expectedTaskId: "work/1"
+      }),
+      (error: unknown) => error instanceof BotifiedHttpError
+        && error.code === "invalid_background_task_stop_response"
+    );
   });
 
   it("downloads files with bearer auth and returns response metadata", async () => {
@@ -492,7 +539,10 @@ describe("Botified HTTP client", () => {
     );
 
     await assert.rejects(
-      client.abort("http://botified.local", "service-secret"),
+      client.abort("http://botified.local","service-secret",{
+        commandKey:"abort-command-error",
+        expectedTurnId:"turn-error"
+      }),
       (error: unknown) => {
         assert.equal(error instanceof BotifiedHttpError, true);
         const httpError = error as BotifiedHttpError;
