@@ -407,14 +407,28 @@ pretending another identity is exact.
 Terminal start owns admission, not Kubernetes readiness:
 
 1. validate authorization and new-work eligibility;
-2. atomically reserve the exact Run and `accepted_in_progress` receipt;
+2. atomically reserve the exact replacement Run as `starting` with
+   `runtime.resume_unfinished=false` and its `accepted_in_progress` receipt;
 3. return `202` with the Run identity;
 4. let `syncActiveTasksOnce` be the only startup continuation owner;
-5. atomically activate the Run and complete the original receipt.
+5. under the startup/drain fence, apply the false ConfigMap, make the Pod ready,
+   and complete the first cold process open while the Run remains `starting`;
+6. while the Run remains `starting` under that same fence, durably prepare the
+   ConfigMap with `runtime.resume_unfinished=true` and change the exact Run Pod
+   config hash/spec to create a new generation deterministically;
+7. wait for that new Pod and Botified to become ready, with this process open
+   having actually read `runtime.resume_unfinished=true`;
+8. in one Postgres transaction, mark the Run `active`, persist
+   `runtime.resume_unfinished=true`, and complete the original receipt;
+9. allow message dispatch only after that transaction commits.
 
 The request handler does not also prepare the Sandbox. If Kubernetes apply or
 Botified readiness is blocked, the HTTP response still returns after step 2.
 A process restart resumes the admitted startup through the same reconciler.
+An unknown ConfigMap apply or Pod-generation rebuild result never permits Run
+activation; the startup owner keeps the Run `starting` and resolves it through
+the same startup/drain fence. ConfigMap API success alone is not readiness and
+does not permit activation.
 
 ### 7.2 Release during startup
 
@@ -515,22 +529,32 @@ The next formal Botified release must provide all of:
 - the external bash executor loopback contract;
 - durable message delivery receipt replay;
 - cold discard for `runtime.resume_unfinished=false`;
+- compatible reading of real legacy Lite journals, including the two-field
+  `accepted_input.delivery` record and `unfinished_work_discarded`, followed by
+  checkpoint canonicalization that preserves canonical state, history, and
+  delivery receipts;
 - exact compare-and-Abort;
 - exact background Stop with a stable downstream command-key result;
 - explicit per-provider `allow_insecure_http` support so Botified can call the
-  AgentSmith built-in broker over in-cluster HTTP.
+  AgentSmith built-in broker over in-cluster HTTP;
+- an official x86_64 binary built on a Debian Bookworm-compatible baseline and
+  checked to require no GLIBC newer than 2.36.
 
 AgentSmith does not supply pseudo-exact behavior, a compatibility facade or
-shim, or a vendor fork for any missing contract.
+shim, or a vendor fork for any missing contract. Because a new Run for the same
+Task reuses the PVC and Botified session, draining the old runner cannot remove
+its durable delivery receipt. Legacy compatibility therefore belongs in
+upstream Botified replay and checkpoint handling, never in an AgentSmith shim.
 
 When that release is available, AgentSmith consumes the official artifact by
-immutable release version and digest and does not compile Botified source. The
-same cutover deletes `third_party/botified`, `PINNED_SOURCE.json` and any other
-Botified PIN input, the Botified source build stage, and every fallback to the
-vendored path. Before cutover, retain the current runnable path; after cutover,
-retain only the official artifact path. This changes neither the two active
-repositories `agentsmith-lite` and `agentsmith-lite-substrates` nor the
-existing deployed service set.
+immutable release version and checksum/digest and does not compile Botified
+source. The same cutover deletes `third_party/botified`, `PINNED_SOURCE.json`,
+every other source PIN or vendor input, the Botified source build stage, and
+every fallback to the vendored path. It retains the official release version
+PIN and checksum/digest PIN. Before cutover, retain the current runnable path;
+after cutover, retain only the official artifact path. This changes neither the
+two active repositories `agentsmith-lite` and `agentsmith-lite-substrates` nor
+the existing deployed service set.
 
 ### Slice 1: Typed command convergence
 
@@ -622,8 +646,11 @@ Implement:
 - `expectedRunId` on Release;
 - persistent drain barrier plus process-local startup cancellation;
 - exact Botified target identities for Abort and Stop;
-- official `runtime.resume_unfinished=false` cold discard for the first Run
-  after explicit Release;
+- official cold discard on the replacement Run's first process open with
+  `runtime.resume_unfinished=false`, followed while still `starting` by durable
+  true configuration, a config-hash/spec-triggered exact Run Pod generation,
+  and a second ready process open that actually reads true before activation
+  and message dispatch;
 - separate start-new-work and control-existing-work predicates;
 - direct AgentSmith API-to-executor Terminal transport with exact Run-derived
   endpoint on the existing Service target, handshake, service key, and
@@ -648,9 +675,11 @@ Focused behavior checks:
 - a lost Abort/Stop response followed by AgentSmith restart replays the same
   downstream command key to the same exact Run target and returns its stable
   receipt;
-- the first Run after Release starts with
-  `runtime.resume_unfinished=false`, discards unfinished work, and preserves
-  completed history;
+- the replacement Run's first process open uses
+  `runtime.resume_unfinished=false`, discards unfinished work, preserves
+  completed history, then the deterministic true-config Pod generation becomes
+  ready and opens with true before dispatch; an immediate later process restart
+  of that same Run also reads true and does not discard newly accepted work;
 - Terminal connects from Web through AgentSmith API directly to the exact
   Run's executor, with no Botified Terminal route;
 - close `1009` disposes one transport and leaves one usable Connect action.
@@ -741,8 +770,13 @@ automatic release gates.
 The milestone is complete when:
 
 - AgentSmith consumes the required official Botified release by immutable
-  version and digest, no longer compiles vendored source, and has no
-  `third_party/botified`, pin/build stage, fallback, facade, shim, or fork;
+  version and checksum/digest, retains both official artifact PINs, no longer
+  compiles vendored source, and has no `third_party/botified`, source PIN/build
+  stage, fallback, facade, shim, or fork;
+- a real legacy Lite journal opens successfully and, after checkpoint, retains
+  canonical state, history, and delivery receipts in canonical form;
+- the official x86_64 Botified binary executes on Debian Bookworm and requires
+  no GLIBC newer than 2.36;
 - official Botified delivery and exact-control receipts survive restart and
   replay only by their original downstream command keys;
 - all commands in the matrix have one durable acceptance point, one typed
@@ -758,8 +792,13 @@ The milestone is complete when:
 - Abort and Stop carry exact target identities through the Botified service
   API, Stop binds the resolved background task, and Abort is unavailable
   without a canonical Botified turn ID;
-- the first Run after Release uses official cold discard and cannot resume
-  unfinished prior-Run work;
+- the replacement Run opens once with `runtime.resume_unfinished=false`, then
+  its deterministic true-config Pod generation becomes ready and opens with
+  true before activation; an immediate same-Run process restart still reads
+  true and does not discard new work;
+- cutover drains and releases the old runner before one coordinated app and
+  runner deployment, while legacy journal schema compatibility remains required
+  for the durable state on the reused PVC;
 - Terminal runs Web-to-AgentSmith-to-executor with an exact Run handshake and
   service key, while `1008`/`1009` cannot produce shell/Connect oscillation;
 - file replay never re-enters a recreated source path;
