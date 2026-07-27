@@ -177,6 +177,10 @@ describe("Task command convergence API", { concurrency:false }, () => {
       assert.equal(created.status,200,await created.clone().text());
       const body=await created.json() as Record<string,unknown>&{task:{id:string}};
       const {outcome:_,keyDisposition:__,...legacyPresentation}=body;
+      const historicalPresentation=structuredClone(legacyPresentation) as unknown as {
+        currentTurn:{state:string;turnId?:string|null};
+      };
+      delete historicalPresentation.currentTurn.turnId;
       assert.ok(requestHash);
       const workspace=await store.findWorkspace(auth.workspaceId);
       assert.ok(workspace);
@@ -197,7 +201,7 @@ describe("Task command convergence API", { concurrency:false }, () => {
           ...claim,responseStatus:200,responseBody,updatedAt:new Date().toISOString()
         }),true);
       };
-      await seed("task-create-legacy-replay",legacyPresentation);
+      await seed("task-create-legacy-replay",historicalPresentation);
       const replay=await auth.request(
         "POST",
         `/api/v1/projects/${auth.projectId}/tasks`,
@@ -205,7 +209,19 @@ describe("Task command convergence API", { concurrency:false }, () => {
         "task-create-legacy-replay"
       );
       assert.equal(replay.status,200,await replay.clone().text());
-      assert.equal((await replay.json() as {task:{id:string}}).task.id,body.task.id);
+      const replayBody=await replay.json() as {task:{id:string};currentTurn:{state:string;turnId:string|null}};
+      assert.equal(replayBody.task.id,body.task.id);
+      assert.equal(Object.hasOwn(replayBody.currentTurn,"turnId"),true);
+
+      await seed("task-create-explicit-turn-replay",legacyPresentation);
+      const explicit=await auth.request(
+        "POST",
+        `/api/v1/projects/${auth.projectId}/tasks`,
+        input,
+        "task-create-explicit-turn-replay"
+      );
+      assert.equal(explicit.status,200,await explicit.clone().text());
+      assert.equal((await explicit.json() as {task:{id:string}}).task.id,body.task.id);
 
       await seed("task-create-malformed-legacy-replay",{task:body.task});
       const malformed=await auth.request(
