@@ -1818,7 +1818,7 @@ describe("task interactions API", () => {
           return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
         },
         async listManagedResources(){return structuredClone(liveResources);},
-        async inspectResource(ref,labels){return inspectFixtureResource(liveResources,ref,labels);}
+        async inspectResource(ref:KubernetesResourceRef,labels:Record<string,string>){return inspectFixtureResource(liveResources,ref,labels);}
       };
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
@@ -1948,7 +1948,7 @@ describe("task interactions API", () => {
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
       async listManagedResources(){return structuredClone(liveResources);},
-      async inspectResource(ref,labels){return inspectFixtureResource(liveResources,ref,labels);}
+      async inspectResource(ref:KubernetesResourceRef,labels:Record<string,string>){return inspectFixtureResource(liveResources,ref,labels);}
     };
     try{
       api=await createApiServer({
@@ -2048,7 +2048,7 @@ describe("task interactions API", () => {
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
       async listManagedResources(){return structuredClone(resources);},
-      async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
+      async inspectResource(ref:KubernetesResourceRef,labels:Record<string,string>){return inspectFixtureResource(resources,ref,labels);}
     };
     try{
       api=await createApiServer({
@@ -2315,7 +2315,7 @@ describe("task interactions API", () => {
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
       async listManagedResources(){return structuredClone(resources);},
-      async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
+      async inspectResource(ref:KubernetesResourceRef,labels:Record<string,string>){return inspectFixtureResource(resources,ref,labels);}
     }};
     try{
       api=await createApiServer({
