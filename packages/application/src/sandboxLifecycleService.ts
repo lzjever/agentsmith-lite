@@ -656,6 +656,7 @@ function sanitizeCleanupError(message: string): string {
       "$1=<redacted>"
     )
     .replace(/\bbsk_[A-Za-z0-9_-]+/g, "<redacted>")
+    .replace(/\blbk_[A-Za-z0-9_-]+/g, "<redacted>")
     .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "<redacted>")
     .replace(/\bMODEL_API_KEY\b(?!\s*(?:=|:))/g, "<redacted>")
     .slice(0, 300);

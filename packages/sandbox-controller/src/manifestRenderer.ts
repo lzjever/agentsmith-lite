@@ -11,12 +11,6 @@ export interface SandboxResourceNameOverrides {
   networkPolicy?: string;
 }
 
-export interface SandboxModelCaReference {
-  configMapName: string;
-  configMapKey: string;
-  path: string;
-}
-
 export interface SandboxRenderInput {
   namespace: string;
   workspaceId: string;
@@ -34,7 +28,6 @@ export interface SandboxRenderInput {
   memoryRequest: string;
   cpuLimit: string;
   memoryLimit: string;
-  modelCa?: SandboxModelCaReference;
   resourceNames?: SandboxResourceNameOverrides;
 }
 
@@ -57,29 +50,6 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   const serviceKeySecretKey = input.serviceKeySecretKey ?? "BOTIFIED_SERVICE_KEY";
   const taskSubPath = `${input.projectSubPath}/tasks/${input.taskId}`;
   const librarySubPath=`${input.projectSubPath}/${input.fileLibraryRootSubPath}`;
-  const modelCaVolume = input.modelCa
-    ? {
-        name: "model-ca",
-        configMap: {
-          name: input.modelCa.configMapName,
-          items: [
-            {
-              key: input.modelCa.configMapKey,
-              path: modelCaFilename(input.modelCa.path)
-            }
-          ]
-        }
-      }
-    : undefined;
-  const modelCaMount = input.modelCa
-    ? {
-        name: "model-ca",
-        mountPath: input.modelCa.path,
-        subPath: modelCaFilename(input.modelCa.path),
-        readOnly: true
-      }
-    : undefined;
-
   const resources: KubernetesResource[] = [
     {
       apiVersion: "v1",
@@ -101,7 +71,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
       },
       type: "Opaque",
       stringData: {
-        [serviceKeySecretKey]: "<redacted-generated-per-task>",
+        [serviceKeySecretKey]: "<redacted-generated-per-run>",
+        AGENTSMITH_LLM_BROKER_KEY: "<redacted-generated-per-run>",
         "AGENTS.md": "<generated-by-api>"
       }
     },
@@ -198,6 +169,15 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                     key: serviceKeySecretKey
                   }
                 }
+              },
+              {
+                name: "AGENTSMITH_LLM_BROKER_KEY",
+                valueFrom: {
+                  secretKeyRef: {
+                    name: serviceKeySecretName,
+                    key: "AGENTSMITH_LLM_BROKER_KEY"
+                  }
+                }
               }
             ],
             resources: {
@@ -238,8 +218,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 mountPath: "/workspace/task/home/workspace/AGENTS.md",
                 subPath: "AGENTS.md",
                 readOnly: true
-              },
-              ...(modelCaMount ? [modelCaMount] : [])
+              }
             ]
           },
           {
@@ -306,8 +285,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               secretName: serviceKeySecretName,
               items: [{ key: "AGENTS.md", path: "AGENTS.md" }]
             }
-          },
-          ...(modelCaVolume ? [modelCaVolume] : [])
+          }
         ]
       }
     },
@@ -375,11 +353,6 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
   };
 }
 
-function modelCaFilename(caPath: string): string {
-  const parts = caPath.split("/");
-  return parts[parts.length - 1] || "ca.crt";
-}
-
 interface NetworkPolicyEgressRule {
   to?: Array<{
     namespaceSelector?: Record<string, unknown>;
@@ -396,12 +369,25 @@ function dnsEgressRule(): NetworkPolicyEgressRule {
   return {
     to: [
       {
-        namespaceSelector: {}
+        namespaceSelector: {
+          matchLabels: {
+            "kubernetes.io/metadata.name": "kube-system"
+          }
+        },
+        podSelector: {
+          matchLabels: {
+            "k8s-app": "kube-dns"
+          }
+        }
       }
     ],
     ports: [
       {
         protocol: "UDP",
+        port: 53
+      },
+      {
+        protocol: "TCP",
         port: 53
       }
     ]

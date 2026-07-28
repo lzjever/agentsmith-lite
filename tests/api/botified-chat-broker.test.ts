@@ -25,29 +25,34 @@ describe("Botified Chat Completions broker", () => {
   let close: (() => Promise<void>) | undefined;
   let previousPostgresUrl: string | undefined;
   let providerResponseFactory: (() => Response | Promise<Response>) | undefined;
+  let botifiedClient: AcceptingBotifiedClient;
+  let sandboxPort: ReadySandboxPort;
+  let store: ReturnType<typeof createLocalInMemoryProductStore>;
   const providerCalls: Array<{ url: string; authorization: string | null; body: string; headers: Headers }> = [];
 
   before(async () => {
     dataRoot = await mkdtemp(path.join(tmpdir(), "asl-broker-"));
     previousPostgresUrl = process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL = "postgresql://broker-test-required-persistent-store";
+    sandboxPort = new ReadySandboxPort();
+    botifiedClient = new AcceptingBotifiedClient(sandboxPort);
+    store = createLocalInMemoryProductStore();
     const api = await createApiServer({
       port: 0,
       dataRoot,
-      store: createLocalInMemoryProductStore(),
+      store,
       builtinAdminPassword: "broker-test-admin-password",
       sessionSecret: "broker-test-session-secret-at-least-32-characters",
       sandboxNamespaceLimit: 100,
       publicBaseUrl: "https://agentsmith.example/app",
-      botifiedServiceKeyFactory: ({ taskId, runId }) => `task-key:${taskId}:${runId}`,
-      botifiedClient: new AcceptingBotifiedClient(),
+      botifiedClient,
       liveSandbox: {
-        port: new ReadySandboxPort(),
+        port: sandboxPort,
         readinessTimeoutMs: 10,
         readinessPollMs: 1,
         sleep: async () => undefined
       },
-      runtimeTickIntervalMs: 5,
+      runtimeTickIntervalMs: 1_000,
       providerClient: new FetchOpenAICompatibleClient(async (url, init) => {
         providerCalls.push({
           url: String(url),
@@ -92,7 +97,27 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("uses the prefix-independent in-cluster route and transparently forwards streaming tool calls", async () => {
-    const { task, projectId, cookie, userId } = await createTask("one");
+    const { task, projectId, cookie, userId, brokerKey, serviceKey } = await createTask("one");
+    assert.notEqual(brokerKey, serviceKey);
+    assert.match(brokerKey, /^lbk_/);
+    assert.match(serviceKey, /^bsk_/);
+    assert.deepEqual(sandboxPort.credentials(task.id, task.runId), { brokerKey, serviceKey });
+    const persistedRun = await store.sandboxRuns.get(task.runId);
+    assert.ok(persistedRun);
+    assert.equal(JSON.stringify(persistedRun).includes(brokerKey), false);
+    assert.equal(JSON.stringify(persistedRun).includes(serviceKey), false);
+    assert.equal(JSON.stringify(task).includes(brokerKey), false);
+    assert.equal(JSON.stringify(task).includes(serviceKey), false);
+    const config = sandboxPort.botifiedConfig(task.id, task.runId);
+    assert.equal(config.providers[0]?.api_key_env, "AGENTSMITH_LLM_BROKER_KEY");
+    assert.equal(config.service.service_key_env, "BOTIFIED_SERVICE_KEY");
+    assert.equal(
+      config.providers[0]?.base_url,
+      `http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/${encodeURIComponent(task.id)}/runs/${encodeURIComponent(task.runId)}/v1`
+    );
+    assert.equal(JSON.stringify(config).includes(brokerKey), false);
+    assert.equal(JSON.stringify(config).includes(serviceKey), false);
+    botifiedClient.readStateKeys.length = 0;
     const requestBody = {
       model: "gpt-compatible",
       messages: [{ role: "user", content: "run a command" }],
@@ -104,7 +129,7 @@ describe("Botified Chat Completions broker", () => {
       {
         method: "POST",
         headers: {
-          authorization: `Bearer task-key:${task.id}:${task.runId}`,
+          authorization: `Bearer ${brokerKey}`,
           "content-type": "application/json",
           accept: "text/event-stream",
           "x-untrusted-header": "must-not-reach-provider"
@@ -125,6 +150,7 @@ describe("Botified Chat Completions broker", () => {
     assert.equal(providerCalls[0]?.authorization, "Bearer sk-provider-key");
     assert.equal(providerCalls[0]?.headers.get("x-untrusted-header"), null);
     assert.deepEqual(JSON.parse(providerCalls[0]?.body ?? ""), requestBody);
+    assert.deepEqual(botifiedClient.readStateKeys, []);
     const usage = await fetch(`${baseUrl}/app/api/v1/projects/${projectId}/usage`, { headers: { cookie } }).then((result) => result.json());
     assert.equal(usage.provider.userId, userId);
     assert.deepEqual(usage.provider.totals, { requests: 1, tokens: 0, cost: 0 });
@@ -139,8 +165,9 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("rejects invalid and cross-task keys before provider forwarding", async () => {
-    const { task: first } = await createTask("first");
-    const { task: second } = await createTask("second");
+    const { task: first, brokerKey: firstBrokerKey } = await createTask("first");
+    const { task: second, brokerKey: secondBrokerKey } = await createTask("second");
+    assert.notEqual(firstBrokerKey, secondBrokerKey);
     const invalid = await fetch(`${baseUrl}/api/internal/tasks/${first.id}/runs/${first.runId}/v1/chat/completions`, {
       method: "POST",
       headers: { authorization: "Bearer not-a-task-key", "content-type": "application/json" },
@@ -148,7 +175,7 @@ describe("Botified Chat Completions broker", () => {
     });
     const mismatched = await fetch(`${baseUrl}/api/internal/tasks/${second.id}/runs/${second.runId}/v1/chat/completions`, {
       method: "POST",
-      headers: { authorization: `Bearer task-key:${first.id}:${first.runId}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${firstBrokerKey}`, "content-type": "application/json" },
       body: JSON.stringify({ model: "ignored", messages: [] })
     });
 
@@ -158,9 +185,9 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("rejects a wrong run, invalid model, unsupported fields, and oversized broker bodies without calling the provider", async () => {
-    const { task } = await createTask("constraints");
+    const { task, brokerKey } = await createTask("constraints");
     const endpoint = `${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`;
-    const headers = { authorization: `Bearer task-key:${task.id}:${task.runId}`, "content-type": "application/json" };
+    const headers = { authorization: `Bearer ${brokerKey}`, "content-type": "application/json" };
 
     const wrongRun = await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/not-${task.runId}/v1/chat/completions`, {
       method: "POST", headers, body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "no" }] })
@@ -187,7 +214,7 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("forwards the first SSE frame before the provider closes and settles terminal usage", async () => {
-    const { task, projectId, cookie } = await createTask("incremental-sse");
+    const { task, projectId, cookie, brokerKey } = await createTask("incremental-sse");
     const encoder = new TextEncoder();
     let release!: () => void;
     providerResponseFactory = () => new Response(new ReadableStream<Uint8Array>({
@@ -202,7 +229,7 @@ describe("Botified Chat Completions broker", () => {
 
     const response = await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`, {
       method: "POST",
-      headers: { authorization: `Bearer task-key:${task.id}:${task.runId}`, "content-type": "application/json", accept: "text/event-stream" },
+      headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "stream" }], stream: true })
     });
     const reader = response.body?.getReader();
@@ -225,7 +252,7 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("drains an SSE provider after the client closes and settles later usage", async () => {
-    const { task, projectId, cookie } = await createTask("closed-client-sse");
+    const { task, projectId, cookie, brokerKey } = await createTask("closed-client-sse");
     const encoder = new TextEncoder();
     providerResponseFactory = () => new Response(new ReadableStream<Uint8Array>({
       start(controller) {
@@ -239,7 +266,7 @@ describe("Botified Chat Completions broker", () => {
     const controller = new AbortController();
     const response = await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`, {
       method: "POST",
-      headers: { authorization: `Bearer task-key:${task.id}:${task.runId}`, "content-type": "application/json", accept: "text/event-stream" },
+      headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "stream" }], stream: true }),
       signal: controller.signal
     });
@@ -251,14 +278,14 @@ describe("Botified Chat Completions broker", () => {
   });
 
   it("returns a generic provider error without reflecting credential-like provider text", async () => {
-    const { task } = await createTask("provider-error");
+    const { task, brokerKey } = await createTask("provider-error");
     providerResponseFactory = () => new Response("provider failure Bearer bsk_runtime_secret sk-provider-key", {
       status: 502,
       headers: { "content-type": "text/plain" }
     });
     const response = await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`, {
       method: "POST",
-      headers: { authorization: `Bearer task-key:${task.id}:${task.runId}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${brokerKey}`, "content-type": "application/json" },
       body: JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "fail" }] })
     });
     assert.equal(response.status, 502);
@@ -311,6 +338,7 @@ describe("Botified Chat Completions broker", () => {
     const activeTask = await waitForActiveTask(task.task.id, cookie);
     return {
       task: activeTask,
+      ...sandboxPort.credentials(activeTask.id, activeTask.runId),
       projectId: project.id,
       cookie,
       csrf,
@@ -346,9 +374,14 @@ describe("Botified Chat Completions broker", () => {
 });
 
 class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
+  readonly readStateKeys: string[] = [];
+
+  constructor(private readonly sandboxPort: ReadySandboxPort) {}
+
   async health() { return { status: "ok" as const }; }
   async readState(_baseUrl: string, serviceKey: string) {
-    const sessionId = serviceKey.split(":")[1];
+    this.readStateKeys.push(serviceKey);
+    const sessionId = this.sandboxPort.sessionIdForServiceKey(serviceKey);
     if (!sessionId) throw new Error("Test service key has no Task session");
     return { sessionId, snapshot: { session_id: sessionId }, state: "running" };
   }
@@ -382,6 +415,10 @@ class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernet
 
   async listManagedResources() { return structuredClone(this.resources); }
   async applyResource(resource: KubernetesResource) {
+    if (resource.kind === "Pod" && !resource.metadata.uid) {
+      resource = structuredClone(resource);
+      resource.metadata.uid = `uid-${resource.metadata.name}`;
+    }
     this.resources = this.resources.filter((item) => item.kind !== resource.kind || item.metadata.name !== resource.metadata.name);
     this.resources.push(structuredClone(resource));
     return "applied" as const;
@@ -391,5 +428,47 @@ class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernet
     this.resources = this.resources.filter((item) => item.kind !== ref.kind || item.metadata.name !== ref.name);
     return before === this.resources.length ? "not_found" as const : "deleted" as const;
   }
-  async getPodReadiness(): Promise<PodReadiness> { return "ready"; }
+  async getPodReadiness(_namespace: string, name: string): Promise<PodReadiness> {
+    const pod = this.resources.find((resource) => resource.kind === "Pod" && resource.metadata.name === name);
+    return pod ? { state: "ready", podUid: String(pod.metadata.uid), podIp: "10.42.0.20" } : "not_found";
+  }
+  async getConfigMapData(_namespace: string, name: string) {
+    const configMap = this.resources.find((resource) => resource.kind === "ConfigMap" && resource.metadata.name === name);
+    return configMap ? { data: structuredClone(configMap.data as Record<string, string>) } : "not_found" as const;
+  }
+
+  credentials(taskId: string, runId: string): { brokerKey: string; serviceKey: string } {
+    const secret = this.resourceForTask("Secret", taskId, runId);
+    const stringData = secret.stringData as Record<string, string>;
+    return {
+      brokerKey: stringData.AGENTSMITH_LLM_BROKER_KEY!,
+      serviceKey: stringData.BOTIFIED_SERVICE_KEY!
+    };
+  }
+
+  botifiedConfig(taskId: string, runId: string): {
+    providers: Array<{ api_key_env: string; base_url: string }>;
+    service: { service_key_env: string };
+  } {
+    const configMap = this.resourceForTask("ConfigMap", taskId, runId);
+    const data = configMap.data as Record<string, string>;
+    return JSON.parse(data["botified-config.yaml"]!);
+  }
+
+  sessionIdForServiceKey(serviceKey: string): string | undefined {
+    return this.resources.find((candidate) =>
+      candidate.kind === "Secret" &&
+      (candidate.stringData as Record<string, string> | undefined)?.BOTIFIED_SERVICE_KEY === serviceKey
+    )?.metadata.labels?.["agentsmith-lite/task-id"];
+  }
+
+  private resourceForTask(kind: string, taskId: string, runId: string): KubernetesResource {
+    const resource = this.resources.find((candidate) =>
+      candidate.kind === kind &&
+      candidate.metadata.labels?.["agentsmith-lite/task-id"] === taskId &&
+      candidate.metadata.labels?.["agentsmith-lite/run-id"] === runId
+    );
+    assert.ok(resource, `${kind} should exist for ${taskId}/${runId}`);
+    return resource;
+  }
 }

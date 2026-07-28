@@ -70,7 +70,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal(persistedFailure.state,"release_requested");
     assert.equal(persistedFailure.cleanupClaimedAt,null);
     assert.equal(persistedFailure.cleanupAttempts,1);
-    assert.deepEqual(persistedFailure.lastCleanupError,{at:timestamp(3),target:`Pod/${run.resourceNames.pod}`,message:"Kubernetes cleanup failed with credential <redacted>"});
+    assert.deepEqual(persistedFailure.lastCleanupError,{at:timestamp(3),target:`Pod/${run.resourceNames.pod}`,message:"Kubernetes cleanup failed with service <redacted> and broker <redacted>"});
 
     const retryPort=new LifecyclePort(resources,false);
     const retried=await new SandboxLifecycleService(store,{namespace:run.namespace,port:retryPort,now:()=>new Date(timestamp(4))}).reapSandboxRunsOnce({apply:true,runId:run.runId});
@@ -193,7 +193,7 @@ class LifecyclePort {
   async listManagedResources():Promise<KubernetesResource[]>{return structuredClone(this.resources);}
   async applyResource():Promise<"applied">{return"applied";}
   async deleteResource(ref:KubernetesResourceRef,expectedLabels:Record<string,string>):Promise<"deleted"|"not_found">{
-    if(this.fail)throw new Error("Kubernetes cleanup failed with credential sk-private");
+    if(this.fail)throw new Error("Kubernetes cleanup failed with service bsk_runtime_secret and broker lbk_runtime_secret");
     this.deletedRefs.push(structuredClone(ref));
     this.deletedLabels.push(structuredClone(expectedLabels));
     const before=this.resources.length;

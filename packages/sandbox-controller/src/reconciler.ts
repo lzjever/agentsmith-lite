@@ -42,12 +42,6 @@ export interface SandboxRunResourceLimits {
   memoryLimit: string;
 }
 
-export interface SandboxRunModelCaReference {
-  configMapName: string;
-  configMapKey: string;
-  path: string;
-}
-
 export interface SandboxRunState extends SandboxIdentity {
   namespace: string;
   state: SandboxRunStateValue;
@@ -65,7 +59,6 @@ export interface SandboxRunState extends SandboxIdentity {
   resourceLimits: SandboxRunResourceLimits;
   resourceSnapshot: SandboxResourceSnapshot;
   releaseReason?: SandboxReleaseReason | null;
-  modelCa?: SandboxRunModelCaReference;
   timelineCursor?: string | null;
   terminalFailure?: SandboxTerminalFailure | null;
   failureCode: SandboxFailureCode | null;
@@ -363,7 +356,6 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     memoryRequest: run.resourceLimits.memoryRequest,
     cpuLimit: run.resourceLimits.cpuLimit,
     memoryLimit: run.resourceLimits.memoryLimit,
-    ...(run.modelCa ? { modelCa: run.modelCa } : {}),
     resourceNames
   }).resources;
 }

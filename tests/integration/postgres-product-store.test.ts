@@ -2194,8 +2194,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       ...run(task,task.currentRunId!,"starting"),
       state:"release_requested" as const,
       releaseReason:"requested" as const,
-      releaseRequestedAt:at,
-      modelCa:{configMapName:"provider-ca",configMapKey:"ca.crt",path:"/etc/provider/ca.crt"}
+      releaseRequestedAt:at
     };
     assert.equal((await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},...createAdmissionReceipt(task,"delete-project"),newFileLibrary:library(task.fileLibraryId!,"Delete project"),sandboxRun:pending})).kind,"created");
     const releasedAt="2026-07-23T00:01:00.000Z";
@@ -2212,8 +2211,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       serviceKeySecretRef:{key:pending.serviceKeySecretRef.key,name:pending.serviceKeySecretRef.name},
       directories:{botified:pending.directories.botified,libraryHome:pending.directories.libraryHome},
       resourceLimits:{memoryLimit:pending.resourceLimits.memoryLimit,cpuLimit:pending.resourceLimits.cpuLimit,memoryRequest:pending.resourceLimits.memoryRequest,cpuRequest:pending.resourceLimits.cpuRequest},
-      resourceSnapshot:{memoryLimitBytes:pending.resourceSnapshot.memoryLimitBytes,cpuLimitMillis:pending.resourceSnapshot.cpuLimitMillis,memoryRequestBytes:pending.resourceSnapshot.memoryRequestBytes,cpuRequestMillis:pending.resourceSnapshot.cpuRequestMillis},
-      modelCa:{path:pending.modelCa.path,configMapKey:pending.modelCa.configMapKey,configMapName:pending.modelCa.configMapName}
+      resourceSnapshot:{memoryLimitBytes:pending.resourceSnapshot.memoryLimitBytes,cpuLimitMillis:pending.resourceSnapshot.cpuLimitMillis,memoryRequestBytes:pending.resourceSnapshot.memoryRequestBytes,cpuRequestMillis:pending.resourceSnapshot.cpuRequestMillis}
     };
     assert.equal(await store.completeSandboxRunRelease({
       runId:pending.runId,

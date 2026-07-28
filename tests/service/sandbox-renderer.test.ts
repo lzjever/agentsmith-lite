@@ -311,6 +311,15 @@ describe("sandbox manifest renderer", () => {
             key: "BOTIFIED_SERVICE_KEY"
           }
         }
+      },
+      {
+        name: "AGENTSMITH_LLM_BROKER_KEY",
+        valueFrom: {
+          secretKeyRef: {
+            name: "botified-t1",
+            key: "AGENTSMITH_LLM_BROKER_KEY"
+          }
+        }
       }
     ]);
     assert.deepEqual(container.readinessProbe, {
@@ -363,12 +372,13 @@ describe("sandbox manifest renderer", () => {
         ports: [{ protocol: "TCP", port: 3099 }]
       }
     ]);
-    const dnsEgress = networkPolicy.spec.egress.find(
-      (rule) => hasNamespaceSelectorDestination(rule) && hasPort(rule, "UDP", 53)
-    );
+    const dnsEgress = networkPolicy.spec.egress.find(hasCoreDnsDestination);
     const brokerEgress = networkPolicy.spec.egress.find(hasApiBrokerDestination);
-    assert.ok(dnsEgress, "NetworkPolicy should preserve DNS UDP/53 egress");
-    assert.deepEqual(dnsEgress.ports, [{ protocol: "UDP", port: 53 }]);
+    assert.ok(dnsEgress, "NetworkPolicy should allow only kube-system CoreDNS");
+    assert.deepEqual(dnsEgress.ports, [
+      { protocol: "UDP", port: 53 },
+      { protocol: "TCP", port: 53 }
+    ]);
     assert.ok(brokerEgress, "NetworkPolicy should allow only the in-cluster API broker");
     assert.deepEqual(brokerEgress.ports, [{ protocol: "TCP", port: 3000 }]);
     assert.ok(
@@ -377,13 +387,17 @@ describe("sandbox manifest renderer", () => {
           Array.isArray(rule.ports) &&
           rule.ports.length > 0 &&
           rule.ports.every(
-            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 3000)
+            (port) => (
+              ((port.protocol === "UDP" || port.protocol === "TCP") && port.port === 53) ||
+              (port.protocol === "TCP" && port.port === 3000)
+            )
           )
       ),
       "NetworkPolicy egress should stay limited to DNS and API broker TCP/3000"
     );
     assert.deepEqual(secret?.stringData, {
-      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-task>",
+      BOTIFIED_SERVICE_KEY: "<redacted-generated-per-run>",
+      AGENTSMITH_LLM_BROKER_KEY: "<redacted-generated-per-run>",
       "AGENTS.md": "<generated-by-api>"
     });
 
@@ -435,7 +449,7 @@ describe("sandbox manifest renderer", () => {
     );
   });
 
-  it("mounts an optional model CA ConfigMap read-only without relaxing sandbox egress", () => {
+  it("does not render provider CA material into a Run Pod", () => {
     const rendered = renderSandboxResources({
       namespace: "agentsmith",
       workspaceId: "w1",
@@ -457,25 +471,17 @@ describe("sandbox manifest renderer", () => {
         configMapKey: "provider-ca.pem",
         path: "/etc/agentsmith-lite/model-ca/ca.crt"
       }
-    });
+    } as Parameters<typeof renderSandboxResources>[0] & { modelCa: {
+      configMapName: string;
+      configMapKey: string;
+      path: string;
+    } });
 
     const pod = rendered.resources.find((resource) => resource.kind === "Pod") as PodResource | undefined;
     const container = pod?.spec.containers[0];
     assert.ok(container);
-    assert.ok(
-      container.volumeMounts.some(
-        (mount) => mount.name === "model-ca" && mount.mountPath === "/etc/agentsmith-lite/model-ca/ca.crt" && mount.subPath === "ca.crt" && mount.readOnly === true
-      )
-    );
-    assert.ok(
-      pod?.spec.volumes.some(
-        (volume) =>
-          volume.name === "model-ca" &&
-          volume.configMap?.name === "local-model-ca" &&
-          volume.configMap.items?.[0]?.key === "provider-ca.pem" &&
-          volume.configMap.items?.[0]?.path === "ca.crt"
-      )
-    );
+    assert.equal(container.volumeMounts.some((mount) => mount.name === "model-ca"), false);
+    assert.equal(pod?.spec.volumes.some((volume) => volume.name === "model-ca"), false);
 
     const networkPolicy = rendered.resources.find((resource) => resource.kind === "NetworkPolicy") as
       | NetworkPolicyResource
@@ -487,7 +493,10 @@ describe("sandbox manifest renderer", () => {
           Array.isArray(rule.ports) &&
           rule.ports.length > 0 &&
           rule.ports.every(
-            (port) => (port.protocol === "UDP" && port.port === 53) || (port.protocol === "TCP" && port.port === 3000)
+            (port) => (
+              ((port.protocol === "UDP" || port.protocol === "TCP") && port.port === 53) ||
+              (port.protocol === "TCP" && port.port === 3000)
+            )
           )
       )
     );
@@ -598,11 +607,14 @@ function hasPort(rule: NetworkPolicyEgressRule, protocol: string, port: number):
   return rule.ports?.some((candidate) => candidate.protocol === protocol && candidate.port === port) ?? false;
 }
 
-function hasNamespaceSelectorDestination(rule: NetworkPolicyEgressRule): boolean {
+function hasCoreDnsDestination(rule: NetworkPolicyEgressRule): boolean {
   return (
     rule.to?.some(
       (destination) =>
-        destination.namespaceSelector !== undefined && Object.keys(destination.namespaceSelector).length === 0
+        JSON.stringify(destination.namespaceSelector) ===
+          JSON.stringify({ matchLabels: { "kubernetes.io/metadata.name": "kube-system" } }) &&
+        JSON.stringify(destination.podSelector) ===
+          JSON.stringify({ matchLabels: { "k8s-app": "kube-dns" } })
     ) ?? false
   );
 }

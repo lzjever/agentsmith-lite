@@ -351,11 +351,6 @@ export interface PersistedSandboxRunState {
   };
   resourceSnapshot: SandboxResourceSnapshot;
   releaseReason?: SandboxReleaseReason | null;
-  modelCa?: {
-    configMapName: string;
-    configMapKey: string;
-    path: string;
-  };
   timelineCursor?: string | null;
   terminalFailure?: PersistedSandboxTerminalFailure | null;
   failureCode: SandboxFailureCode | null;

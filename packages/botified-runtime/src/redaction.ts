@@ -155,7 +155,8 @@ function redactAssignments(text: string): string {
 function redactTokenShapes(text: string): string {
   return text
     .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, (match) => `${match.split(/\s+/, 1)[0]} ${REDACTED}`)
-    .replace(/\b(?:bsk[_-]|sk[-_]|gh[opusr]_|glpat-)[A-Za-z0-9_-]{8,}\b/g, REDACTED)
+    .replace(/\b(?:bsk_|lbk_)[A-Za-z0-9_-]+/g, REDACTED)
+    .replace(/\b(?:bsk-|sk[-_]|gh[opusr]_|glpat-)[A-Za-z0-9_-]{8,}\b/g, REDACTED)
     .replace(/\bAKIA[A-Z0-9]{16}\b/g, REDACTED)
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, REDACTED);
 }

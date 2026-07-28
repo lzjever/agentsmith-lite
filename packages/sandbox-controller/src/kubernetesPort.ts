@@ -472,6 +472,7 @@ function sanitizeKubernetesStatusText(value: string): string {
     .replace(/\s+/g, " ")
     .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
     .replace(/\bbsk_[A-Za-z0-9_-]+/g, "bsk_<redacted>")
+    .replace(/\blbk_[A-Za-z0-9_-]+/g, "lbk_<redacted>")
     .replace(/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g, "sk-<redacted>")
     .replace(/\bMODEL_API_KEY\b/g, "<redacted>")
     .slice(0, 400);

@@ -2324,8 +2324,7 @@ function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRun
     strictStructuralEqual(left.serviceKeySecretRef,right.serviceKeySecretRef)&&
     strictStructuralEqual(left.directories,right.directories)&&
     strictStructuralEqual(left.resourceLimits,right.resourceLimits)&&
-    strictStructuralEqual(left.resourceSnapshot,right.resourceSnapshot)&&
-    strictStructuralEqual(left.modelCa??null,right.modelCa??null);
+    strictStructuralEqual(left.resourceSnapshot,right.resourceSnapshot)
 }
 function taskRunIdentityMatches(task:PersistedAgentTask,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.currentRunId===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return strictStructuralEqual(left,right)}

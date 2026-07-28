@@ -94,7 +94,6 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     botifiedRunnerImage: input.botifiedRunnerImage ?? "agentsmith-lite/botified-runner:dev",
     botifiedServiceKeySecret: sessionSecret,
     credentials,
-    ...(input.modelCa ? { modelCa: input.modelCa } : {}),
     sandboxLifecycle,
     ...(input.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: input.sandboxNamespaceLimit } : {}),
     ...(input.taskDeliveryLeaseMs !== undefined ? { deliveryLeaseMs: input.taskDeliveryLeaseMs } : {}),

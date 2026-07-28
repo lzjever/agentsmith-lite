@@ -220,7 +220,7 @@ describe("sandbox Kubernetes port", () => {
         kind: "Status",
         reason: "BadRequest",
         code: 400,
-        message: "invalid delete options for Bearer bsk_runtime_secret and sk-real-model-key",
+        message: "invalid delete options for Bearer bsk_runtime_secret, broker lbk_runtime_secret, and sk-real-model-key",
         details: {
           causes: [{ message: "hidden detail sk-real-detail-key" }]
         }
@@ -242,8 +242,8 @@ describe("sandbox Kubernetes port", () => {
         assert.match(error.message, /kind=Status/);
         assert.match(error.message, /reason=BadRequest/);
         assert.match(error.message, /code=400/);
-        assert.match(error.message, /message="invalid delete options for Bearer <redacted> and sk-<redacted>"/);
-        assert.doesNotMatch(error.message, /bsk_runtime_secret|sk-real-model-key|hidden detail|sk-real-detail-key|details/);
+        assert.match(error.message, /message="invalid delete options for Bearer <redacted> broker lbk_<redacted>, and sk-<redacted>"/);
+        assert.doesNotMatch(error.message, /bsk_runtime_secret|lbk_runtime_secret|sk-real-model-key|hidden detail|sk-real-detail-key|details/);
         return true;
       }
     );

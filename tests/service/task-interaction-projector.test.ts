@@ -6,7 +6,7 @@ import {
   parseBotifiedTimelineEvents,
   type BotifiedTimelineEvent
 } from "../../packages/botified-runtime/src/projection.js";
-import { redactInteractionText } from "../../packages/botified-runtime/src/redaction.js";
+import { redactInteractionText, redactSecretLikeText } from "../../packages/botified-runtime/src/redaction.js";
 import {
   projectTaskInteraction,
   type BotifiedTaskInteractionSource,
@@ -655,6 +655,7 @@ describe("interaction text redaction", () => {
       "command prefix Cookie: inline-cookie with trailing output",
       "OPENAI_API_KEY=env-secret",
       "{\"client_secret\":\"json-secret\",\"signature\":\"signature-secret\"}",
+      "service bsk_service_secret broker lbk_broker_secret",
       "token sk-1234567890abcdef",
       "jwt eyJabcdefghijk.abcdefghijk.abcdefghijk"
     ].join("\n");
@@ -662,8 +663,15 @@ describe("interaction text redaction", () => {
 
     assert.equal(result.detailsOmitted, false);
     assert.notEqual(result.text, null);
-    assert.doesNotMatch(result.text!, /task-known-secret|alice|pass|query-secret|dbuser|dbpass|query-key|bearer-secret|cookie-secret|opaque-header|embedded-cookie|inline-cookie|env-secret|json-secret|signature-secret|1234567890abcdef|eyJabcdefghijk/);
+    assert.doesNotMatch(result.text!, /task-known-secret|alice|pass|query-secret|dbuser|dbpass|query-key|bearer-secret|cookie-secret|opaque-header|embedded-cookie|inline-cookie|env-secret|json-secret|signature-secret|bsk_service_secret|lbk_broker_secret|1234567890abcdef|eyJabcdefghijk/);
     assert.match(result.text!, /redacted/);
+  });
+
+  it("redacts exact service and broker key shapes from generic text while preserving surrounding text", () => {
+    assert.equal(
+      redactSecretLikeText("before bsk_Aa0_- middle lbk_Zz9_- after"),
+      "before [redacted] middle [redacted] after"
+    );
   });
 
   it("omits unsafe and over-bound bodies instead of leaking partial text", () => {

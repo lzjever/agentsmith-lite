@@ -9,11 +9,8 @@ export interface BotifiedTaskRuntimeInput {
   taskId: string;
   taskHomePath: string;
   botifiedDataPath: string;
-  serviceKeyEnv: string;
-  providerApiKeyEnv: string;
   providerBaseUrl: string;
   servicePort?: number;
-  resumeUnfinished?: boolean;
 }
 
 export interface GenerateBotifiedConfigInput {
@@ -30,7 +27,6 @@ export interface BotifiedConfig {
     cwd: string;
     data_dir: string;
     session: string;
-    resume_unfinished: boolean;
   };
   timeline: {
     retention_days: number;
@@ -73,7 +69,7 @@ export interface BotifiedProviderConfig {
   base_url: string;
   model: string;
   api_key_env: string;
-  allow_insecure_http: true;
+  use_env_proxy: false;
   request_timeout_secs: number;
   priority: number;
   capabilities: EndpointCapability[];
@@ -94,7 +90,6 @@ export interface BotifiedToolsConfig {
     max_task_ask_pending_secs: number;
     max_retained_tasks: number;
     task_retention_secs: number;
-    bash_executor_addr: string;
   };
 }
 
@@ -122,22 +117,20 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
         max_task_output_bytes: 16_777_216,
         max_task_ask_pending_secs: 300,
         max_retained_tasks: 128,
-        task_retention_secs: 86_400,
-        bash_executor_addr: "127.0.0.1:3110"
+        task_retention_secs: 86_400
       }
     },
     service: {
       host: "0.0.0.0",
       port: input.task.servicePort ?? 3099,
-      service_key_env: input.task.serviceKeyEnv,
+      service_key_env: "BOTIFIED_SERVICE_KEY",
       max_queue_messages: 32,
       max_queue_bytes: 33_554_432
     },
     runtime: {
       cwd: input.task.taskHomePath,
       data_dir: input.task.botifiedDataPath,
-      session: input.task.taskId,
-      resume_unfinished: input.task.resumeUnfinished ?? true
+      session: input.task.taskId
     },
     timeline: {
       retention_days: 14
@@ -185,8 +178,8 @@ function providerConfig(endpoint: ModelEndpoint, task: BotifiedTaskRuntimeInput)
     api_compat: "standard",
     base_url: task.providerBaseUrl,
     model: endpoint.model,
-    api_key_env: task.providerApiKeyEnv,
-    allow_insecure_http: true,
+    api_key_env: "AGENTSMITH_LLM_BROKER_KEY",
+    use_env_proxy: false,
     request_timeout_secs: endpoint.requestTimeoutSecs,
     priority: 10,
     capabilities: endpoint.capabilities

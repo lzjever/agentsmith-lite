@@ -214,6 +214,7 @@ describe("app manifest rendering", () => {
         }
       }
     ]);
+    assert.doesNotMatch(JSON.stringify(ingress), /\/api\/internal/);
   });
 
   it("binds the self-hosted Traefik HTTPS ingress to websecure only", () => {

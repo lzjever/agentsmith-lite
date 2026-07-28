@@ -2822,7 +2822,7 @@ function sandboxRunValues(run:PersistedSandboxRunState):unknown[] {
     run.runId,run.workspaceId,run.projectId,run.taskId,run.fileLibraryId,run.startedByUserId,run.state,
     run.namespace,run.image,run.pvcName,run.projectSubPath,run.fileLibraryRootSubPath,run.botifiedPort,
     JSON.stringify(run.resourceNames),JSON.stringify(run.serviceKeySecretRef),JSON.stringify(run.directories),
-    JSON.stringify(run.resourceLimits),JSON.stringify(run.resourceSnapshot),run.modelCa?JSON.stringify(run.modelCa):null,
+    JSON.stringify(run.resourceLimits),JSON.stringify(run.resourceSnapshot),null,
     run.timelineCursor??null,run.terminalFailure?JSON.stringify(run.terminalFailure):null,run.failureCode,run.failureCause,run.fencingToken,
     run.startupReadyAt,run.startupConfigMapName??null,run.startupConfigHash??null,run.startupPodUid??null,run.startupPodIp??null,run.startupActionDeadlineAt,run.startupClaimToken??null,run.startupLeaseExpiresAt??null,run.cleanupClaimedAt??null,run.cleanupAttempts??0,run.lastCleanupAt??null,
     run.lastCleanupError?JSON.stringify(run.lastCleanupError):null,run.releaseReason??null,run.startedAt,
@@ -3327,7 +3327,6 @@ function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
     directories:asRecord(row.directories) as unknown as PersistedSandboxRunState["directories"],
     resourceLimits:asRecord(row.resource_limits) as unknown as PersistedSandboxRunState["resourceLimits"],
     resourceSnapshot:asRecord(row.resource_snapshot) as unknown as PersistedSandboxRunState["resourceSnapshot"],
-    ...(row.model_ca?{modelCa:asRecord(row.model_ca) as unknown as NonNullable<PersistedSandboxRunState["modelCa"]>}:{}),
     timelineCursor:row.timeline_cursor,
     terminalFailure:row.terminal_failure?asRecord(row.terminal_failure) as unknown as NonNullable<PersistedSandboxRunState["terminalFailure"]>:null,
     failureCode:row.failure_code??null,failureCause:row.failure_cause,fencingToken:Number(row.fencing_token),
@@ -3439,8 +3438,7 @@ function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRun
     strictStructuralEqual(left.serviceKeySecretRef,right.serviceKeySecretRef)&&
     strictStructuralEqual(left.directories,right.directories)&&
     strictStructuralEqual(left.resourceLimits,right.resourceLimits)&&
-    strictStructuralEqual(left.resourceSnapshot,right.resourceSnapshot)&&
-    strictStructuralEqual(left.modelCa??null,right.modelCa??null);
+    strictStructuralEqual(left.resourceSnapshot,right.resourceSnapshot)
 }
 function taskRunRowIdentityMatches(task:AgentTaskRow,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.current_run_id===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspace_id===run.workspaceId&&task.project_id===run.projectId&&task.file_library_id===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return strictStructuralEqual(left,right)}

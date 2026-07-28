@@ -80,7 +80,7 @@ import {
   type SandboxKubernetesReadinessPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
 import { sandboxResourceNamesForTask, sandboxServiceNameForTask } from "../../sandbox-controller/src/resourceNames.js";
-import { APP_KUBERNETES_SERVICE_NAME, APP_KUBERNETES_SERVICE_PORT } from "../../sandbox-controller/src/appManifestRenderer.js";
+import { APP_KUBERNETES_SERVICE_NAME } from "../../sandbox-controller/src/appManifestRenderer.js";
 import {
   reconcileSandboxRuns,
   sandboxIdentityLabels,
@@ -135,7 +135,6 @@ export interface TaskServiceConfig {
   liveSandbox?: TaskLiveSandboxConfig;
   sandboxNamespaceLimit?: number;
   credentials?: CredentialService;
-  modelCa?: ModelCaReference;
   sandboxLifecycle?: SandboxLifecycleService;
   deliveryLeaseMs?: number;
   controlLeaseMs?: number;
@@ -2033,15 +2032,23 @@ export class TaskService {
   }
 
   private serviceKeyForTask(task: PersistedAgentTask): string {
-    const serviceKey = this.generateServiceKey({
+    const serviceKey = this.generateServiceKey(this.keyInputForTask(task));
+    requireBotifiedServiceKey(serviceKey);
+    return serviceKey;
+  }
+
+  private brokerKeyForTask(task: PersistedAgentTask): string {
+    return createBotifiedBrokerKey(this.config.botifiedServiceKeySecret, this.keyInputForTask(task));
+  }
+
+  private keyInputForTask(task: PersistedAgentTask): BotifiedServiceKeyInput {
+    return {
       namespace: this.config.namespace,
       workspaceId: task.workspaceId,
       projectId: task.projectId,
       taskId: task.id,
       runId: requireCurrentRunId(task)
-    });
-    requireBotifiedServiceKey(serviceKey);
-    return serviceKey;
+    };
   }
 
   private serviceKeyForRun(task:PersistedAgentTask,run:PersistedSandboxRunState):string{
@@ -2197,17 +2204,15 @@ export class TaskService {
     await this.fileLibraries.reconcileStoredProjectFileBytes(task.projectId,(bytes)=>this.policies.reconcileFileLibraryBytes(task.projectId,bytes));
   }
 
-  async authorizeBotifiedChatCompletion(taskId: string, runId: string, serviceKey: string): Promise<AuthorizedBotifiedChatCompletion> {
+  async authorizeBotifiedChatCompletion(taskId: string, runId: string, brokerKey: string): Promise<AuthorizedBotifiedChatCompletion> {
     const task = await this.store.findTask(taskId);
-    if (!task || task.currentRunId !== runId || !constantTimeEqual(serviceKey, this.serviceKeyForTask(task))) {
+    if (!task || task.currentRunId !== runId || !constantTimeEqual(brokerKey, this.brokerKeyForTask(task))) {
       throw new ProductError("Unauthorized Botified task key", 401);
     }
     const run=await this.activeSandboxRun(task);
     if (!run||run.runId!==runId||run.state!=="active") {
       throw new ProductError("Botified task is not active", 409);
     }
-    const runtime=await this.readRuntimeState(task,serviceKey);
-    await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
     const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(task.projectId, task.endpointId);
     requireTaskEndpointCapabilities(endpoint);
     const credentials = this.config.credentials;
@@ -2268,7 +2273,6 @@ export class TaskService {
         memoryLimit: "1Gi"
       },
       resourceSnapshot: normalizeSandboxResources({ cpuRequest:"250m", memoryRequest:"512Mi", cpuLimit:"1", memoryLimit:"1Gi" }),
-      ...(this.config.modelCa ? { modelCa: this.config.modelCa } : {}),
       failureCode:null,
       failureCause:null,
       fencingToken: 1,
@@ -2309,6 +2313,7 @@ export class TaskService {
     const endpoint=await this.endpoints.requireHealthyCredentialEndpoint(input.task.projectId,input.task.endpointId);
     requireTaskEndpointCapabilities(endpoint);
     const serviceKey=this.serviceKeyForTask(input.task);
+    const brokerKey=this.brokerKeyForTask(input.task);
     await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
     let run=await this.store.sandboxRuns.get(input.run.runId);
     if(!run||!taskMatchesExactSandboxRun(input.task,run)||run.state!=="starting")throw new ProductError("Sandbox startup ownership changed",409,"sandbox_cleanup_intent_conflict");
@@ -2316,7 +2321,6 @@ export class TaskService {
       endpoint,
       task:{
         taskId:input.task.id,taskHomePath:BOTIFIED_TASK_HOME_PATH,botifiedDataPath:BOTIFIED_DATA_PATH,
-        serviceKeyEnv:"BOTIFIED_SERVICE_KEY",providerApiKeyEnv:"BOTIFIED_SERVICE_KEY",
         providerBaseUrl:this.botifiedBrokerBaseUrlForTask(input.task),servicePort:run.botifiedPort
       }
     });
@@ -2346,7 +2350,7 @@ export class TaskService {
         });
         if(actions.errors.length>0)throw new ProductError(actions.errors[0]!,409,"sandbox_cleanup_intent_conflict");
         const materialized=materializeLiveCreateActions(actions.actions,{
-          serviceKey,botifiedConfig:serializedConfig,agentInstructions:taskAgentInstructions(input.task)
+          serviceKey,brokerKey,botifiedConfig:serializedConfig,agentInstructions:taskAgentInstructions(input.task)
         });
         if(materialized.some((action)=>action.type==="create_resource")){
           await this.runSandboxStartupAction(
@@ -3474,13 +3478,26 @@ function isCanonicalIsoDate(value:string):boolean{
 }
 
 function createBotifiedServiceKey(secret: string | undefined, input: BotifiedServiceKeyInput): string {
+  return createBotifiedTaskKey(secret, "agentsmith-lite.botified-service-key.v1", "bsk", input);
+}
+
+function createBotifiedBrokerKey(secret: string | undefined, input: BotifiedServiceKeyInput): string {
+  return createBotifiedTaskKey(secret, "agentsmith-lite.llm-broker-key.v1", "lbk", input);
+}
+
+function createBotifiedTaskKey(
+  secret: string | undefined,
+  domain: string,
+  prefix: string,
+  input: BotifiedServiceKeyInput
+): string {
   const seed = secret && secret.trim().length > 0 ? secret : "dev-session-secret";
   const hmac = createHmac("sha256", seed);
-  for (const part of ["agentsmith-lite.botified-service-key.v1", input.namespace, input.workspaceId, input.projectId, input.taskId, input.runId]) {
+  for (const part of [domain, input.namespace, input.workspaceId, input.projectId, input.taskId, input.runId]) {
     hmac.update(part);
     hmac.update("\0");
   }
-  return `bsk_${hmac.digest("base64url")}`;
+  return `${prefix}_${hmac.digest("base64url")}`;
 }
 
 function messageAuditDetail(taskId: string, message: Pick<PersistedTaskMessage, "id" | "deliveryStatus">): import("../../contracts/src/api.js").ProjectAuditSafeDetail {
@@ -3498,7 +3515,7 @@ function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string 
 }
 
 function defaultBotifiedBrokerBaseUrlForTask(input: BotifiedBrokerAddressInput): string {
-  return `http://${APP_KUBERNETES_SERVICE_NAME}.${input.namespace}.svc.cluster.local:${APP_KUBERNETES_SERVICE_PORT}/api/internal/tasks/${encodeURIComponent(input.taskId)}/runs/${encodeURIComponent(input.runId)}/v1`;
+  return `http://${APP_KUBERNETES_SERVICE_NAME}.${input.namespace}.svc.cluster.local/api/internal/tasks/${encodeURIComponent(input.taskId)}/runs/${encodeURIComponent(input.runId)}/v1`;
 }
 
 function requireBotifiedServiceKey(serviceKey: string | undefined): asserts serviceKey is string {
@@ -3509,7 +3526,7 @@ function requireBotifiedServiceKey(serviceKey: string | undefined): asserts serv
 
 function materializeLiveCreateActions(
   actions: SandboxReconcileAction[],
-  input: { serviceKey: string; botifiedConfig: string; agentInstructions: string }
+  input: { serviceKey: string; brokerKey: string; botifiedConfig: string; agentInstructions: string }
 ): SandboxReconcileAction[] {
   return actions.map((action) => {
     if (action.type !== "create_resource") {
@@ -3519,6 +3536,7 @@ function materializeLiveCreateActions(
     if (action.kind === "Secret") {
       resource.stringData = {
         BOTIFIED_SERVICE_KEY: input.serviceKey,
+        AGENTSMITH_LLM_BROKER_KEY: input.brokerKey,
         "AGENTS.md": input.agentInstructions
       };
     }
