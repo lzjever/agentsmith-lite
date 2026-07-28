@@ -58,14 +58,6 @@ import type {
   TaskMessageReceipt
 } from "../../contracts/src/api.js";
 
-export interface PersistedDeliveryReceipt {
-  accepted: boolean;
-  deliveryKey: string;
-  requestHash: string;
-  messageId?: string;
-  cursor?: string;
-}
-
 export interface PersistedAgentTask extends Omit<AgentTask, "fileLibraryId"> {
   fileLibraryId: string | null;
   createdByUserId?: string | null;
@@ -188,16 +180,10 @@ export interface PersistedTaskMessage {
   taskId: string;
   actorId?: string | null;
   content: string;
-  deliveryKey?: string | null;
-  requestHash?: string | null;
   claimToken?: string | null;
-  receipt?: PersistedDeliveryReceipt | null;
-  timelineCursor?: string | null;
   deliveryStatus?: PersistedTaskMessageDeliveryStatus;
   claimedAt?: string | null;
   leaseExpiresAt?: string | null;
-  attemptCount?: number;
-  nextRetryAt?: string | null;
   safeError?: string | null;
   createdAt: string;
   updatedAt?: string;
@@ -850,8 +836,6 @@ export interface ProductStore {
   beginTaskDeletion(taskId: string, deletedAt: string, auditEvent?: ProjectAuditEvent): Promise<SandboxGuardedDeletionResult<PersistedAgentTask>>;
   purgeDeletedTaskData(taskId: string, idempotency?: CompleteTaskIdempotencyInput): Promise<boolean>;
   beginTaskIdempotency(input: BeginTaskIdempotencyInput): Promise<TaskIdempotencyBeginResult>;
-  beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>;
-  listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>;
   findTaskIdempotency(input: TaskIdempotencyLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   findTaskIdempotencyByResource(input: TaskIdempotencyResourceLookupInput): Promise<TaskIdempotencyBeginResult | null>;
   findFileDeletionOperation(owner: FileDeletionOperationOwner): Promise<FileDeletionOperationState | null>;
@@ -878,9 +862,7 @@ export interface ProductStore {
   findTaskMessage(id: string): Promise<PersistedTaskMessage | null>;
   listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]>;
   claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null>;
-  reclaimTaskMessage(input: TaskDeliveryReclaimInput): Promise<PersistedTaskMessage | null>;
-  recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null>;
-  deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null>;
+  acceptTaskMessage(input: TaskDeliverySuccessInput): Promise<PersistedTaskMessage | null>;
   failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
 }
 
@@ -1018,7 +1000,6 @@ interface AtomicTaskMessageMutationInput {
 
 export interface AtomicTaskMessageEditInput extends AtomicTaskMessageMutationInput {
   content: string;
-  requestHash: string;
   expectedUpdatedAt: string;
   updatedAt: string;
   interactionChange: TaskInteractionChangeInput;
@@ -1090,25 +1071,10 @@ export interface TaskDeliveryClaimInput {
   leaseExpiresAt: string;
 }
 
-export interface TaskDeliveryReclaimInput extends TaskDeliveryClaimInput {
-  expectedClaimToken: string;
-}
-
-export interface TaskMessageReceiptInput {
+export interface TaskDeliverySuccessInput {
   id: string;
   claimToken: string;
-  receipt: PersistedDeliveryReceipt;
-  timelineCursor: string | null;
   updatedAt: string;
-}
-
-export interface TaskDeliveryDeferInput {
-  id: string;
-  claimToken: string;
-  safeError: string;
-  nextRetryAt: string;
-  updatedAt: string;
-  releaseClaim?: boolean;
 }
 
 export interface TaskDeliveryFailureInput {
@@ -1119,7 +1085,7 @@ export interface TaskDeliveryFailureInput {
 }
 
 
-export type TaskIdempotencyOperation = "create" | "message" | "terminal-start" | "message-edit" | "message-delete" | "abort-turn" | "work-stop" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
+export type TaskIdempotencyOperation = "create" | "message" | "terminal-start" | "message-edit" | "message-delete" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";
 
 export interface TaskIdempotencyScope {
   actorId: string;
@@ -1141,33 +1107,6 @@ export interface ClaimedTaskIdempotencyOperation extends TaskIdempotencyScope {
   resourceId: string;
   claimToken: string;
 }
-
-export interface TaskControlCommandEnvelope {
-  taskId:string;
-  expectedRunId:string;
-  interactionId:string|null;
-  downstreamCommandKey:string;
-  downstreamTargetId:string;
-}
-
-export interface BeginTaskControlCommandInput {
-  taskId:string;
-  expectedRunId:string;
-  interactionId:string|null;
-  downstreamCommandKey:string;
-  downstreamTargetId:string|null;
-  idempotency:BeginTaskIdempotencyInput&{operation:"abort-turn"|"work-stop"};
-}
-
-export interface InProgressTaskControlCommand extends TaskControlCommandEnvelope, ClaimedTaskIdempotencyOperation {
-  operation:"abort-turn"|"work-stop";
-}
-
-export type BeginTaskControlCommandResult =
-  | {kind:"claimed";command:InProgressTaskControlCommand}
-  | {kind:"in_progress";command:TaskControlCommandEnvelope}
-  | {kind:"replay";responseStatus:number;responseBody:unknown}
-  | {kind:"hash_mismatch"|"target_conflict"|"interaction_not_found"|"target_not_stoppable"};
 
 export type TaskIdempotencyBeginResult =
   | { kind: "claimed"; resourceId: string; claimToken: string }

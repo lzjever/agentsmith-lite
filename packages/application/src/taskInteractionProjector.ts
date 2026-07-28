@@ -44,7 +44,7 @@ export interface TaskCreatedInteractionSource extends ProductSourceBase {
   actorId?: string | null;
   messageId: string;
   content: string;
-  status: "pending" | "dispatching" | "retrying" | "accepted" | "failed";
+  status: "pending" | "dispatching" | "accepted" | "failed";
 }
 
 export interface MessageAdmittedInteractionSource extends ProductSourceBase {
@@ -60,7 +60,7 @@ export interface MessageDeliveryInteractionSource extends ProductSourceBase {
   actorId?: string | null;
   messageId: string;
   content?: string;
-  status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
+  status: "pending" | "dispatching" | "accepted" | "queued" | "rejected" | "failed";
 }
 
 export interface TurnAbortedInteractionSource extends ProductSourceBase {
@@ -68,19 +68,11 @@ export interface TurnAbortedInteractionSource extends ProductSourceBase {
   turnId: string;
 }
 
-export interface BackgroundWorkStoppedInteractionSource extends ProductSourceBase {
-  type: "background_work_stopped";
-  workTaskId: string;
-  toolCallId?: string;
-  status: "running" | "cancelling" | "completed" | "failed" | "timed_out" | "cancelled" | "lost";
-}
-
 export type ProductTaskInteractionSource =
   | TaskCreatedInteractionSource
   | MessageAdmittedInteractionSource
   | MessageDeliveryInteractionSource
-  | TurnAbortedInteractionSource
-  | BackgroundWorkStoppedInteractionSource;
+  | TurnAbortedInteractionSource;
 
 export type TaskInteractionProjectionSource = BotifiedTaskInteractionSource | ProductTaskInteractionSource;
 
@@ -205,10 +197,6 @@ function projectProduct(
     return { interaction };
   }
 
-  if (source.type === "background_work_stopped") {
-    return projectBackgroundWorkStopped(source, previous);
-  }
-
   const old = previous?.interaction.kind === "user_message" ? previous.interaction : null;
   const content = "content" in source ? source.content : undefined;
   const body = content === undefined ? bodyFromPrevious(old) : optionalProductRedacted(content, redaction);
@@ -223,38 +211,6 @@ function projectProduct(
     status: monotonicUserStatus(old?.status, incomingStatus)
   };
   return { interaction };
-}
-
-function projectBackgroundWorkStopped(
-  source: BackgroundWorkStoppedInteractionSource,
-  previous: TaskInteractionProjectionState | null
-): TaskInteractionProjectionResult {
-  const old = previous?.interaction.kind === "background_task" ? previous.interaction : null;
-  const incomingStatus = source.status === "cancelling" ? old?.executionStatus ?? "running" : source.status;
-  const executionStatus = monotonicExecution(old?.executionStatus, incomingStatus, BACKGROUND_TERMINAL);
-  const anchor = source.toolCallId ? `Tool:${source.toolCallId}` : `Task:${source.workTaskId}`;
-  const interaction: TaskBackgroundTaskInteraction = {
-    ...base(source.taskId, old?.id ?? interactionId(source.taskId, anchor), source, old),
-    kind: "background_task",
-    title: old?.title ?? "Background task",
-    body: old?.body ?? null,
-    contentMode: old?.contentMode ?? "none",
-    executionStatus,
-    deliveryStatus: old?.deliveryStatus ?? null,
-    label: old?.label ?? "Background task",
-    workSummary: old?.workSummary ?? null,
-    result: old?.result ?? null,
-    error: old?.error ?? null,
-    detailsOmitted: old?.detailsOmitted ?? false,
-    canStop: false
-  };
-  return {
-    interaction,
-    correlation: mergeCorrelation(previous?.correlation, {
-      toolCallId: source.toolCallId,
-      workTaskId: source.workTaskId
-    })
-  };
 }
 
 function projectInput(
@@ -358,8 +314,7 @@ function projectTool(
     command: summary.text ?? old?.command ?? null,
     outputTail,
     exitCode: integerField(data, "exit_code") ?? old?.exitCode ?? null,
-    detailsOmitted: old?.detailsOmitted === true || summary.detailsOmitted || output.detailsOmitted || outputDetailsOmitted,
-    canStop: false
+    detailsOmitted: old?.detailsOmitted === true || summary.detailsOmitted || output.detailsOmitted || outputDetailsOmitted
   };
   return { interaction, correlation: mergeCorrelation(previous?.correlation, { toolCallId }) };
 }
@@ -406,9 +361,7 @@ function projectBackgroundTask(
     workSummary: workSummary.text ?? oldWork?.workSummary ?? null,
     result: terminalWasPreserved ? oldWork.result : result.text ?? oldWork?.result ?? null,
     error: terminalWasPreserved ? oldWork.error : error.text ?? oldWork?.error ?? null,
-    detailsOmitted: detailsOmitted(old) || workSummary.detailsOmitted || result.detailsOmitted || error.detailsOmitted || outputDetailsOmitted,
-    canStop: executionStatus === "running"
-      && (oldWork?.executionStatus !== "running" || oldWork.canStop)
+    detailsOmitted: detailsOmitted(old) || workSummary.detailsOmitted || result.detailsOmitted || error.detailsOmitted || outputDetailsOmitted
   };
   return {
     interaction,
@@ -1006,9 +959,9 @@ function monotonicUserStatus(
   if (!current) return incoming;
   if(current==="accepted"&&incoming==="queued")return "queued";
   const rank: Record<TaskUserMessageInteraction["status"], number> = {
-    pending: 0, dispatching: 1, retrying: 2, queued: 3, accepted: 4, rejected: 4, failed: 4
+    pending: 0, dispatching: 1, queued: 2, accepted: 3, rejected: 3, failed: 3
   };
-  return rank[incoming] < rank[current] || rank[current] >= 4 ? current : incoming;
+  return rank[incoming] < rank[current] || rank[current] >= 3 ? current : incoming;
 }
 
 function terminalAssistantStatus(

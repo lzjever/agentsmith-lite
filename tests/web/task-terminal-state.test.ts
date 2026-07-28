@@ -256,7 +256,6 @@ function presentation(
       sendMessage: true,
       editQueuedMessage: false,
       abortTurn: false,
-      stopWork: false,
       openTerminal,
       releaseSandbox: state === "active",
       editTask: true,

@@ -856,11 +856,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
         claimedAt,
         leaseExpiresAt:"2026-07-23T00:06:00.000Z"
       }));
-      assert.ok(await writer.recordTaskMessageReceipt({
+      assert.ok(await writer.acceptTaskMessage({
         id:pending.id,
         claimToken,
-        receipt:{accepted:true,deliveryKey:pending.deliveryKey!,requestHash:pending.requestHash!,messageId:pending.id,cursor:"accepted-cursor"},
-        timelineCursor:"accepted-cursor",
         updatedAt:"2026-07-23T00:02:00.000Z"
       }));
       await writer.persistTaskInteractionMutation({
@@ -1622,7 +1620,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     first.expectedCurrentRunId=null;
     first.restart={task:replacement,runtimeState:{botifiedBaseUrl:"http://reclaim"},sandboxRun:run(replacement,"run_reclaim","starting"),reservedAt:replacement.updatedAt};
     first.idempotency={...first.idempotency,resourceId:"message_original",leaseExpiresAt:"2026-07-23T00:01:00.000Z"};
-    first.message={...first.message,id:"message_candidate",deliveryKey:"delivery_message_message_candidate"};
+    first.message={...first.message,id:"message_candidate"};
 
     assert.equal((await store.beginTaskIdempotency(first.idempotency)).kind,"claimed");
     assert.deepEqual(await store.findTaskIdempotency({
@@ -1635,7 +1633,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(await store.findTaskMessage("message_original"),null);
     const retry:AtomicTaskMessageInput={
       ...first,
-      message:{...first.message,id:"message_retry",deliveryKey:"delivery_message_message_retry"},
+      message:{...first.message,id:"message_retry"},
       idempotency:{...first.idempotency,resourceId:"message_retry",claimToken:"claim_retry",now:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:03:00.000Z"}
     };
     const reclaimed=await store.createTaskMessageAtomically(retry);
@@ -1645,142 +1643,6 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(((await store.queryProjectAuditEvents(task.projectId,{limit:100})).items).filter((event)=>event.action==="task.message.create").length,1);
   });
 
-  it("atomically freezes and reclaims an exact background control envelope",async()=>{
-    const task=taskRecord("task_exact_stop","library_exact_stop","run_exact_stop");
-    const activeRun={
-      ...run(task,task.currentRunId!,"starting"),
-      state:"active" as const,
-      startedAt:at,
-      startupReadyAt:at,
-      fencingToken:2
-    };
-    assert.equal((await store.createTaskAtomically({
-      task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
-      ...createAdmissionReceipt(task,"exact-stop"),
-      newFileLibrary:library(task.fileLibraryId!,"Exact stop"),
-      sandboxRun:activeRun
-    })).kind,"created");
-    const interaction={
-      id:"interaction_exact_stop",revision:1,taskId:task.id,kind:"background_task" as const,
-      title:"Background task",body:null,contentMode:"none" as const,position:1,
-      occurredAt:at,updatedAt:at,executionStatus:"running" as const,deliveryStatus:null,
-      label:"Compile",workSummary:null,result:null,error:null,detailsOmitted:false,canStop:true
-    };
-    await store.persistTaskInteractionMutation({
-      taskId:task.id,
-      changes:[{sourceKind:"botified",sourceId:"event_exact_stop_1",sourceRevision:0,interaction,correlation:{workTaskId:"work-exact-original"}}]
-    });
-
-    const first=await store.beginTaskControlCommand({
-      taskId:task.id,expectedRunId:activeRun.runId,interactionId:interaction.id,
-      downstreamCommandKey:"downstream-exact-original",downstreamTargetId:null,
-      idempotency:{
-        actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
-        key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
-        claimToken:"exact-stop-first",now:"2026-07-23T00:01:00.000Z",leaseExpiresAt:"2026-07-23T00:02:00.000Z"
-      }
-    });
-    assert.equal(first.kind,"claimed");
-    assert.deepEqual(first.kind==="claimed"?first.command:null,{
-      actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
-      key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
-      claimToken:"exact-stop-first",taskId:task.id,expectedRunId:activeRun.runId,
-      interactionId:interaction.id,downstreamCommandKey:"downstream-exact-original",
-      downstreamTargetId:"work-exact-original"
-    });
-
-    await store.persistTaskInteractionMutation({
-      taskId:task.id,
-      changes:[{
-        sourceKind:"botified",sourceId:"event_exact_stop_2",sourceRevision:0,
-        interaction:{...interaction,revision:2,updatedAt:"2026-07-23T00:02:00.000Z"},
-        correlation:{workTaskId:"work-must-not-rebind"}
-      }]
-    });
-    const reclaimed=await store.beginTaskControlCommand({
-      taskId:task.id,expectedRunId:activeRun.runId,interactionId:interaction.id,
-      downstreamCommandKey:"downstream-must-not-rebind",downstreamTargetId:null,
-      idempotency:{
-        actorId:"user_atomic",projectId:task.projectId,operation:"work-stop",
-        key:"product-exact-stop",requestHash:"product-exact-stop-hash",resourceId:task.id,
-        claimToken:"exact-stop-reclaimed",now:"2026-07-23T00:03:00.000Z",leaseExpiresAt:"2026-07-23T00:04:00.000Z"
-      }
-    });
-    assert.equal(reclaimed.kind,"claimed");
-    assert.deepEqual(
-      reclaimed.kind==="claimed"?{
-        ...reclaimed.command,
-        claimToken:"exact-stop-first"
-      }:null,
-      first.kind==="claimed"?first.command:null
-    );
-  });
-
-  it("keeps completed exact control history from blocking Task purge or Project deletion",async()=>{
-    const createReleasedTaskWithControl=async(label:string)=>{
-      const task=taskRecord(`task_exact_delete_${label}`,`library_exact_delete_${label}`,`run_exact_delete_${label}`);
-      const active={
-        ...run(task,task.currentRunId!,"starting"),
-        state:"active" as const,startedAt:at,startupReadyAt:at,fencingToken:2
-      };
-      assert.equal((await store.createTaskAtomically({
-        task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
-        ...createAdmissionReceipt(task,`exact-delete-${label}`),
-        newFileLibrary:library(task.fileLibraryId!,`Exact delete ${label}`),sandboxRun:active
-      })).kind,"created");
-      const control=await store.beginTaskControlCommand({
-        taskId:task.id,expectedRunId:active.runId,interactionId:null,
-        downstreamCommandKey:`downstream-delete-${label}`,downstreamTargetId:`turn-delete-${label}`,
-        idempotency:{
-          actorId:"user_atomic",projectId:task.projectId,operation:"abort-turn",
-          key:`product-delete-${label}`,requestHash:`product-delete-hash-${label}`,resourceId:task.id,
-          claimToken:`control-delete-claim-${label}`,now:at,leaseExpiresAt:"2026-07-23T00:05:00.000Z"
-        }
-      });
-      assert.equal(control.kind,"claimed");
-      assert.equal(control.kind==="claimed"&&await store.completeTaskIdempotency({
-        actorId:control.command.actorId,projectId:control.command.projectId,operation:control.command.operation,
-        key:control.command.key,requestHash:control.command.requestHash,claimToken:control.command.claimToken,
-        responseStatus:200,
-        responseBody:{
-          outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:active.runId,
-          turnId:`turn-delete-${label}`,result:"completed"
-        },
-        updatedAt:"2026-07-23T00:01:00.000Z"
-      }),true);
-      const releasedAt="2026-07-23T00:02:00.000Z";
-      const released={
-        ...active,state:"released" as const,releaseReason:"requested" as const,
-        releaseRequestedAt:releasedAt,releasedAt,fencingToken:3,updatedAt:releasedAt
-      };
-      assert.equal(await store.completeSandboxRunRelease({
-        runId:active.runId,expectedFencingToken:active.fencingToken,run:released,
-        settlement:{
-          runId:active.runId,workspaceId:active.workspaceId,projectId:active.projectId,
-          taskId:active.taskId,fileLibraryId:active.fileLibraryId,startedByUserId:active.startedByUserId,
-          startedAt:active.startedAt,releasedAt,durationSeconds:120,resources:active.resourceSnapshot,
-          releaseReason:"requested"
-        },
-        auditEvent:{
-          id:`audit_exact_delete_release_${label}`,projectId:task.projectId,actorId:null,
-          subjectUserId:active.startedByUserId,action:"sandbox.released",status:"accepted",
-          resourceKind:"sandbox",resourceId:task.id,
-          detail:{taskId:task.id,runId:active.runId,releaseReason:"requested"},createdAt:releasedAt
-        }
-      }),"applied");
-      return task;
-    };
-
-    const purged=await createReleasedTaskWithControl("task");
-    assert.equal((await store.beginTaskDeletion(purged.id,"2026-07-23T00:03:00.000Z")).kind,"ready");
-    assert.equal(await store.purgeDeletedTaskData(purged.id),true);
-    assert.equal(await store.findTask(purged.id),null);
-
-    await createReleasedTaskWithControl("project");
-    assert.equal((await store.beginProjectDeletion("project_atomic","2026-07-23T00:03:00.000Z","user_atomic")).kind,"ready");
-    assert.equal(await store.finalizeProjectDeletion("project_atomic"),"deleted");
-    assert.equal(await store.findProject("project_atomic"),null);
-  });
 
   it("keeps a PostgreSQL pending-message crash window out of due and claim paths",async()=>{
     const task={...taskRecord("task_dispatch_guard","library_dispatch_guard","unused"),currentRunId:null};
@@ -1834,7 +1696,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       initialMessage:original
     })).kind,"created");
 
-    const edited={...original,content:"edited",requestHash:"edited-hash",updatedAt:"2026-07-23T00:01:00.000Z"};
+    const edited={...original,content:"edited",updatedAt:"2026-07-23T00:01:00.000Z"};
     const interaction={
       id:"interaction_message_mutation",
       taskId:task.id,
@@ -1853,7 +1715,6 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       taskId:task.id,
       messageId:original.id,
       content:edited.content,
-      requestHash:edited.requestHash,
       expectedUpdatedAt:original.updatedAt!,
       updatedAt:edited.updatedAt,
       interactionChange:{sourceKind:"product",sourceId:`message:${original.id}`,sourceRevision:2,interaction},
@@ -1871,7 +1732,6 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     const staleEdit=await store.editTaskMessageAtomically({
       ...edit,
       content:"stale overwrite",
-      requestHash:"stale-hash",
       idempotency:{...edit.idempotency,key:"stale-edit",requestHash:"stale-edit-request",claimToken:"stale-edit-claim"},
       auditEvent:{...edit.auditEvent,id:"audit_message_stale_edit"}
     });
@@ -2482,7 +2342,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   function taskRecord(id:string,fileLibraryId:string,currentRunId:string):PersistedAgentTask{return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",endpointId:"endpoint_atomic",fileLibraryId,createdByUserId:"user_atomic",title:"Task",prompt:"Work",agentContext:"",currentRunId,archivedAt:null,deletedAt:null,createdAt:at,updatedAt:at};}
   function library(id:string,name:string){return{id,workspaceId:"workspace_atomic",projectId:"project_atomic",name,rootSubPath:`libraries/${id}/home`,lifecycleStatus:"active" as const,createdByUserId:"user_atomic",createdAt:at,updatedAt:at};}
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
-  function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
+  function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function alertRule(id:string,projectId:string):ProjectAlertRule{return{id,projectId,name:id,alertType:"sandbox_failure",metric:"failure_count",condition:"greater_than_or_equal",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:false,createdAt:at,updatedAt:at};}
   function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,startupReadyAt:state==="released"?at:null,startupConfigMapName:`config-${runId}`,startupConfigHash:"sha256:fixture",startupPodUid:`pod-uid-${runId}`,startupPodIp:"10.42.0.17",startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
   function usageOverviewReadInput(measuredAt:string){const periodStart="2026-06-24T00:00:00.000Z",periodEnd="2026-07-24T00:00:00.000Z";return{projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",selectedEndpointId:null,periodStart,periodEnd,measuredAt}}

@@ -68,14 +68,9 @@ import type {
   TaskArtifactStoreListQuery,
   TaskArtifactStoreListPage,
   TaskDeliveryClaimInput,
-  TaskDeliveryReclaimInput,
-  TaskMessageReceiptInput,
-  TaskDeliveryDeferInput,
+  TaskDeliverySuccessInput,
   TaskDeliveryFailureInput,
   BeginTaskIdempotencyInput,
-  BeginTaskControlCommandInput,
-  BeginTaskControlCommandResult,
-  InProgressTaskControlCommand,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
@@ -1632,8 +1627,8 @@ export class PostgresProductStore implements ProductStore {
       const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
       if(!task||task.project_id!==input.idempotency.projectId||task.deleted_at||task.archived_at)throw new AtomicTaskMessageConflict();
       const updated=await client.query<TaskMessageRow>(
-        "update task_messages set content=$3,request_hash=$4,updated_at=$5 where id=$1 and task_id=$2 and delivery_status='pending' and deleted_at is null and updated_at=$6 returning *",
-        [input.messageId,input.taskId,input.content,input.requestHash,input.updatedAt,input.expectedUpdatedAt]
+        "update task_messages set content=$3,updated_at=$4 where id=$1 and task_id=$2 and delivery_status='pending' and deleted_at is null and updated_at=$5 returning *",
+        [input.messageId,input.taskId,input.content,input.updatedAt,input.expectedUpdatedAt]
       );
       if(!updated.rows[0])throw new AtomicTaskMessageConflict();
       await persistTaskInteractionChangesWithClient(client,input.taskId,[input.interactionChange]);
@@ -1809,83 +1804,6 @@ export class PostgresProductStore implements ProductStore {
     });
   }
 
-  async beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>{
-    return transaction(this.pool,async(client)=>{
-      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
-      let receipt=(await client.query<TaskIdempotencyRow>(
-        "select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",
-        [input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key]
-      )).rows[0];
-      if(receipt){
-        if(receipt.request_hash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
-        if(receipt.status==="completed")return{
-          kind:"replay",
-          responseStatus:receipt.response_status!,
-          responseBody:mapTaskIdempotencyResponseBody(receipt.operation,receipt.response_body)
-        };
-        const command=postgresTaskControlCommand(receipt);
-        if(!command)return{kind:"hash_mismatch"};
-        if(toIso(receipt.lease_expires_at)>input.idempotency.now)return{kind:"in_progress",command:taskControlEnvelope(command)};
-        receipt=(await client.query<TaskIdempotencyRow>(
-          `update task_idempotency_records
-              set claim_token=$5,lease_expires_at=$6,updated_at=$7
-            where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
-            returning *`,
-          [input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key,input.idempotency.claimToken,input.idempotency.leaseExpiresAt,input.idempotency.now]
-        )).rows[0]!;
-        return{kind:"claimed",command:postgresTaskControlCommand(receipt)!};
-      }
-
-      if(
-        input.idempotency.resourceId!==input.taskId||
-        !task||task.deleted_at||task.archived_at||
-        task.project_id!==input.idempotency.projectId||
-        task.current_run_id!==input.expectedRunId
-      )return{kind:"target_conflict"};
-      const run=(await client.query<SandboxRunRow>("select * from sandbox_runs where run_id=$1 for update",[input.expectedRunId])).rows[0];
-      if(!run||run.state!=="active"||run.task_id!==task.id||run.project_id!==task.project_id||run.workspace_id!==task.workspace_id||run.file_library_id!==task.file_library_id)return{kind:"target_conflict"};
-
-      let downstreamTargetId=input.downstreamTargetId;
-      if(input.idempotency.operation==="abort-turn"){
-        if(input.interactionId!==null||!downstreamTargetId)return{kind:"target_conflict"};
-      }else{
-        if(!input.interactionId||downstreamTargetId!==null)return{kind:"target_conflict"};
-        const interaction=(await client.query<TaskInteractionChangeRow>(
-          "select * from task_interaction_changes where task_id=$1 and interaction_id=$2 order by revision desc,change_seq desc limit 1 for update",
-          [input.taskId,input.interactionId]
-        )).rows[0];
-        if(!interaction||interaction.interaction_kind!=="background_task")return{kind:"interaction_not_found"};
-        const projected=mapTaskInteractionChange(interaction);
-        if(projected.interaction.kind!=="background_task"||projected.interaction.executionStatus!=="running"||!projected.interaction.canStop||!projected.correlation?.workTaskId)return{kind:"target_not_stoppable"};
-        downstreamTargetId=projected.correlation.workTaskId;
-      }
-      receipt=(await client.query<TaskIdempotencyRow>(
-        `insert into task_idempotency_records
-           (actor_id,project_id,operation,idempotency_key,request_hash,resource_id,status,claim_token,
-            lease_expires_at,created_at,updated_at,expected_run_id,interaction_id,downstream_command_key,downstream_target_id)
-         values ($1,$2,$3,$4,$5,$6,'in_progress',$7,$8,$9,$9,$10,$11,$12,$13)
-         returning *`,
-        [
-          input.idempotency.actorId,input.idempotency.projectId,input.idempotency.operation,input.idempotency.key,
-          input.idempotency.requestHash,input.idempotency.resourceId,input.idempotency.claimToken,
-          input.idempotency.leaseExpiresAt,input.idempotency.now,input.expectedRunId,input.interactionId,
-          input.downstreamCommandKey,downstreamTargetId
-        ]
-      )).rows[0]!;
-      return{kind:"claimed",command:postgresTaskControlCommand(receipt)!};
-    });
-  }
-
-  async listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>{
-    const rows=await this.queryRows<TaskIdempotencyRow>(
-      `select * from task_idempotency_records
-        where operation in ('abort-turn','work-stop') and status='in_progress'
-        order by updated_at,idempotency_key collate "C" limit $1`,
-      [Math.max(1,Math.floor(limit))]
-    );
-    return rows.map(postgresTaskControlCommand).filter((command):command is InProgressTaskControlCommand=>command!==null);
-  }
-
   async findTaskIdempotencyByResource(input:TaskIdempotencyResourceLookupInput):Promise<TaskIdempotencyBeginResult|null>{
     const rows=await this.queryRows<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and operation=$2 and idempotency_key=$3 and resource_id=$4 order by updated_at desc limit 1",[input.actorId,input.operation,input.key,input.resourceId]);
     const row=rows[0];
@@ -1981,24 +1899,6 @@ export class PostgresProductStore implements ProductStore {
       !claim||claim.status!=="in_progress"||claim.request_hash!==idem.requestHash||
       claim.claim_token!==idem.claimToken||claim.resource_id!==input.runId
     )return"conflict" as const;
-    const controlRows=(await client.query<TaskIdempotencyRow>(
-      `select * from task_idempotency_records
-        where resource_id=$1 and status='in_progress'
-          and operation in ('abort-turn','work-stop')
-        order by actor_id collate "C",project_id collate "C",operation collate "C",idempotency_key collate "C"
-        for update`,
-      [input.taskId]
-    )).rows;
-    const controls=controlRows.map((row)=>{
-      const command=postgresTaskControlCommand(row);
-      if(
-        !command||command.taskId!==input.taskId||
-        command.projectId!==idem.projectId
-      )throw new Error("Exact Task control envelope is inconsistent with released Run");
-      return command.expectedRunId===input.runId
-        ?{row,responseBody:supersededTaskControlReceipt(command)}
-        :null;
-    }).filter((control):control is NonNullable<typeof control>=>control!==null);
     const already=current.state==="release_requested"||current.state==="released";
     if(current.fencingToken!==input.expectedFencingToken)return"conflict" as const;
     if(current.state!=="released"){
@@ -2028,20 +1928,6 @@ export class PostgresProductStore implements ProductStore {
         ]
       );
       if(completed.rowCount!==1)throw new Error("Released Sandbox Run lost its locked Release receipt");
-    }
-    for(const control of controls){
-      const result=await client.query(
-        `update task_idempotency_records
-            set status='completed',response_status=409,response_body=$7::jsonb,updated_at=$8
-          where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
-            and request_hash=$5 and claim_token=$6 and status='in_progress'`,
-        [
-          control.row.actor_id,control.row.project_id,control.row.operation,
-          control.row.idempotency_key,control.row.request_hash,control.row.claim_token,
-          JSON.stringify(control.responseBody),idem.updatedAt
-        ]
-      );
-      if(result.rowCount!==1)throw new Error("Exact Task control supersession lost its locked receipt");
     }
     return already?"already_requested" as const:"applied" as const;
   })}
@@ -2207,11 +2093,9 @@ export class PostgresProductStore implements ProductStore {
   async createPendingTaskMessage(message:PersistedTaskMessage,interactionChange:TaskInteractionChangeInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[message.taskId]);if(!source.rows[0]||source.rows[0].deleted_at)return null;if(interactionChange.sourceKind!=="product"||interactionChange.sourceId!==`message:${message.id}`||interactionChange.interaction.taskId!==message.taskId)throw new Error("Task message interaction identity mismatch");const created=mapPersistedTaskMessage(await insertPersistedTaskMessageWithClient(client,message));await persistTaskInteractionChangesWithClient(client,message.taskId,[interactionChange]);return created;});}
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null order by created_at,id",[taskId]); return rows.map(mapPersistedTaskMessage); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where id=$1",[id]);return rows[0]?mapPersistedTaskMessage(rows[0]):null; }
-  async listTaskMessagesDue(now:string,limit:number):Promise<PersistedTaskMessage[]>{const rows=await this.queryRows<TaskMessageRow>(`select message.* from task_messages message where message.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=message.task_id and interaction.source_kind='product' and interaction.source_id='message:'||message.id) and ((message.delivery_status='pending' and (message.next_retry_at is null or message.next_retry_at <= $1)) or (message.delivery_status='dispatching' and message.lease_expires_at <= $1 and (message.next_retry_at is null or message.next_retry_at <= $1))) order by message.created_at,message.id limit $2`,[now,limit]);return rows.map(mapPersistedTaskMessage);}
-  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,attempt_count=target.attempt_count+1,safe_error=null,updated_at=$3 where target.id=$1 and target.delivery_status='pending' and target.claim_token is null and target.deleted_at is null and (target.next_retry_at is null or target.next_retry_at <= $3) and exists (select 1 from task_interaction_changes interaction where interaction.task_id=target.task_id and interaction.source_kind='product' and interaction.source_id='message:'||target.id) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id) and exists (select 1 from task_interaction_changes older_interaction where older_interaction.task_id=older.task_id and older_interaction.source_kind='product' and older_interaction.source_id='message:'||older.id)) returning target.*`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
-  async reclaimTaskMessage(input:TaskDeliveryReclaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set claim_token=$3,claimed_at=$4,lease_expires_at=$5,attempt_count=target.attempt_count+1,safe_error=null,updated_at=$4 where target.id=$1 and target.delivery_status='dispatching' and target.claim_token=$2 and target.lease_expires_at <= $4 and (target.next_retry_at is null or target.next_retry_at <= $4) and target.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=target.task_id and interaction.source_kind='product' and interaction.source_id='message:'||target.id) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id) and exists (select 1 from task_interaction_changes older_interaction where older_interaction.task_id=older.task_id and older_interaction.source_kind='product' and older_interaction.source_id='message:'||older.id)) returning target.*`,[input.id,input.expectedClaimToken,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
-  async recordTaskMessageReceipt(input:TaskMessageReceiptInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set receipt=$3::jsonb,timeline_cursor=$4,delivery_status='accepted',lease_expires_at=null,next_retry_at=null,safe_error=null,updated_at=$5 where id=$1 and delivery_status='dispatching' and claim_token=$2 and delivery_key=$6 and request_hash=$7 and $8::boolean and deleted_at is null returning *`,[input.id,input.claimToken,JSON.stringify(input.receipt),input.timelineCursor,input.updatedAt,input.receipt.deliveryKey,input.receipt.requestHash,input.receipt.accepted]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
-  async deferTaskMessage(input:TaskDeliveryDeferInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status=case when $3 then 'pending' else delivery_status end,claim_token=case when $3 then null else claim_token end,claimed_at=case when $3 then null else claimed_at end,lease_expires_at=case when $3 then null else lease_expires_at end,safe_error=$4,next_retry_at=$5,updated_at=$6 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.releaseClaim===true,input.safeError,input.nextRetryAt,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async listTaskMessagesDue(now:string,limit:number):Promise<PersistedTaskMessage[]>{const rows=await this.queryRows<TaskMessageRow>(`select message.* from task_messages message where message.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=message.task_id and interaction.source_kind='product' and interaction.source_id='message:'||message.id) and (message.delivery_status='pending' or (message.delivery_status='dispatching' and message.lease_expires_at <= $1)) order by message.created_at,message.id limit $2`,[now,limit]);return rows.map(mapPersistedTaskMessage);}
+  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,safe_error=null,updated_at=$3 where target.id=$1 and target.delivery_status='pending' and target.claim_token is null and target.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=target.task_id and interaction.source_kind='product' and interaction.source_id='message:'||target.id) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id) and exists (select 1 from task_interaction_changes older_interaction where older_interaction.task_id=older.task_id and older_interaction.source_kind='product' and older_interaction.source_id='message:'||older.id)) returning target.*`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
+  async acceptTaskMessage(input:TaskDeliverySuccessInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='accepted',lease_expires_at=null,safe_error=null,updated_at=$3 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
   async failTaskMessage(input:TaskDeliveryFailureInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='failed',safe_error=$3,lease_expires_at=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.safeError,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
 
 
@@ -2741,8 +2625,7 @@ async function insertAuditEventWithClient(client: PoolClient, event: ProjectAudi
 function canonicalTaskMessage(message:PersistedTaskMessage,resourceId:string):PersistedTaskMessage {
   return {
     ...message,
-    id:resourceId,
-    deliveryKey:`delivery_message_${resourceId}`
+    id:resourceId
   };
 }
 
@@ -2860,8 +2743,8 @@ async function selectSandboxRunWithClient(client:PoolClient,runId:string,lock=fa
 }
 
 async function insertPersistedTaskMessageWithClient(client: PoolClient, message: PersistedTaskMessage): Promise<TaskMessageRow> {
-  const inserted = await client.query<TaskMessageRow>(`insert into task_messages (id,task_id,actor_id,content,delivery_key,request_hash,claim_token,receipt,timeline_cursor,delivery_status,claimed_at,lease_expires_at,attempt_count,next_retry_at,safe_error,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) returning *`,[
-    message.id,message.taskId,message.actorId??null,message.content,message.deliveryKey??null,message.requestHash??null,message.claimToken??null,message.receipt?JSON.stringify(message.receipt):null,message.timelineCursor??null,message.deliveryStatus??"pending",message.claimedAt??null,message.leaseExpiresAt??null,message.attemptCount??0,message.nextRetryAt??null,message.safeError??null,message.createdAt,message.updatedAt??message.createdAt,message.deletedAt??null
+  const inserted = await client.query<TaskMessageRow>(`insert into task_messages (id,task_id,actor_id,content,claim_token,delivery_status,claimed_at,lease_expires_at,safe_error,created_at,updated_at,deleted_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning *`,[
+    message.id,message.taskId,message.actorId??null,message.content,message.claimToken??null,message.deliveryStatus??"pending",message.claimedAt??null,message.leaseExpiresAt??null,message.safeError??null,message.createdAt,message.updatedAt??message.createdAt,message.deletedAt??null
   ]);
   return inserted.rows[0]!;
 }
@@ -3013,9 +2896,9 @@ interface AgentTaskArtifactRow {
   preview_text: string | null;
   created_at: unknown;
 }
-interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; content:string; delivery_key:string|null; request_hash:string|null; claim_token:string|null; receipt:unknown; timeline_cursor:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; attempt_count:number; next_retry_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
+interface TaskMessageRow { id:string; task_id:string; actor_id:string|null; content:string; claim_token:string|null; delivery_status:NonNullable<PersistedTaskMessage["deliveryStatus"]>; claimed_at:unknown; lease_expires_at:unknown; safe_error:string|null; created_at:unknown; updated_at:unknown; deleted_at:unknown; }
 interface TaskInteractionChangeRow { task_id:string; change_seq:string|number; source_kind:PersistedTaskInteractionChange["sourceKind"]; source_id:string; source_revision:string|number; interaction_id:string; revision:number; position:string|number; interaction_kind:TaskInteractionItem["kind"]; interaction:unknown; tool_call_id:string|null; work_task_id:string|null; callback_id:string|null; occurred_at:unknown; updated_at:unknown; }
-interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;terminal_task_id:string|null;expected_run_id:string|null;interaction_id:string|null;downstream_command_key:string|null;downstream_target_id:string|null;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
+interface TaskIdempotencyRow { actor_id:string;project_id:string;operation:string;idempotency_key:string;request_hash:string;resource_id:string;status:"in_progress"|"completed";claim_token:string;lease_expires_at:unknown;response_status:number|null;response_body:unknown;created_at:unknown;updated_at:unknown;terminal_task_id:string|null;file_deletion_phase:"isolated"|"removed"|null;file_deletion_quarantine_device:string|null;file_deletion_quarantine_inode:string|null;file_deletion_entry_type:"file"|"directory"|"symlink"|"unsupported"|null;file_deletion_bytes:string|number|null; }
 interface ProjectPolicyRow { project_id: string; active_tasks_limit: number | null; provider_requests_limit: string | number | null; provider_tokens_limit: string | number | null; provider_cost_limit: number | null; project_file_bytes_limit: string | number | null; created_at: unknown; updated_at: unknown; }
 interface ProjectUsageRow { project_id: string; active_tasks: number; provider_requests: string | number; provider_tokens: string | number; provider_cost: number; project_file_bytes: string | number; project_file_bytes_measured_at: unknown | null; updated_at: unknown; }
 interface ProjectProviderSettlementRow extends ProjectUsageRow { provider_requests_exceeded: boolean; provider_tokens_exceeded: boolean; provider_cost_exceeded: boolean; }
@@ -3203,7 +3086,7 @@ function mapTaskArtifact(row: AgentTaskArtifactRow): PersistedTaskArtifact {
   artifact.previewText = row.preview_text ?? null;
   return artifact;
 }
-function mapPersistedTaskMessage(row: TaskMessageRow): PersistedTaskMessage { return { id:row.id, taskId:row.task_id, actorId:row.actor_id, content:row.content, deliveryKey:row.delivery_key, requestHash:row.request_hash, claimToken:row.claim_token, receipt:mapTaskDeliveryReceipt(row.receipt), timelineCursor:row.timeline_cursor, deliveryStatus:row.delivery_status, claimedAt:row.claimed_at?toIso(row.claimed_at):null, leaseExpiresAt:row.lease_expires_at?toIso(row.lease_expires_at):null, attemptCount:row.attempt_count??0, nextRetryAt:row.next_retry_at?toIso(row.next_retry_at):null, safeError:row.safe_error, createdAt:toIso(row.created_at), updatedAt:toIso(row.updated_at), deletedAt:row.deleted_at?toIso(row.deleted_at):null }; }
+function mapPersistedTaskMessage(row: TaskMessageRow): PersistedTaskMessage { return { id:row.id, taskId:row.task_id, actorId:row.actor_id, content:row.content, claimToken:row.claim_token, deliveryStatus:row.delivery_status, claimedAt:row.claimed_at?toIso(row.claimed_at):null, leaseExpiresAt:row.lease_expires_at?toIso(row.lease_expires_at):null, safeError:row.safe_error, createdAt:toIso(row.created_at), updatedAt:toIso(row.updated_at), deletedAt:row.deleted_at?toIso(row.deleted_at):null }; }
 function mapTaskInteractionChange(row: TaskInteractionChangeRow): PersistedTaskInteractionChange {
   const interaction = asRecord(row.interaction) as unknown as TaskInteractionItem;
   const sourceRevision = parseTaskInteractionSourceRevision(row.source_revision);
@@ -3211,51 +3094,6 @@ function mapTaskInteractionChange(row: TaskInteractionChangeRow): PersistedTaskI
   return { changeSeq:Number(row.change_seq),sourceKind:row.source_kind,sourceId:row.source_id,sourceRevision,interaction,correlation:{toolCallId:row.tool_call_id,workTaskId:row.work_task_id,callbackId:row.callback_id} };
 }
 
-function postgresTaskControlCommand(row:TaskIdempotencyRow):InProgressTaskControlCommand|null{
-  if(
-    (row.operation!=="abort-turn"&&row.operation!=="work-stop")||
-    !row.expected_run_id||!row.downstream_command_key||!row.downstream_target_id||
-    (row.operation==="abort-turn"&&row.interaction_id!==null)||
-    (row.operation==="work-stop"&&!row.interaction_id)
-  )return null;
-  return{
-    actorId:row.actor_id,
-    projectId:row.project_id,
-    operation:row.operation,
-    key:row.idempotency_key,
-    requestHash:row.request_hash,
-    resourceId:row.resource_id,
-    claimToken:row.claim_token,
-    taskId:row.resource_id,
-    expectedRunId:row.expected_run_id,
-    interactionId:row.interaction_id,
-    downstreamCommandKey:row.downstream_command_key,
-    downstreamTargetId:row.downstream_target_id
-  };
-}
-
-function taskControlEnvelope(command:InProgressTaskControlCommand){
-  return{
-    taskId:command.taskId,
-    expectedRunId:command.expectedRunId,
-    interactionId:command.interactionId,
-    downstreamCommandKey:command.downstreamCommandKey,
-    downstreamTargetId:command.downstreamTargetId
-  };
-}
-function supersededTaskControlReceipt(command:InProgressTaskControlCommand){
-  return{
-    outcome:"completed",
-    keyDisposition:"retire",
-    taskId:command.taskId,
-    runId:command.expectedRunId,
-    ...(command.operation==="abort-turn"
-      ?{turnId:command.downstreamTargetId}
-      :{interactionId:command.interactionId!}),
-    result:"conflict",
-    code:"task_control_superseded_by_release"
-  };
-}
 function parseTaskInteractionSourceRevision(value:string|number):number {
   const revision=Number(value);
   if(!Number.isSafeInteger(revision)||revision<0)throw new Error("Stored task interaction source revision is invalid");
@@ -3266,18 +3104,6 @@ function validatePostgresInteractionChange(taskId:string,change:PersistTaskInter
   if(change.interaction.taskId!==taskId||change.interaction.id.length===0||change.sourceId.length===0)throw new Error("Task interaction identity mismatch");
   if(change.sourceKind==="botified"&&change.sourceRevision!==0)throw new Error("Botified interaction revisions are cursor-based");
   if(!Number.isSafeInteger(change.sourceRevision)||change.sourceRevision<0||!Number.isSafeInteger(change.interaction.revision)||change.interaction.revision<1||!Number.isSafeInteger(change.interaction.position)||change.interaction.position<0)throw new Error("Task interaction sequence is invalid");
-}
-
-function mapTaskDeliveryReceipt(value: unknown): NonNullable<PersistedTaskMessage["receipt"]> | null {
-  const receipt = asRecord(value);
-  if (typeof receipt.accepted !== "boolean" || typeof receipt.deliveryKey !== "string" || typeof receipt.requestHash !== "string") return null;
-  return {
-    accepted: receipt.accepted,
-    deliveryKey: receipt.deliveryKey,
-    requestHash: receipt.requestHash,
-    ...(typeof receipt.messageId === "string" ? { messageId: receipt.messageId } : {}),
-    ...(typeof receipt.cursor === "string" ? { cursor: receipt.cursor } : {})
-  };
 }
 
 function policyValues(policy: ProjectResourcePolicy): unknown[] { return [policy.projectId, policy.sandboxLimit, policy.providerRequestsLimit, policy.providerTokensLimit, policy.providerCostLimit, policy.projectFileBytesLimit, policy.createdAt, policy.updatedAt]; }

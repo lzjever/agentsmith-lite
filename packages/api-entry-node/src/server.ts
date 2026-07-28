@@ -54,8 +54,6 @@ interface CommonApiServerOptions {
   sandboxLifecyclePort?: SandboxLifecycleKubernetesPort;
   sandboxNamespaceLimit?: number;
   taskDeliveryLeaseMs?: number;
-  taskControlLeaseMs?: number;
-  taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
   terminalAccessRecheckMs?: number;
   terminalTcpConnectTimeoutMs?:number;
@@ -134,8 +132,6 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
     ...(options.taskDeliveryLeaseMs !== undefined ? { taskDeliveryLeaseMs: options.taskDeliveryLeaseMs } : {}),
-    ...(options.taskControlLeaseMs !== undefined ? { taskControlLeaseMs: options.taskControlLeaseMs } : {}),
-    ...(options.taskRetryDelayMs !== undefined ? { taskRetryDelayMs: options.taskRetryDelayMs } : {}),
     ...(options.sandboxNamespaceLimit !== undefined ? { sandboxNamespaceLimit: options.sandboxNamespaceLimit } : {}),
     ...(options.runtimeTickIntervalMs !== undefined ? { runtimeTickIntervalMs: options.runtimeTickIntervalMs } : {}),
     requireBuiltinAdminPasswordForLiveSandbox: authMode === "builtin_admin",
@@ -982,19 +978,9 @@ async function routeApi(
     if(segments[4]==="turn"&&segments[5]==="abort"&&method==="POST"){
       assertOnlySearchParams(url,[]);
       const body=await readJson(req);
-      assertOnlyKeys(body,["expectedRunId","turnId"]);
-      return sendTaskRuntimeCommand(res,()=>services.tasks.abortTaskTurn(
-        user.id,taskId,{expectedRunId:asString(body.expectedRunId),turnId:asString(body.turnId)},requireIdempotencyKey(req)
-      ));
-    }
-    if(segments[4]==="work"&&segments[5]&&segments[6]==="stop"&&method==="POST"){
-      assertOnlySearchParams(url,[]);
-      const body=await readJson(req);
-      assertOnlyKeys(body,["expectedRunId","interactionId"]);
-      const interactionId=asString(body.interactionId);
-      if(interactionId!==segments[5])throw new ProductError("Background work interaction target does not match the route",409,"task_control_target_conflict");
-      return sendTaskRuntimeCommand(res,()=>services.tasks.stopTaskBackgroundWork(
-        user.id,taskId,{expectedRunId:asString(body.expectedRunId),interactionId},requireIdempotencyKey(req)
+      assertOnlyKeys(body,["expectedRunId"]);
+      return sendJson(res,200,await services.tasks.abortTaskTurn(
+        user.id,taskId,{expectedRunId:asString(body.expectedRunId)}
       ));
     }
     if (segments[4] === "artifacts" && segments[5] && segments[6] === "download" && method === "GET") {
@@ -1309,7 +1295,7 @@ function isKnownApiRoutePath(pathname: string): boolean {
     /^\/api\/v1\/notifications\/[^/]+(?:\/read)?$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/endpoints\/(?:models|[^/]+(?:\/health)?)$/.test(pathname) ||
     /^\/api\/v1\/projects\/[^/]+\/file-libraries(?:\/[^/]+(?:\/files(?:\/(?:download|preview))?)?)?$/.test(pathname) ||
-    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|archive|sandbox\/release|terminal\/start|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort|work\/[^/]+\/stop))?$/.test(pathname) ||
+    /^\/api\/v1\/tasks\/[^/]+(?:\/(?:artifacts|detail|archive|sandbox\/release|terminal\/start|interactions(?:\/stream)?|messages(?:\/[^/]+)?|turn\/abort))?$/.test(pathname) ||
     /^\/api\/v1\/tasks\/[^/]+\/artifacts\/[^/]+\/download$/.test(pathname);
 }
 
@@ -1643,9 +1629,7 @@ async function sendTaskRuntimeCommand(
   res:ServerResponse,
   command:()=>Promise<
     import("../../contracts/src/api.js").TaskTerminalStartReceipt|
-    import("../../contracts/src/api.js").TaskSandboxReleaseReceipt|
-    import("../../contracts/src/api.js").TaskTurnAbortReceipt|
-    import("../../contracts/src/api.js").TaskBackgroundWorkStopReceipt
+    import("../../contracts/src/api.js").TaskSandboxReleaseReceipt
   >
 ):Promise<void>{
   try{

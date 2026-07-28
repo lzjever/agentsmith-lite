@@ -194,16 +194,10 @@ async function createPendingMessage(
     taskId: setup.task.id,
     actorId: setup.userId,
     content: "Snapshot-bound message",
-    deliveryKey: `delivery_${id}`,
-    requestHash: `request_${id}`,
     claimToken: null,
-    receipt: null,
-    timelineCursor: null,
     deliveryStatus: "pending",
     claimedAt: null,
     leaseExpiresAt: null,
-    attemptCount: 0,
-    nextRetryAt: null,
     safeError: null,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -246,17 +240,9 @@ async function acceptMessage(
   });
   assert.ok(claimed);
   const acceptedAt = "2026-07-26T12:00:03.000Z";
-  const accepted = await setup.store.recordTaskMessageReceipt({
+  const accepted = await setup.store.acceptTaskMessage({
     id: message.id,
     claimToken,
-    receipt: {
-      accepted: true,
-      deliveryKey: message.deliveryKey!,
-      requestHash: message.requestHash!,
-      messageId: message.id,
-      cursor: "accepted-cursor"
-    },
-    timelineCursor: "accepted-cursor",
     updatedAt: acceptedAt
   });
   assert.ok(accepted);

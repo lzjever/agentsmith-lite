@@ -9,9 +9,9 @@ import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { FetchOpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
 import type {
   BotifiedAbortResult,
-  BotifiedDeliveryMessageInput,
-  BotifiedDeliveryReceipt,
   BotifiedDownloadFileResult,
+  BotifiedMessageInput,
+  BotifiedMessageResult,
   BotifiedRuntimeHttpClient,
   BotifiedTimelineReadResult,
   BotifiedUploadFileInput,
@@ -385,16 +385,15 @@ class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
     if (!sessionId) throw new Error("Test service key has no Task session");
     return { sessionId, snapshot: { session_id: sessionId }, state: "running" };
   }
-  async postMessageWithDelivery(_baseUrl: string, _serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+  async postMessage(_baseUrl: string, _serviceKey: string, input: BotifiedMessageInput): Promise<BotifiedMessageResult> {
     return {
-      receiptKind:"current",
-      outcome:"completed",
-      deliveryKey:input.deliveryKey,
-      requestHash:input.requestHash,
-      messageId:input.deliveryKey,
-      acceptedKind:"queued",
-      timelineCursor:`cursor:${input.deliveryKey}`,
-      turnId:`turn:${input.deliveryKey}`
+      type:"ordinary",
+      kind:"input_queued",
+      inputId:`input:${input.messageId}`,
+      messageId:input.messageId,
+      timelineCursor:`cursor:${input.messageId}`,
+      queueLength:1,
+      state:"running"
     };
   }
   async readTimeline(_baseUrl: string, _serviceKey: string, cursor?: string): Promise<BotifiedTimelineReadResult> {
@@ -402,11 +401,8 @@ class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
   }
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> { return { files: [] }; }
   async downloadFile(_baseUrl: string, _serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult> { return { bytes: new Uint8Array(), sizeBytes: 0, filename: fileId }; }
-  async abort(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTurnId:string}):Promise<BotifiedAbortResult>{
-    return{commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:"completed"};
-  }
-  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTaskId:string}){
-    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:"completed" as const};
+  async abort(_baseUrl:string,_serviceKey:string):Promise<BotifiedAbortResult>{
+    return{ok:true,state:"aborting",queueLength:0};
   }
 }
 

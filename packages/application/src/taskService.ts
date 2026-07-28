@@ -25,10 +25,8 @@ import type {
   TaskRuntimeReachability,
   TaskSandboxReleaseReceipt,
   TaskSandboxReleaseRequest,
-  TaskTurnAbortReceipt,
+  TaskTurnAbortResponse,
   TaskTurnAbortRequest,
-  TaskBackgroundWorkStopReceipt,
-  TaskBackgroundWorkStopRequest,
   TaskTerminalStartReceipt,
   TaskTerminalStartRequest,
   TaskArtifactKind,
@@ -46,14 +44,12 @@ import { requireNonEmptyString } from "../../domain/src/validation.js";
 import { normalizeOpenAICompatibleBaseUrl } from "../../openai-compatible-client/src/index.js";
 import { CredentialService } from "./credentialService.js";
 import type { FileLibraryService } from "./fileLibraryService.js";
-import { BotifiedHttpError, type BotifiedControlOutcome, type BotifiedDeliveryReceipt, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
+import { BotifiedHttpError, type BotifiedRuntimeHttpClient, type BotifiedRuntimeStateResult, type BotifiedTimelineReadResult } from "../../ports/src/botified.js";
 import type {
   AtomicTaskCreateInput,
   BeginTaskIdempotencyInput,
-  InProgressTaskControlCommand,
   PersistTaskArtifactProjectionInput,
   PersistedAgentTask,
-  PersistedDeliveryReceipt,
   PersistedSandboxRunState,
   PersistedTaskArtifact,
   PersistedTaskInteractionChange,
@@ -145,8 +141,6 @@ export interface TaskServiceConfig {
   credentials?: CredentialService;
   sandboxLifecycle?: SandboxLifecycleService;
   deliveryLeaseMs?: number;
-  controlLeaseMs?: number;
-  retryDelayMs?: number;
   contexts?: ContextService;
 }
 
@@ -174,7 +168,7 @@ interface BotifiedTaskRuntimeState {
   lastSyncedAt?: string;
 }
 
-type BotifiedOperation = "send message" | "read state" | "read timeline" | "download file" | "abort" | "stop background work";
+type BotifiedOperation = "send message" | "read state" | "read timeline" | "download file" | "abort";
 
 export interface TaskInteractionChangePage {
   changes: Array<{ cursor: string; item: TaskInteractionItem }>;
@@ -208,7 +202,6 @@ const BOTIFIED_DATA_PATH = "/workspace/task/botified";
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
-const DEFAULT_TASK_RETRY_DELAY_MS = 5_000;
 const IDEMPOTENCY_LEASE_MS = 30_000;
 const TERMINAL_START_LEASE_MS = IDEMPOTENCY_LEASE_MS;
 const INTERACTION_HISTORY_PAGE_LIMIT = 100;
@@ -703,7 +696,7 @@ export class TaskService {
       createdAt: timestamp,
       updatedAt: timestamp
     };
-    const initialMessage:PersistedTaskMessage={id:initialMessageId,taskId:input.id,actorId:input.createdByUserId,content:input.prompt,deliveryKey:deliveryKeyForMessage(initialMessageId),requestHash:deliveryRequestHash(input.prompt),claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:live?"pending":"accepted",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null};
+    const initialMessage:PersistedTaskMessage={id:initialMessageId,taskId:input.id,actorId:input.createdByUserId,content:input.prompt,claimToken:null,deliveryStatus:live?"pending":"accepted",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null};
     const admission=live?this.sandboxAdmission():this.releasedSandboxAdmission();
     if (!live) return { task, initialMessage, reserveActive: false, admission };
     const serviceKey = this.serviceKeyForTask(task);
@@ -949,16 +942,10 @@ export class TaskService {
         taskId: task.id,
         actorId: userId,
         content: text,
-        deliveryKey: deliveryKeyForMessage(ownership.resourceId),
-        requestHash: deliveryRequestHash(text),
         claimToken: null,
-        receipt: null,
-        timelineCursor: null,
         deliveryStatus: "pending",
         claimedAt: null,
         leaseExpiresAt: null,
-        attemptCount: 0,
-        nextRetryAt: null,
         safeError: null,
         createdAt: timestamp,
         updatedAt: timestamp,
@@ -1070,7 +1057,7 @@ export class TaskService {
     const message = await this.store.findTaskMessage(messageId);
     if (!message || message.taskId !== task.id) throw new ProductError("Task message not found", 404);
     const updatedAt = strictlyLaterIso(message.updatedAt ?? message.createdAt);
-    const projectedMessage = { ...message, content:text, requestHash:deliveryRequestHash(text), updatedAt };
+    const projectedMessage = { ...message, content:text, updatedAt };
     const projection = await this.prepareProductInteractionChange(messageProductSource(projectedMessage),source);
     if(!projection)throw new ProductError("Task message projection is unavailable",409);
     const queued=(await this.store.listTaskMessages(task.id)).map((candidate)=>candidate.id===messageId?projectedMessage:candidate);
@@ -1080,7 +1067,6 @@ export class TaskService {
       taskId,
       messageId,
       content:text,
-      requestHash:projectedMessage.requestHash,
       expectedUpdatedAt:message.updatedAt??message.createdAt,
       updatedAt,
       interactionChange:projection.change,
@@ -1197,7 +1183,6 @@ export class TaskService {
     };
     await this.reconcileTaskPreparations(result.failedTaskIds);
     await this.reconcileTerminalStartups(result.failedTaskIds);
-    await this.reconcileTaskControlCommands(result.failedTaskIds);
     for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
     const activeSandboxes = await this.store.listActiveTasks();
     result.activeTaskCount=activeSandboxes.length;
@@ -1268,35 +1253,6 @@ export class TaskService {
     }
   }
 
-  private async reconcileTaskControlCommands(failedTaskIds:string[]):Promise<void>{
-    for(const command of await this.store.listInProgressTaskControlCommands(100)){
-      try{
-        const timestamp=nowIso();
-        const begun=await this.store.beginTaskControlCommand({
-          taskId:command.taskId,
-          expectedRunId:command.expectedRunId,
-          interactionId:command.interactionId,
-          downstreamCommandKey:command.downstreamCommandKey,
-          downstreamTargetId:command.operation==="abort-turn"?command.downstreamTargetId:null,
-          idempotency:{
-            actorId:command.actorId,
-            projectId:command.projectId,
-            operation:command.operation,
-            key:command.key,
-            requestHash:command.requestHash,
-            resourceId:command.resourceId,
-            claimToken:newId("idempotency_claim"),
-            now:timestamp,
-            leaseExpiresAt:deadlineIso(timestamp,this.controlLeaseMs())
-          }
-        });
-        if(begun.kind==="claimed")await this.continueTaskControlCommand(begun.command);
-      }catch{
-        failedTaskIds.push(command.taskId);
-      }
-    }
-  }
-
   private async dispatchTaskMessage(candidate: PersistedTaskMessage, completeIdempotency = false): Promise<PersistedTaskMessage> {
     const current = await this.store.findTaskMessage(candidate.id) ?? candidate;
     if (this.messageDispatchTaskIds.has(current.taskId)) return current;
@@ -1309,89 +1265,66 @@ export class TaskService {
   }
 
   private async dispatchTaskMessageExclusive(candidate: PersistedTaskMessage, completeIdempotency: boolean): Promise<PersistedTaskMessage> {
-    let message = await this.store.findTaskMessage(candidate.id) ?? candidate;
+    let message=await this.store.findTaskMessage(candidate.id)??candidate;
     if (message.deletedAt || ["accepted", "failed"].includes(message.deliveryStatus ?? "")) {
       if (completeIdempotency) await this.completeMessageIdempotency(message);
       return message;
     }
-    let source = await this.store.findTask(message.taskId);
+    let source=await this.store.findTask(message.taskId);
     if (!source) throw new ProductError("Task not found", 404);
-    const pendingRun=await this.exactTaskMessageRun(source);
-    if(pendingRun?.state==="starting"&&pendingRun.startupReadyAt===null)return message;
-    if(pendingRun&&pendingRun.state!=="starting"&&pendingRun.state!=="active")return message;
-    if ((message.deliveryStatus ?? "pending") === "pending") {
-      const firstWaiting = (await this.store.listTaskMessages(source.id)).find((candidate) => ["pending", "dispatching"].includes(candidate.deliveryStatus ?? "pending"));
-      if (firstWaiting?.id !== message.id) return message;
-    }
-    const timestamp = nowIso();
     if (message.deliveryStatus === "dispatching") {
-      if (!message.claimToken || !message.leaseExpiresAt || message.leaseExpiresAt > timestamp) return message;
-      const run=await this.exactTaskMessageRun(source);
-      if(!run||!runAllowsMessageDelivery(run)){
-        return this.failClaimedTaskMessage(message,"Sandbox run was released before this message was delivered",completeIdempotency);
-      }
-      if(run.state==="active"){
-        try{
-          const reconciled = await this.reconcileTaskMessageDelivery(message, source);
-          if (reconciled) {
-            await this.persistMessageInteraction(reconciled);
-            if (completeIdempotency && isSettledMessage(reconciled)) await this.completeMessageIdempotency(reconciled);
-            return reconciled;
-          }
-        }catch(error){
-          return this.settleClaimedTaskMessageError(message,source,error,completeIdempotency);
-        }
-      }
-      source = await this.store.findTask(source.id) ?? source;
-      const reclaimed = await this.store.reclaimTaskMessage({ id:message.id, expectedClaimToken:message.claimToken, claimToken:newId("delivery_claim"), claimedAt:timestamp, leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs()) });
-      if (!reclaimed) return await this.store.findTaskMessage(message.id) ?? message;
-      message = reclaimed;
-      await this.persistMessageInteraction(message);
-    } else {
-      const claimed = await this.store.claimTaskMessage({ id:message.id, claimToken:newId("delivery_claim"), claimedAt:timestamp, leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs()) });
-      if (!claimed) return await this.store.findTaskMessage(message.id) ?? message;
-      message = claimed;
-      await this.persistMessageInteraction(message);
-      source = await this.store.findTask(source.id) ?? source;
+      if(!message.claimToken||!message.leaseExpiresAt||message.leaseExpiresAt>nowIso())return message;
+      return this.failClaimedTaskMessage(
+        message,
+        "Message delivery outcome is unknown; it was not sent again.",
+        completeIdempotency
+      );
     }
-    const unavailable=await this.failClaimedTaskMessageIfRunUnavailable(message,source,completeIdempotency);
-    if(unavailable)return unavailable;
-    const claimToken = message.claimToken!;
+
+    const firstWaiting=(await this.store.listTaskMessages(source.id))
+      .find((queued)=>["pending","dispatching"].includes(queued.deliveryStatus??"pending"));
+    if(firstWaiting?.id!==message.id)return message;
+
+    const startupActorId=message.actorId??source.createdByUserId;
+    if(!startupActorId)throw new ProductError("Task sandbox startup actor is unavailable",409);
     try {
-      const startupActorId=message.actorId??source.createdByUserId;
-      if(!startupActorId)throw new ProductError("Task sandbox startup actor is unavailable",409);
       source=await this.ensureLiveSandbox(startupActorId,source);
-      const serviceKey = this.serviceKeyForTask(source);
-      const runtime = await this.readRuntimeState(source, serviceKey);
+      const serviceKey=this.serviceKeyForTask(source);
+      const runtime=await this.readRuntimeState(source,serviceKey);
       const run=source.currentRunId?await this.store.sandboxRuns.get(source.currentRunId):null;
-      if(!run||run.taskId!==source.id)throw new ProductError("Task sandbox runtime state not found",409);
-      if(run.state!=="active")throw new ProductError("Sandbox run is no longer eligible to receive messages",409);
+      if(!run||!taskMatchesExactSandboxRun(source,run)||run.state!=="active"||run.startupReadyAt===null)return message;
       await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
-      const receipt = await this.postDeliveryMessage(runtime.baseUrl, serviceKey, message.content, message.deliveryKey!, message.requestHash!);
-      const persistedReceipt=persistedDeliveryReceipt(receipt);
-      const receiptCursor = receipt.receiptKind==="current" ? safeRuntimeCursor(receipt.timelineCursor) ?? null : null;
-      const accepted = await this.store.recordTaskMessageReceipt({ id:message.id, claimToken, receipt:persistedReceipt, timelineCursor:receiptCursor, updatedAt:nowIso() });
-      if (!accepted) throw new ProductError("Task message delivery claim changed before receipt persistence", 409);
+
+      const timestamp=nowIso();
+      const claimed=await this.store.claimTaskMessage({
+        id:message.id,
+        claimToken:newId("delivery_claim"),
+        claimedAt:timestamp,
+        leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs())
+      });
+      if(!claimed)return await this.store.findTaskMessage(message.id)??message;
+      message=claimed;
+      await this.persistMessageInteraction(message);
+
+      await this.botified.postMessage(runtime.baseUrl,serviceKey,{messageId:message.id,text:message.content});
+      const accepted=await this.store.acceptTaskMessage({
+        id:message.id,
+        claimToken:message.claimToken!,
+        updatedAt:nowIso()
+      });
+      if(!accepted)throw new ProductError("Task message delivery claim changed before acceptance",409);
       await this.persistMessageInteraction(accepted);
       await this.bestEffortSyncTaskTimeline(source);
-      if (completeIdempotency) await this.completeMessageIdempotency(accepted);
+      if(completeIdempotency)await this.completeMessageIdempotency(accepted);
       return accepted;
-    } catch (error) {
-      const startupFailure=error instanceof ProductError&&error.code==="sandbox_startup_failed";
-      const settled=await this.settleClaimedTaskMessageError(message,source,error,completeIdempotency);
-      if(startupFailure)throw error;
-      return settled;
+    }catch(error){
+      if(message.deliveryStatus!=="dispatching"||!message.claimToken)throw error;
+      return this.failClaimedTaskMessage(
+        message,
+        `Message delivery outcome is unknown: ${safeTaskStageError(error)}`,
+        completeIdempotency
+      );
     }
-  }
-
-  private async exactTaskMessageRun(task:PersistedAgentTask):Promise<PersistedSandboxRunState|null>{
-    const run=task.currentRunId?await this.store.sandboxRuns.get(task.currentRunId):null;
-    return run&&run.runId===task.currentRunId&&run.taskId===task.id&&run.workspaceId===task.workspaceId&&run.projectId===task.projectId&&run.fileLibraryId===task.fileLibraryId?run:null;
-  }
-
-  private async failClaimedTaskMessageIfRunUnavailable(message:PersistedTaskMessage,task:PersistedAgentTask,completeIdempotency:boolean):Promise<PersistedTaskMessage|null>{
-    const run=await this.exactTaskMessageRun(task);
-    return run&&runAllowsMessageDelivery(run)?null:this.failClaimedTaskMessage(message,"Sandbox run was released before this message was delivered",completeIdempotency);
   }
 
   private async failClaimedTaskMessage(message:PersistedTaskMessage,safeError:string,completeIdempotency:boolean):Promise<PersistedTaskMessage>{
@@ -1403,43 +1336,7 @@ export class TaskService {
     return settled;
   }
 
-  private async settleClaimedTaskMessageError(message:PersistedTaskMessage,task:PersistedAgentTask,error:unknown,completeIdempotency:boolean):Promise<PersistedTaskMessage>{
-    if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
-    const sessionMismatch=error instanceof ProductError&&error.code==="botified_session_mismatch";
-    const run=await this.exactTaskMessageRun(task);
-    const permanent=
-      sessionMismatch ||
-      error instanceof ProductError&&error.code==="botified_delivery_receipt_identity_mismatch" ||
-      error instanceof ProductError&&error.code==="sandbox_startup_failed" ||
-      error instanceof BotifiedTaskPortError&&!error.retryable ||
-      !run ||
-      !runAllowsMessageDelivery(run);
-    if(permanent)return this.failClaimedTaskMessage(message,safeTaskStageError(error),completeIdempotency);
-    const startupUnknown=error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??"");
-    const deferred=await this.store.deferTaskMessage({
-      id:message.id,claimToken:message.claimToken!,safeError:safeTaskStageError(error),
-      nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso(),
-      ...(startupUnknown?{releaseClaim:true}:{})
-    });
-    if(deferred)await this.persistMessageInteraction(deferred);
-    return await this.store.findTaskMessage(message.id)??message;
-  }
-
-  private async reconcileTaskMessageDelivery(message: PersistedTaskMessage, source: PersistedAgentTask): Promise<PersistedTaskMessage | null> {
-    if (!message.claimToken || !message.deliveryKey || !message.requestHash) return message;
-    const serviceKey = this.serviceKeyForTask(source);
-    const state = await this.readRuntimeState(source, serviceKey);
-    await this.readVerifiedBotifiedState(source,state.baseUrl,serviceKey);
-    const receipt=await this.postDeliveryMessage(state.baseUrl,serviceKey,message.content,message.deliveryKey,message.requestHash);
-    const persistedReceipt=persistedDeliveryReceipt(receipt);
-    const receiptCursor = receipt.receiptKind==="current" ? safeRuntimeCursor(receipt.timelineCursor) ?? null : null;
-    return await this.store.recordTaskMessageReceipt({ id:message.id, claimToken:message.claimToken, receipt:persistedReceipt, timelineCursor:receiptCursor, updatedAt:nowIso() })
-      ?? await this.store.findTaskMessage(message.id);
-  }
-
   private deliveryLeaseMs():number{return resolveDurationMs(this.config.deliveryLeaseMs,DEFAULT_DELIVERY_LEASE_MS);}
-  private controlLeaseMs():number{return resolveDurationMs(this.config.controlLeaseMs,IDEMPOTENCY_LEASE_MS);}
-  private retryDelayMs():number{return resolveDurationMs(this.config.retryDelayMs,DEFAULT_TASK_RETRY_DELAY_MS);}
 
   async taskInteractions(userId: string, taskId: string, query: { cursor?: string; limit?: number } = {}): Promise<TaskInteractionSnapshot> {
     const task = await this.requireTaskForUser(userId, taskId, "view");
@@ -1521,149 +1418,26 @@ export class TaskService {
     }
   }
 
-  async abortTaskTurn(userId:string,taskId:string,request:TaskTurnAbortRequest,idempotencyKey?:string):Promise<TaskTurnAbortReceipt>{
+  async abortTaskTurn(userId:string,taskId:string,request:TaskTurnAbortRequest):Promise<TaskTurnAbortResponse>{
     const task=await this.requireTaskRecordForUser(userId,taskId,"write");
     const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.abort.expectedRunId");
-    const turnId=requireNonEmptyString(request.turnId,"task.abort.turnId");
-    return this.beginTaskControlCommand({
-      userId,task,expectedRunId,interactionId:null,downstreamTargetId:turnId,
-      operation:"abort-turn",...(idempotencyKey?{idempotencyKey}:{}),request:{taskId,expectedRunId,turnId}
-    }) as Promise<TaskTurnAbortReceipt>;
-  }
-
-  async stopTaskBackgroundWork(userId:string,taskId:string,request:TaskBackgroundWorkStopRequest,idempotencyKey?:string):Promise<TaskBackgroundWorkStopReceipt>{
-    const task=await this.requireTaskRecordForUser(userId,taskId,"write");
-    const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.stop.expectedRunId");
-    const interactionId=requireNonEmptyString(request.interactionId,"task.stop.interactionId");
-    return this.beginTaskControlCommand({
-      userId,task,expectedRunId,interactionId,downstreamTargetId:null,
-      operation:"work-stop",...(idempotencyKey?{idempotencyKey}:{}),request:{taskId,expectedRunId,interactionId}
-    }) as Promise<TaskBackgroundWorkStopReceipt>;
-  }
-
-  private async beginTaskControlCommand(input:{
-    userId:string;
-    task:PersistedAgentTask;
-    expectedRunId:string;
-    interactionId:string|null;
-    downstreamTargetId:string|null;
-    operation:"abort-turn"|"work-stop";
-    idempotencyKey?:string;
-    request:unknown;
-  }):Promise<TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt>{
-    const key=normalizeIdempotencyKey(input.idempotencyKey);
-    const requestHash=canonicalRequestHash(input.request);
-    const timestamp=nowIso();
-    const begun=await this.store.beginTaskControlCommand({
-      taskId:input.task.id,
-      expectedRunId:input.expectedRunId,
-      interactionId:input.interactionId,
-      downstreamCommandKey:newId(input.operation==="abort-turn"?"botified_abort":"botified_stop"),
-      downstreamTargetId:input.downstreamTargetId,
-      idempotency:{
-        actorId:input.userId,
-        projectId:input.task.projectId,
-        operation:input.operation,
-        key,
-        requestHash,
-        resourceId:input.task.id,
-        claimToken:newId("idempotency_claim"),
-        now:timestamp,
-        leaseExpiresAt:deadlineIso(timestamp,this.controlLeaseMs())
-      }
-    });
-    if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
-    if(begun.kind==="replay")return replayTaskCommandOutcome(begun.responseStatus,begun.responseBody);
-    if(begun.kind==="target_conflict")throw taskRunTargetConflictError();
-    if(begun.kind==="interaction_not_found")throw new ProductError("Background work interaction not found",404,"task_interaction_not_found");
-    if(begun.kind==="target_not_stoppable")throw new ProductError("Background work is no longer stoppable",409,"task_control_target_conflict");
-    if(begun.kind==="in_progress")return acceptedTaskControlReceipt(input.operation,begun.command);
-    if(begun.kind!=="claimed")throw new ReceiptUncertaintyError("Exact Task control admission is unknown","task_control_admission_unknown");
-    return this.continueTaskControlCommand(begun.command);
-  }
-
-  private async continueTaskControlCommand(command:InProgressTaskControlCommand):Promise<TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt>{
-    const task=await this.store.findTask(command.taskId);
-    const run=await this.store.sandboxRuns.get(command.expectedRunId);
-    if(!task||!run||run.taskId!==task.id||run.workspaceId!==task.workspaceId||run.projectId!==task.projectId||run.fileLibraryId!==task.fileLibraryId){
-      throw new ReceiptUncertaintyError("Exact Task control runtime is unavailable","task_control_runtime_unknown");
-    }
+    if(task.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
+    const run=await this.store.sandboxRuns.get(expectedRunId);
+    if(!run||run.state!=="active"||!taskMatchesExactSandboxRun(task,run))throw taskRunTargetConflictError();
     const serviceKey=this.serviceKeyForRun(task,run);
     const baseUrl=this.botifiedBaseUrlForRun(run);
-    let outcome:BotifiedControlOutcome;
+    let result;
     try{
-      if(command.operation==="abort-turn"){
-        const receipt=await this.botified.abort(baseUrl,serviceKey,{
-          commandKey:command.downstreamCommandKey,
-          expectedTurnId:command.downstreamTargetId
-        });
-        if(receipt.commandKey!==command.downstreamCommandKey||receipt.turnId!==command.downstreamTargetId)throw new Error("Botified abort receipt identity mismatch");
-        outcome=receipt.outcome;
-      }else{
-        const receipt=await this.botified.stopBackgroundTask(baseUrl,serviceKey,{
-          commandKey:command.downstreamCommandKey,
-          expectedTaskId:command.downstreamTargetId
-        });
-        if(receipt.commandKey!==command.downstreamCommandKey||receipt.taskId!==command.downstreamTargetId)throw new Error("Botified background stop receipt identity mismatch");
-        outcome=receipt.outcome;
-      }
+      result=await this.botified.abort(baseUrl,serviceKey);
     }catch(error){
-      const authority=await this.readTaskControlAuthority(command);
-      if(authority.kind==="replay")return authority.receipt;
-      throw new ReceiptUncertaintyError(
-        `Exact Task control outcome is unknown: ${safeTaskStageError(error)}`,
-        "task_control_outcome_unknown"
+      throw new ProductError(
+        `Abort outcome is unknown: ${safeTaskStageError(error)}`,
+        503,
+        "botified_abort_outcome_unknown"
       );
     }
-    if(outcome==="accepted"){
-      const authority=await this.readTaskControlAuthority(command);
-      return authority.kind==="replay"
-        ?authority.receipt
-        :acceptedTaskControlReceipt(command.operation,command);
-    }
-    const response=completedTaskControlReceipt(command,outcome);
-    const responseStatus=outcome==="conflict"?409:200;
-    if(!await this.store.completeTaskIdempotency({
-      actorId:command.actorId,
-      projectId:command.projectId,
-      operation:command.operation,
-      key:command.key,
-      requestHash:command.requestHash,
-      claimToken:command.claimToken,
-      responseStatus,
-      responseBody:response,
-      updatedAt:nowIso()
-    })){
-      const replay=await this.store.findTaskIdempotency({
-        actorId:command.actorId,
-        projectId:command.projectId,
-        operation:command.operation,
-        key:command.key,
-        requestHash:command.requestHash
-      });
-      if(replay?.kind==="replay")return replayTaskCommandOutcome(replay.responseStatus,replay.responseBody);
-      throw new ReceiptUncertaintyError("Exact Task control receipt lost its claim","task_control_receipt_unknown");
-    }
-    if(outcome!=="conflict")await this.bestEffortSyncTaskTimeline(task);
-    return response;
-  }
-
-  private async readTaskControlAuthority(command:InProgressTaskControlCommand):Promise<
-    {kind:"replay";receipt:TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt}|
-    {kind:"in_progress"}
-  >{
-    const authority=await this.store.findTaskIdempotency({
-      actorId:command.actorId,
-      projectId:command.projectId,
-      operation:command.operation,
-      key:command.key,
-      requestHash:command.requestHash
-    });
-    if(authority?.kind==="replay"){
-      return{kind:"replay",receipt:replayTaskCommandOutcome(authority.responseStatus,authority.responseBody)};
-    }
-    if(authority?.kind==="in_progress")return{kind:"in_progress"};
-    throw new Error("Exact Task control idempotency authority is unavailable");
+    await this.bestEffortSyncTaskTimeline(task);
+    return{taskId:task.id,runId:run.runId,state:result.state,queueLength:result.queueLength};
   }
 
   async listTaskArtifacts(userId: string, taskId: string, query: TaskArtifactListQuery = {}): Promise<TaskArtifactListPage> {
@@ -2142,13 +1916,6 @@ export class TaskService {
       throw mismatch;
     }
     return events;
-  }
-
-  private async postDeliveryMessage(baseUrl:string,serviceKey:string,text:string,deliveryKey:string,requestHash:string):Promise<BotifiedDeliveryReceipt>{
-    const receipt=await this.callBotified("send message",()=>this.botified.postMessageWithDelivery(baseUrl,serviceKey,{text,deliveryKey,requestHash}));
-    if(receipt.deliveryKey!==deliveryKey||receipt.requestHash!==requestHash||receipt.messageId!==receipt.deliveryKey)throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
-    if(receipt.receiptKind==="canonical_legacy"&&receipt.payloadSha256!==botifiedTextPayloadSha256(text))throw new ProductError("Botified task message delivery receipt identity mismatch",409,"botified_delivery_receipt_identity_mismatch");
-    return receipt;
   }
 
   private async downloadTaskArtifactForInteraction(
@@ -2705,7 +2472,7 @@ export class TaskService {
   private async previousProjectionState(task: PersistedAgentTask, event: BotifiedTimelineEvent, latest: Map<string, TaskInteractionItem>, messages: PersistedTaskMessage[], redaction: InteractionTextRedactionOptions, inBatchCorrelations: Map<string, TaskInteractionProjectionState>): Promise<TaskInteractionProjectionState | null> {
     if (["input.accepted", "input.queued", "input.rejected"].includes(event.type)) {
       const inputId = stringValue(event.data.input_id);
-      const message = inputId ? messages.find((candidate) => candidate.receipt?.messageId === inputId) : undefined;
+      const message = inputId ? messages.find((candidate) => candidate.id === inputId) : undefined;
       if (message) {
         const seeded = projectTaskInteraction(messageProductSource(message), null, redaction).interaction;
         const interaction = seeded ? latest.get(seeded.id) : undefined;
@@ -2883,16 +2650,15 @@ export class TaskService {
     const canStartNewWork=canWrite&&retained&&executionEligible;
     const canControlCurrentWork=canWrite&&retained&&run?.state==="active"&&runtime.reachability==="reachable";
     const capabilities:TaskCapabilities = unavailableRunId ? {
-      sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,
+      sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,
       releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false
     } : cleanupPending ? {
-      sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,
+      sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,
       releaseSandbox:canWrite&&!task.deletedAt,editTask:false,archiveTask:false,deleteTask:false
     } : {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
       abortTurn:canControlCurrentWork&&turn==="running"&&turnId!==null,
-      stopWork:canControlCurrentWork,
       openTerminal: !cleanupPending&&(
         canStartNewWork&&(releaseConfirmed||run?.state==="starting")||
         canControlCurrentWork
@@ -3032,57 +2798,6 @@ function replayTaskCommandOutcome<T>(statusCode:number,responseBody:unknown):T{
     return structuredClone(responseBody) as T;
   }
   return replayTaskOperationResponse<T>(statusCode,responseBody);
-}
-
-function acceptedTaskControlReceipt(
-  operation:"abort-turn"|"work-stop",
-  command:{
-    taskId:string;
-    expectedRunId:string;
-    interactionId:string|null;
-    downstreamTargetId:string;
-  }
-):TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt{
-  if(operation==="abort-turn"){
-    return{
-      outcome:"accepted_in_progress",
-      keyDisposition:"retain",
-      taskId:command.taskId,
-      runId:command.expectedRunId,
-      turnId:command.downstreamTargetId
-    };
-  }
-  if(!command.interactionId)throw new Error("Exact background control interaction identity is missing");
-  return{
-    outcome:"accepted_in_progress",
-    keyDisposition:"retain",
-    taskId:command.taskId,
-    runId:command.expectedRunId,
-    interactionId:command.interactionId
-  };
-}
-
-function completedTaskControlReceipt(
-  command:InProgressTaskControlCommand,
-  result:Exclude<BotifiedControlOutcome,"accepted">
-):TaskTurnAbortReceipt|TaskBackgroundWorkStopReceipt{
-  const common={
-    outcome:"completed" as const,
-    keyDisposition:"retire" as const,
-    taskId:command.taskId,
-    runId:command.expectedRunId,
-    result,
-    ...(result==="conflict"?{code:"task_control_target_conflict"}:{})
-  };
-  if(command.operation==="abort-turn")return{
-    ...common,
-    turnId:command.downstreamTargetId
-  };
-  if(!command.interactionId)throw new Error("Exact background control interaction identity is missing");
-  return{
-    ...common,
-    interactionId:command.interactionId
-  };
 }
 
 function releaseAcceptedReceipt(taskId:string,runId:string):Extract<TaskSandboxReleaseReceipt,{outcome:"accepted_in_progress"}>{
@@ -3279,7 +2994,7 @@ function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTa
     !isUnknownRecord(capabilities)||
     !hasExactKeys(capabilities,[
       "abortTurn","archiveTask","deleteTask","editQueuedMessage","editTask","openTerminal",
-      "releaseSandbox","sendMessage","stopWork"
+      "releaseSandbox","sendMessage"
     ])||
     !Object.values(capabilities).every((candidate)=>typeof candidate==="boolean")
   )throw invalidTaskCreateIdempotencyError();
@@ -3316,7 +3031,7 @@ function requireTaskMessageIdempotencyEnvelope(value:unknown):TaskMessageIdempot
 
 function safeTaskStageError(error:unknown):string{return redactSecretLikeText(error instanceof Error?error.message:"Task maintenance failed").slice(0,300);}
 
-function taskOperation(value: "message" | "message-edit" | "message-delete" | "abort-turn" | "work-stop"): TaskIdempotencyOperation {
+function taskOperation(value: "message" | "message-edit" | "message-delete"): TaskIdempotencyOperation {
   return value as TaskIdempotencyOperation;
 }
 
@@ -3351,15 +3066,14 @@ function messageProductSource(message: PersistedTaskMessage): ProductTaskInterac
   const status = message.deliveryStatus ?? "pending";
   const projectedStatus = status === "accepted" ? "accepted"
     : status === "failed" ? "failed"
-      : status === "dispatching" && message.safeError ? "retrying"
-        : status === "dispatching" ? "dispatching" : "pending";
+      : status === "dispatching" ? "dispatching" : "pending";
   return {
     sourceKind: "product",
     type: "message_delivery",
     actorId: message.actorId ?? null,
     taskId: message.taskId,
     sourceId: `message:${message.id}`,
-    sourceRevision: productSourceRevision(updatedAt, { pending:1, dispatching:2, retrying:3, accepted:4, failed:5 }[projectedStatus]),
+    sourceRevision: productSourceRevision(updatedAt, { pending:1, dispatching:2, accepted:3, failed:4 }[projectedStatus]),
     occurredAt: updatedAt,
     position: productPosition(message.createdAt, message.id),
     messageId: message.id,
@@ -3522,12 +3236,6 @@ function createBotifiedTaskKey(
 
 function messageAuditDetail(taskId: string, message: Pick<PersistedTaskMessage, "id" | "deliveryStatus">): import("../../contracts/src/api.js").ProjectAuditSafeDetail {
   return { taskId, messageId: message.id, ...(message.deliveryStatus === undefined ? {} : { deliveryStatus: message.deliveryStatus }) };
-}
-
-function deliveryKeyForMessage(messageId:string):string{return `delivery_message_${messageId}`;}
-
-function deliveryRequestHash(prompt: string): string {
-  return createHash("sha256").update(prompt, "utf8").digest("base64url");
 }
 
 function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string {
@@ -3803,24 +3511,6 @@ function safeRuntimeCursor(cursor: string | null | undefined): string | undefine
     return undefined;
   }
   return cursor;
-}
-
-function persistedDeliveryReceipt(receipt:BotifiedDeliveryReceipt):PersistedDeliveryReceipt {
-  return {
-    accepted:true,
-    deliveryKey:receipt.deliveryKey,
-    requestHash:receipt.requestHash,
-    messageId:receipt.messageId,
-    ...(receipt.receiptKind==="current"?{cursor:receipt.timelineCursor}:{})
-  };
-}
-
-function botifiedTextPayloadSha256(text:string):string {
-  const payload=JSON.stringify({items:[{type:"text",text}],urgency:"normal"});
-  return createHash("sha256")
-    .update("botified:delivery-public-payload:v1\0")
-    .update(payload)
-    .digest("hex");
 }
 
 function deadlineIso(baseIso: string, durationMs: number): string {

@@ -491,9 +491,8 @@ async function seedProjectDeletionBusinessData(
   const task={...liveTask(target),currentRunId:null};
   const message={
     id:`message_${target.id}`,taskId:task.id,actorId:"owner",content:"keep message",
-    deliveryKey:`delivery_${target.id}`,requestHash:`message_request_${target.id}`,claimToken:null,receipt:null,
-    timelineCursor:null,deliveryStatus:"pending" as const,claimedAt:null,leaseExpiresAt:null,attemptCount:0,
-    nextRetryAt:null,safeError:null,createdAt:task.createdAt,updatedAt:task.updatedAt,deletedAt:null
+    claimToken:null,deliveryStatus:"pending" as const,claimedAt:null,leaseExpiresAt:null,
+    safeError:null,createdAt:task.createdAt,updatedAt:task.updatedAt,deletedAt:null
   };
   assert.equal((await store.createTaskAtomically({
     task,

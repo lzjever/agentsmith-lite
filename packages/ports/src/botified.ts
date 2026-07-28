@@ -3,7 +3,7 @@ import { MAX_TASK_ARTIFACT_BYTES } from "../../domain/src/sandboxDefaults.js";
 export interface BotifiedRuntimeHttpClient {
   health(baseUrl: string, serviceKey?: string, signal?:AbortSignal): Promise<{ status: "ok" }>;
   readState(baseUrl: string, serviceKey: string, signal?:AbortSignal): Promise<BotifiedRuntimeStateResult>;
-  postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt>;
+  postMessage(baseUrl: string, serviceKey: string, input: BotifiedMessageInput): Promise<BotifiedMessageResult>;
   readTimeline(
     baseUrl: string,
     serviceKey: string,
@@ -12,8 +12,7 @@ export interface BotifiedRuntimeHttpClient {
   ): Promise<BotifiedTimelineReadResult>;
   uploadFile(baseUrl: string, serviceKey: string, file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult>;
   downloadFile(baseUrl: string, serviceKey: string, fileId: string): Promise<BotifiedDownloadFileResult>;
-  abort(baseUrl: string, serviceKey: string, input: BotifiedAbortInput): Promise<BotifiedAbortResult>;
-  stopBackgroundTask(baseUrl: string, serviceKey: string, input: BotifiedBackgroundTaskStopInput): Promise<BotifiedBackgroundTaskStopResult>;
+  abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult>;
   streamLlmTextPreview?(
     baseUrl: string,
     serviceKey: string,
@@ -21,34 +20,27 @@ export interface BotifiedRuntimeHttpClient {
   ): AsyncIterable<BotifiedLlmTextPreviewFrame>;
 }
 
-export interface BotifiedDeliveryMessageInput {
+export interface BotifiedMessageInput {
+  messageId: string;
   text: string;
-  deliveryKey: string;
-  requestHash: string;
 }
 
-export type BotifiedDeliveryReceipt = BotifiedCurrentDeliveryReceipt | BotifiedCanonicalLegacyDeliveryReceipt;
-
-export interface BotifiedCurrentDeliveryReceipt {
-  receiptKind: "current";
-  outcome: "completed";
-  deliveryKey: string;
-  requestHash: string;
+export interface BotifiedOrdinaryMessageResult {
+  type: "ordinary";
+  kind: "input_accepted" | "input_queued" | "input_duplicate";
+  inputId: string;
   messageId: string;
-  acceptedKind: "started" | "queued";
   timelineCursor: string;
-  turnId: string;
+  queueLength: number;
+  state: "idle" | "running" | "aborting" | "failed";
 }
 
-export interface BotifiedCanonicalLegacyDeliveryReceipt {
-  receiptKind: "canonical_legacy";
-  outcome: "completed";
-  deliveryKey: string;
-  requestHash: string;
-  messageId: string;
-  payloadSha256: string;
+export interface BotifiedSlashMessageResult {
+  type: "slash";
+  response: unknown;
 }
 
+export type BotifiedMessageResult = BotifiedOrdinaryMessageResult | BotifiedSlashMessageResult;
 export interface BotifiedRuntimeStateResult {
   snapshot: unknown;
   sessionId?: string;
@@ -86,19 +78,6 @@ export interface BotifiedTimelineGapResult {
   nextCursor?: string;
   recoveryCursor?: string;
   historyBoundary: "expired";
-}
-
-export type BotifiedControlOutcome = "accepted" | "completed" | "already_terminal" | "conflict";
-
-export interface BotifiedBackgroundTaskStopInput {
-  commandKey: string;
-  expectedTaskId: string;
-}
-
-export interface BotifiedBackgroundTaskStopResult {
-  commandKey: string;
-  taskId: string;
-  outcome: BotifiedControlOutcome;
 }
 
 export interface BotifiedLlmTextPreviewOptions {
@@ -143,15 +122,10 @@ export interface BotifiedDownloadFileResult {
   sha256?: string;
 }
 
-export interface BotifiedAbortInput {
-  commandKey: string;
-  expectedTurnId: string;
-}
-
 export interface BotifiedAbortResult {
-  commandKey: string;
-  turnId: string;
-  outcome: BotifiedControlOutcome;
+  ok: boolean;
+  state: "idle" | "running" | "aborting" | "failed";
+  queueLength: number;
 }
 
 export type BotifiedFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -249,14 +223,14 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return result;
   }
 
-  async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+  async postMessage(baseUrl: string, serviceKey: string, input: BotifiedMessageInput): Promise<BotifiedMessageResult> {
     const body = await this.requestJson(baseUrl, "/v1/messages", {
       method: "POST",
       serviceKey,
-      body: JSON.stringify({ text: input.text, delivery_key: input.deliveryKey, request_hash: input.requestHash }),
+      body: JSON.stringify({ client_message_id: input.messageId, text: input.text }),
       headers: { "content-type": "application/json" }
     });
-    return deliveryReceiptFromBody(body);
+    return messageResultFromBody(input, body);
   }
 
   async readTimeline(
@@ -336,32 +310,12 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return result;
   }
 
-  async abort(baseUrl: string, serviceKey: string, input: BotifiedAbortInput): Promise<BotifiedAbortResult> {
-    const { status, body } = await this.requestExactControl(baseUrl, "/v1/abort", serviceKey, {
-      command_key:input.commandKey,
-      expected_turn_id:input.expectedTurnId
+  async abort(baseUrl: string, serviceKey: string): Promise<BotifiedAbortResult> {
+    const body = await this.requestJson(baseUrl, "/v1/abort", {
+      method: "POST",
+      serviceKey
     });
-    const receipt=exactAbortReceipt(status,body);
-    if(receipt.commandKey!==input.commandKey||receipt.turnId!==input.expectedTurnId){
-      throw invalidControlReceipt("invalid_abort_response","Botified abort response identity did not match the request",status,body);
-    }
-    return receipt;
-  }
-
-  async stopBackgroundTask(
-    baseUrl: string,
-    serviceKey: string,
-    input: BotifiedBackgroundTaskStopInput
-  ): Promise<BotifiedBackgroundTaskStopResult> {
-    const { status, body } = await this.requestExactControl(baseUrl, "/v1/tasks/stop", serviceKey, {
-      command_key:input.commandKey,
-      expected_task_id:input.expectedTaskId
-    });
-    const receipt=exactBackgroundStopReceipt(status,body);
-    if(receipt.commandKey!==input.commandKey||receipt.taskId!==input.expectedTaskId){
-      throw invalidControlReceipt("invalid_background_task_stop_response","Botified background task stop response identity did not match the request",status,body);
-    }
-    return receipt;
+    return abortResultFromBody(body);
   }
 
   async *streamLlmTextPreview(
@@ -465,24 +419,6 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     return body;
   }
 
-  private async requestExactControl(
-    baseUrl:string,
-    path:string,
-    serviceKey:string,
-    body:Record<string,string>
-  ):Promise<{status:number;body:unknown}>{
-    const response=await this.#fetchImpl(buildUrl(baseUrl,path),{
-      method:"POST",
-      headers:authHeaders(serviceKey,{"content-type":"application/json"}),
-      body:JSON.stringify(body),
-      signal:AbortSignal.timeout(this.#requestTimeoutMs)
-    });
-    const responseBody=await readJsonBody(response);
-    if(![200,202,409].includes(response.status))throw this.httpError(response,responseBody);
-    if(response.status===409&&asRecord(responseBody)?.error!==undefined)throw this.httpError(response,responseBody);
-    return{status:response.status,body:responseBody};
-  }
-
   private timelineOkResult(response: Response, text: string): BotifiedTimelineOkResult {
     const result: BotifiedTimelineOkResult = {
       status: "ok",
@@ -558,16 +494,15 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { snapshot: {}, state: "idle" };
   }
 
-  async postMessageWithDelivery(_baseUrl:string,_serviceKey:string,input:BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
+  async postMessage(_baseUrl:string,_serviceKey:string,input:BotifiedMessageInput): Promise<BotifiedMessageResult> {
     return {
-      receiptKind:"current",
-      outcome:"completed",
-      deliveryKey:input.deliveryKey,
-      requestHash:input.requestHash,
-      messageId:input.deliveryKey,
-      acceptedKind:"queued",
+      type:"ordinary",
+      kind:"input_queued",
+      inputId:input.messageId,
+      messageId:input.messageId,
       timelineCursor:"dry-run",
-      turnId:"dry-run"
+      queueLength:1,
+      state:"idle"
     };
   }
 
@@ -583,12 +518,8 @@ export class DryRunBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClien
     return { bytes: new Uint8Array(), sizeBytes: 0 };
   }
 
-  async abort(_baseUrl:string,_serviceKey:string,input:BotifiedAbortInput): Promise<BotifiedAbortResult> {
-    return { commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:"completed" };
-  }
-
-  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:BotifiedBackgroundTaskStopInput):Promise<BotifiedBackgroundTaskStopResult>{
-    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:"completed"};
+  async abort(_baseUrl:string,_serviceKey:string): Promise<BotifiedAbortResult> {
+    return { ok:true,state:"aborting",queueLength:0 };
   }
 
   async *streamLlmTextPreview(): AsyncIterable<BotifiedLlmTextPreviewFrame> {}
@@ -640,47 +571,6 @@ function authHeaders(serviceKey:string,initial?:HeadersInit):Headers {
   const headers = new Headers(initial);
   headers.set("authorization", `Bearer ${serviceKey}`);
   return headers;
-}
-
-function exactAbortReceipt(status:number,body:unknown):BotifiedAbortResult{
-  const record=asRecord(body);
-  const commandKey=stringField(record,"command_key");
-  const turnId=stringField(record,"turn_id");
-  const outcome=controlOutcomeField(record,"outcome");
-  if(!record||Object.keys(record).sort().join(",")!=="command_key,outcome,turn_id"||
-    !commandKey||!turnId||!outcome||!controlStatusMatches(status,outcome)){
-    throw invalidControlReceipt("invalid_abort_response","Botified abort response was invalid",status,body);
-  }
-  return{commandKey,turnId,outcome};
-}
-
-function exactBackgroundStopReceipt(status:number,body:unknown):BotifiedBackgroundTaskStopResult{
-  const record=asRecord(body);
-  const commandKey=stringField(record,"command_key");
-  const taskId=stringField(record,"task_id");
-  const outcome=controlOutcomeField(record,"outcome");
-  if(!record||Object.keys(record).sort().join(",")!=="command_key,outcome,task_id"||
-    !commandKey||!taskId||!outcome||!controlStatusMatches(status,outcome)){
-    throw invalidControlReceipt("invalid_background_task_stop_response","Botified background task stop response was invalid",status,body);
-  }
-  return{commandKey,taskId,outcome};
-}
-
-function controlOutcomeField(record:Record<string,unknown>|undefined,key:string):BotifiedControlOutcome|undefined{
-  const value=stringField(record,key);
-  return value&&["accepted","completed","already_terminal","conflict"].includes(value)
-    ?value as BotifiedControlOutcome
-    :undefined;
-}
-
-function controlStatusMatches(status:number,outcome:BotifiedControlOutcome):boolean{
-  return outcome==="accepted"?status===202
-    :outcome==="conflict"?status===409
-    :status===200;
-}
-
-function invalidControlReceipt(code:string,message:string,status:number,body:unknown):BotifiedHttpError{
-  return new BotifiedHttpError({status,code,message,retryable:true,responseBody:body});
 }
 
 function fileBlob(file: BotifiedUploadFileInput): Blob {
@@ -839,69 +729,60 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function deliveryReceiptFromBody(body: unknown): BotifiedDeliveryReceipt {
+function messageResultFromBody(input:BotifiedMessageInput,body:unknown):BotifiedMessageResult {
+  if (input.text.trimStart().startsWith("/")) {
+    return { type:"slash",response:body };
+  }
   const record = asRecord(body);
-  if (!record || record.outcome !== "completed") {
-    throw invalidDeliveryReceipt(body);
+  if (!record) {
+    throw invalidMessageResponse(body);
   }
-  if (record.receipt_kind === "canonical_legacy") {
-    if (!hasExactFields(record, ["outcome", "receipt_kind", "delivery_key", "request_hash", "message_id", "payload_sha256"])) {
-      throw invalidDeliveryReceipt(body);
-    }
-    const deliveryKey = requiredStringField(record, "delivery_key");
-    const requestHash = requiredStringField(record, "request_hash");
-    const messageId = requiredStringField(record, "message_id");
-    const payloadSha256 = requiredStringField(record, "payload_sha256");
-    if (!deliveryKey || !requestHash || !messageId || !payloadSha256 || !/^[a-f0-9]{64}$/.test(payloadSha256)) {
-      throw invalidDeliveryReceipt(body);
-    }
-    return {
-      receiptKind:"canonical_legacy",
-      outcome:"completed",
-      deliveryKey,
-      requestHash,
-      messageId,
-      payloadSha256
-    };
-  }
-  if (record.receipt_kind !== undefined || !hasExactFields(record, ["outcome", "delivery_key", "request_hash", "message_id", "accepted_kind", "timeline_cursor", "turn_id"])) {
-    throw invalidDeliveryReceipt(body);
-  }
-  const deliveryKey = requiredStringField(record, "delivery_key");
-  const requestHash = requiredStringField(record, "request_hash");
+  const kind=stringField(record,"kind");
+  const inputId=requiredStringField(record,"input_id");
   const messageId = requiredStringField(record, "message_id");
   const timelineCursor = requiredStringField(record, "timeline_cursor");
-  const turnId = requiredStringField(record, "turn_id");
-  const acceptedKind = record.accepted_kind;
-  if (!deliveryKey || !requestHash || !messageId || !timelineCursor || !turnId || (acceptedKind !== "started" && acceptedKind !== "queued")) {
-    throw invalidDeliveryReceipt(body);
+  const queueLength=numberField(record,"queue_length");
+  const state=stringField(record,"state");
+  if(record?.ok!==true||
+    !kind||!["input_accepted","input_queued","input_duplicate"].includes(kind)||
+    !inputId||messageId!==input.messageId||!timelineCursor||
+    queueLength===undefined||!Number.isInteger(queueLength)||queueLength<0||
+    !state||!["idle","running","aborting","failed"].includes(state)){
+    throw invalidMessageResponse(body);
   }
   return {
-    receiptKind:"current",
-    outcome:"completed",
-    deliveryKey,
-    requestHash,
+    type:"ordinary",
+    kind:kind as BotifiedOrdinaryMessageResult["kind"],
+    inputId,
     messageId,
-    acceptedKind,
     timelineCursor,
-    turnId
+    queueLength,
+    state:state as BotifiedOrdinaryMessageResult["state"]
   };
 }
 
-function invalidDeliveryReceipt(body:unknown):BotifiedHttpError {
+function abortResultFromBody(body:unknown):BotifiedAbortResult {
+  const record=asRecord(body);
+  const state=stringField(record,"state");
+  const queueLength=numberField(record,"queue_length");
+  if(record?.ok!==true||!state||!["idle","running","aborting","failed"].includes(state)||
+    queueLength===undefined||!Number.isInteger(queueLength)||queueLength<0){
+    throw new BotifiedHttpError({
+      status:200,code:"invalid_abort_response",message:"Botified abort response was invalid",
+      retryable:true,responseBody:body
+    });
+  }
+  return{ok:record.ok,state:state as BotifiedAbortResult["state"],queueLength};
+}
+
+function invalidMessageResponse(body:unknown):BotifiedHttpError {
   return new BotifiedHttpError({
     status:200,
-    code:"invalid_delivery_receipt",
-    message:"Botified delivery response did not contain a complete receipt",
+    code:"invalid_message_response",
+    message:"Botified ordinary message response was invalid",
     retryable:true,
     responseBody:body
   });
-}
-
-function hasExactFields(record:Record<string,unknown>,fields:readonly string[]):boolean {
-  const actual=Object.keys(record).sort();
-  const expected=[...fields].sort();
-  return actual.length===expected.length&&actual.every((field,index)=>field===expected[index]);
 }
 
 function requiredStringField(record:Record<string,unknown>,key:string):string|undefined {

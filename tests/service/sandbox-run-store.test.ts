@@ -265,9 +265,8 @@ describe("sandbox Run store", () => {
     const run = sandboxRun();
     const initialMessage:PersistedTaskMessage={
       id:"message_initial_atomic",taskId:task.id,actorId:"user_1",content:"Work",
-      deliveryKey:"delivery_initial_atomic",requestHash:"initial-atomic-hash",
-      claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",
-      claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,
+      claimToken:null,deliveryStatus:"pending",
+      claimedAt:null,leaseExpiresAt:null,safeError:null,
       createdAt:timestamp,updatedAt:timestamp,deletedAt:null
     };
     const created=await store.createTaskAtomically({
@@ -1167,7 +1166,6 @@ describe("sandbox Run store", () => {
     const created=await store.createTaskMessageAtomically(first);
     assert.equal(created.kind,"created");
     assert.equal(created.kind==="created"?created.message.id:null,"message_original");
-    assert.equal(created.kind==="created"?created.message.deliveryKey:null,"delivery_message_message_original");
     assert.equal((await store.sandboxRuns.get(run.runId))?.startupReadyAt,run.updatedAt);
     assert.deepEqual(await store.beginTaskIdempotency({...first.idempotency,claimToken:"parallel",now:runTimestamp(0)}),{
       kind:"replay",
@@ -1178,7 +1176,7 @@ describe("sandbox Run store", () => {
 
     const reclaimed=await store.createTaskMessageAtomically({
       ...first,
-      message:{...first.message,id:"message_retry",deliveryKey:"delivery_message_message_retry"},
+      message:{...first.message,id:"message_retry"},
       idempotency:{...first.idempotency,resourceId:"message_retry",claimToken:"claim_retry",now:runTimestamp(2),leaseExpiresAt:runTimestamp(3)}
     });
     assert.deepEqual(reclaimed,{kind:"replay",responseStatus:first.responseStatus,responseBody:first.responseBody});
@@ -1201,172 +1199,6 @@ describe("sandbox Run store", () => {
     assert.equal((await store.findProjectResourceUsage(task.projectId))?.activeSandboxes,1);
   });
 
-  it("freezes exact control targets and reclaims the same downstream identity",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const run=sandboxRun({state:"active",startedAt:runTimestamp(1),fencingToken:2,updatedAt:runTimestamp(1)});
-    await createTaskWithRun(store,run);
-    const interaction={
-      id:"interaction-control",revision:1,taskId:run.taskId,kind:"background_task" as const,
-      title:"Background task",body:null,contentMode:"none" as const,position:1,
-      occurredAt:runTimestamp(1),updatedAt:runTimestamp(1),executionStatus:"running" as const,
-      deliveryStatus:null,label:"Compile",workSummary:null,result:null,error:null,
-      detailsOmitted:false,canStop:true
-    };
-    await store.persistTaskInteractionMutation({
-      taskId:run.taskId,
-      changes:[{
-        sourceKind:"botified",sourceId:"control-event-1",sourceRevision:0,
-        interaction,correlation:{workTaskId:"work-original"}
-      }]
-    });
-    const first=await store.beginTaskControlCommand({
-      taskId:run.taskId,
-      expectedRunId:run.runId,
-      interactionId:interaction.id,
-      downstreamCommandKey:"downstream-original",
-      downstreamTargetId:null,
-      idempotency:{
-        actorId:run.startedByUserId,projectId:run.projectId,operation:"work-stop",
-        key:"product-stop",requestHash:"stop-hash",resourceId:run.taskId,
-        claimToken:"claim-first",now:runTimestamp(1),leaseExpiresAt:runTimestamp(2)
-      }
-    });
-    assert.equal(first.kind,"claimed");
-    assert.deepEqual(first.kind==="claimed"?controlEnvelope(first.command):null,{
-      taskId:run.taskId,
-      expectedRunId:run.runId,
-      interactionId:interaction.id,
-      downstreamCommandKey:"downstream-original",
-      downstreamTargetId:"work-original"
-    });
-
-    await store.persistTaskInteractionMutation({
-      taskId:run.taskId,
-      changes:[{
-        sourceKind:"botified",sourceId:"control-event-2",sourceRevision:0,
-        interaction:{...interaction,revision:2,updatedAt:runTimestamp(2)},
-        correlation:{workTaskId:"work-replacement"}
-      }]
-    });
-    const reclaimed=await store.beginTaskControlCommand({
-      taskId:run.taskId,
-      expectedRunId:run.runId,
-      interactionId:interaction.id,
-      downstreamCommandKey:"must-not-replace",
-      downstreamTargetId:null,
-      idempotency:{
-        actorId:run.startedByUserId,projectId:run.projectId,operation:"work-stop",
-        key:"product-stop",requestHash:"stop-hash",resourceId:run.taskId,
-        claimToken:"claim-recovered",now:runTimestamp(3),leaseExpiresAt:runTimestamp(5)
-      }
-    });
-    assert.equal(reclaimed.kind,"claimed");
-    assert.deepEqual(reclaimed.kind==="claimed"?controlEnvelope(reclaimed.command):null,
-      first.kind==="claimed"?controlEnvelope(first.command):null);
-
-    const mismatch=await store.beginTaskControlCommand({
-      taskId:run.taskId,
-      expectedRunId:run.runId,
-      interactionId:"different-interaction",
-      downstreamCommandKey:"different-command",
-      downstreamTargetId:null,
-      idempotency:{
-        actorId:run.startedByUserId,projectId:run.projectId,operation:"work-stop",
-        key:"product-stop",requestHash:"different-hash",resourceId:run.taskId,
-        claimToken:"claim-mismatch",now:runTimestamp(6),leaseExpiresAt:runTimestamp(8)
-      }
-    });
-    assert.equal(mismatch.kind,"hash_mismatch");
-  });
-
-  it("atomically supersedes exact controls when their Run is released",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const run=sandboxRun({state:"active",startedAt:runTimestamp(1),fencingToken:2,updatedAt:runTimestamp(1)});
-    await createTaskWithRun(store,run);
-    const interaction={
-      id:"interaction-release-control",revision:1,taskId:run.taskId,kind:"background_task" as const,
-      title:"Background task",body:null,contentMode:"none" as const,position:1,
-      occurredAt:runTimestamp(1),updatedAt:runTimestamp(1),executionStatus:"running" as const,
-      deliveryStatus:null,label:"Compile",workSummary:null,result:null,error:null,
-      detailsOmitted:false,canStop:true
-    };
-    await store.persistTaskInteractionMutation({
-      taskId:run.taskId,
-      changes:[{
-        sourceKind:"botified",sourceId:"release-control-event",sourceRevision:0,
-        interaction,correlation:{workTaskId:"t_0123456789abcdef"}
-      }]
-    });
-    const abort=await store.beginTaskControlCommand({
-      taskId:run.taskId,expectedRunId:run.runId,interactionId:null,
-      downstreamCommandKey:"downstream-abort",downstreamTargetId:"turn-exact",
-      idempotency:{
-        actorId:run.startedByUserId,projectId:run.projectId,operation:"abort-turn",
-        key:"product-abort",requestHash:"abort-hash",resourceId:run.taskId,
-        claimToken:"abort-claim",now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
-      }
-    });
-    const stop=await store.beginTaskControlCommand({
-      taskId:run.taskId,expectedRunId:run.runId,interactionId:interaction.id,
-      downstreamCommandKey:"downstream-stop",downstreamTargetId:null,
-      idempotency:{
-        actorId:run.startedByUserId,projectId:run.projectId,operation:"work-stop",
-        key:"product-stop-release",requestHash:"stop-release-hash",resourceId:run.taskId,
-        claimToken:"stop-claim",now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
-      }
-    });
-    assert.equal(abort.kind,"claimed");
-    assert.equal(stop.kind,"claimed");
-
-    assert.equal(await store.requestTaskSandboxRelease(await beginRelease(store,"supersede-controls",run)),"applied");
-    for(const expected of [
-      {operation:"abort-turn" as const,key:"product-abort",requestHash:"abort-hash",identity:{turnId:"turn-exact"}},
-      {operation:"work-stop" as const,key:"product-stop-release",requestHash:"stop-release-hash",identity:{interactionId:interaction.id}}
-    ]){
-      const replay=await store.findTaskIdempotency({
-        actorId:run.startedByUserId,projectId:run.projectId,
-        operation:expected.operation,key:expected.key,requestHash:expected.requestHash
-      });
-      assert.equal(replay?.kind,"replay");
-      if(replay?.kind==="replay"){
-        assert.equal(replay.responseStatus,409);
-        assert.deepEqual(replay.responseBody,{
-          outcome:"completed",keyDisposition:"retire",taskId:run.taskId,runId:run.runId,
-          ...expected.identity,result:"conflict",code:"task_control_superseded_by_release"
-        });
-      }
-    }
-    assert.deepEqual(await store.listInProgressTaskControlCommands(100),[]);
-    if(abort.kind==="claimed"){
-      assert.equal(await store.completeTaskIdempotency({
-        actorId:abort.command.actorId,projectId:abort.command.projectId,operation:abort.command.operation,
-        key:abort.command.key,requestHash:abort.command.requestHash,claimToken:abort.command.claimToken,
-        responseStatus:200,responseBody:{outcome:"completed"},updatedAt:runTimestamp(3)
-      }),false);
-    }
-    const requested=await store.sandboxRuns.get(run.runId);assert.ok(requested);
-    const releasedAt=runTimestamp(3);
-    assert.equal(await store.completeSandboxRunRelease({
-      runId:requested.runId,expectedFencingToken:requested.fencingToken,
-      run:{...requested,state:"released",releasedAt,startupActionDeadlineAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt},
-      settlement:{
-        runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
-        taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
-        startedAt:requested.startedAt,releasedAt,durationSeconds:120,resources:requested.resourceSnapshot,
-        releaseReason:requested.releaseReason!
-      },
-      auditEvent:{
-        id:"audit_release_control_cleanup",projectId:requested.projectId,actorId:null,
-        subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
-        resourceKind:"sandbox",resourceId:requested.taskId,
-        detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
-        createdAt:releasedAt
-      }
-    }),"applied");
-    assert.equal((await store.beginTaskDeletion(run.taskId,runTimestamp(4))).kind,"ready");
-    assert.equal(await store.purgeDeletedTaskData(run.taskId),true);
-    assert.equal(await store.findTask(run.taskId),null);
-  });
 
 });
 
@@ -1439,19 +1271,6 @@ function activationEvidence(run:PersistedSandboxRunState){
     expectedConfigHash:run.startupConfigHash!,
     expectedPodUid:run.startupPodUid!,
     expectedPodIp:run.startupPodIp!
-  };
-}
-
-function controlEnvelope(command:{
-  taskId:string;expectedRunId:string;interactionId:string|null;
-  downstreamCommandKey:string;downstreamTargetId:string;
-}){
-  return{
-    taskId:command.taskId,
-    expectedRunId:command.expectedRunId,
-    interactionId:command.interactionId,
-    downstreamCommandKey:command.downstreamCommandKey,
-    downstreamTargetId:command.downstreamTargetId
   };
 }
 
@@ -1560,16 +1379,10 @@ function atomicMessage(
     taskId:task.id,
     actorId:run.startedByUserId,
     content:"continue",
-    deliveryKey:`delivery_message_${candidateId}`,
-    requestHash:"delivery_hash",
     claimToken:null,
-    receipt:null,
-    timelineCursor:null,
     deliveryStatus:"pending",
     claimedAt:null,
     leaseExpiresAt:null,
-    attemptCount:0,
-    nextRetryAt:null,
     safeError:null,
     createdAt:now,
     updatedAt:now,

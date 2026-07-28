@@ -100,9 +100,8 @@ describe("task interaction store", () => {
     await createTask(store);
     const message=await store.createTaskMessage({
       id:"message-crash-window",taskId:"task_interactions",actorId:"user",content:"not durable",
-      deliveryKey:"delivery-message-crash-window",requestHash:"crash-window-hash",
-      claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",
-      claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,
+      claimToken:null,deliveryStatus:"pending",
+      claimedAt:null,leaseExpiresAt:null,safeError:null,
       createdAt:timestamp(1),updatedAt:timestamp(1),deletedAt:null
     });
 
@@ -115,7 +114,7 @@ describe("task interaction store", () => {
     assert.equal(persisted?.claimToken,null);
 
     const later=await store.createPendingTaskMessage(
-      {id:"message-after-crash-window",taskId:"task_interactions",actorId:"user",content:"durable",deliveryKey:"delivery-message-after-crash-window",requestHash:"after-crash-window-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp(3),updatedAt:timestamp(3),deletedAt:null},
+      {id:"message-after-crash-window",taskId:"task_interactions",actorId:"user",content:"durable",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:timestamp(3),updatedAt:timestamp(3),deletedAt:null},
       change("product","message:message-after-crash-window",0,interaction("message-after-crash-window",1,2,"user_message"))
     );
     assert.ok(later);
@@ -174,7 +173,7 @@ describe("task interaction store", () => {
 
   it("defines authoritative state events without a durable interaction cursor", () => {
     const events: TaskInteractionStreamEvent[] = [
-      { type:"state", queuedMessages:[], presentation:{task:{id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",createdAt:timestamp(0),updatedAt:timestamp(0)},lifecycle:{state:"active"},currentTurn:{state:"ready",turnId:null},sandboxState:{state:"released",runId:null,cause:null},capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false}} },
+      { type:"state", queuedMessages:[], presentation:{task:{id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",createdAt:timestamp(0),updatedAt:timestamp(0)},lifecycle:{state:"active"},currentTurn:{state:"ready",turnId:null},sandboxState:{state:"released",runId:null,cause:null},capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false}} },
       { type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:timestamp(3), message:null }
     ];
     assert.equal(events.every((event) => !("cursor" in event)),true);
@@ -197,7 +196,7 @@ function interaction(id:string,revision:number,position:number,kind:TaskInteract
   const base = { id,revision,taskId:"task_interactions",title:id,body:null,contentMode:"none" as const,position,occurredAt:timestamp(position),updatedAt:timestamp(revision+position) };
   if(kind==="user_message")return {...base,kind,status:"accepted"};
   if(kind==="assistant_message")return {...base,kind,status:"completed"};
-  return {...base,kind:"tool",executionStatus:"running",deliveryStatus:null,toolName:"bash",command:null,outputTail:null,exitCode:null,detailsOmitted:false,canStop:false};
+  return {...base,kind:"tool",executionStatus:"running",deliveryStatus:null,toolName:"bash",command:null,outputTail:null,exitCode:null,detailsOmitted:false};
 }
 
 function change(sourceKind:"botified"|"product",sourceId:string,sourceRevision:number,value:TaskInteractionItem):TaskInteractionChangeInput {

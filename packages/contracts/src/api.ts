@@ -616,7 +616,7 @@ export interface TaskInteractionBase {
 export interface TaskUserMessageInteraction extends TaskInteractionBase {
   kind: "user_message";
   actorId?: string | null;
-  status: "pending" | "dispatching" | "retrying" | "accepted" | "queued" | "rejected" | "failed";
+  status: "pending" | "dispatching" | "accepted" | "queued" | "rejected" | "failed";
 }
 
 export interface TaskAssistantMessageInteraction extends TaskInteractionBase {
@@ -633,7 +633,6 @@ export interface TaskToolInteraction extends TaskInteractionBase {
   outputTail: string | null;
   exitCode: number | null;
   detailsOmitted: boolean;
-  canStop: boolean;
 }
 
 export interface TaskBackgroundTaskInteraction extends TaskInteractionBase {
@@ -645,7 +644,6 @@ export interface TaskBackgroundTaskInteraction extends TaskInteractionBase {
   result: string | null;
   error: string | null;
   detailsOmitted: boolean;
-  canStop: boolean;
 }
 
 export interface TaskQuestionInteraction extends TaskInteractionBase {
@@ -715,7 +713,6 @@ export interface TaskCapabilities {
   sendMessage: boolean;
   editQueuedMessage: boolean;
   abortTurn: boolean;
-  stopWork: boolean;
   openTerminal: boolean;
   releaseSandbox: boolean;
   editTask: boolean;
@@ -766,25 +763,14 @@ export type TaskSandboxReleaseReceipt =
 
 export interface TaskTurnAbortRequest {
   expectedRunId:string;
-  turnId:string;
 }
 
-export interface TaskBackgroundWorkStopRequest {
-  expectedRunId:string;
-  interactionId:string;
+export interface TaskTurnAbortResponse {
+  taskId:string;
+  runId:string;
+  state:"idle"|"running"|"aborting"|"failed";
+  queueLength:number;
 }
-
-export type TaskControlFinalResult = "completed" | "already_terminal" | "conflict";
-
-export type TaskTurnAbortReceipt =
-  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string;runId:string;turnId:string}
-  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;turnId:string;result:TaskControlFinalResult;code?:string}
-  | RejectedCommandOutcome;
-
-export type TaskBackgroundWorkStopReceipt =
-  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string;runId:string;interactionId:string}
-  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;interactionId:string;result:TaskControlFinalResult;code?:string}
-  | RejectedCommandOutcome;
 
 export interface TaskPresentation extends TaskStateProjection {
   task: AgentTask;

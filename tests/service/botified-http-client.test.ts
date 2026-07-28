@@ -78,120 +78,76 @@ describe("Botified HTTP client", () => {
     assert.equal(calls.length, 1);
   });
 
-  it("posts and parses a complete current delivery receipt", async () => {
-    const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
-      assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
-      assert.equal(init.method, "POST");
-      assert.equal(String(input), "http://botified.local/v1/messages");
-      assert.deepEqual(JSON.parse(String(init.body)), {
-        text: "run once",
-        delivery_key: "delivery_task-1",
-        request_hash: "request-hash"
+  it("posts one v0.4.44 message and accepts each ordinary admission kind", async () => {
+    for (const kind of ["input_accepted", "input_queued", "input_duplicate"] as const) {
+      let calls = 0;
+      const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
+        calls += 1;
+        assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
+        assert.equal(init.method, "POST");
+        assert.equal(String(input), "http://botified.local/v1/messages");
+        assert.deepEqual(JSON.parse(String(init.body)), {
+          client_message_id: "message-1",
+          text: "run once"
+        });
+        return jsonResponse({
+          ok: true,
+          kind,
+          input_id: "message-1",
+          message_id: "message-1",
+          timeline_cursor: "evt_1",
+          queue_length: 1,
+          state: "running"
+        });
       });
-      return jsonResponse({
-        outcome: "completed",
-        delivery_key: "delivery_task-1",
-        request_hash: "request-hash",
-        message_id: "message-1",
-        accepted_kind: "queued",
-        timeline_cursor: "timeline:main:1",
-        turn_id: "turn-1"
-      });
-    });
 
-    assert.deepEqual(
-      await client.postMessageWithDelivery(
-        "http://botified.local",
-        "service-secret",
-        {
-          text: "run once",
-          deliveryKey: "delivery_task-1",
-          requestHash: "request-hash"
-        }
-      ),
-      {
-        receiptKind: "current",
-        outcome: "completed",
-        deliveryKey: "delivery_task-1",
-        requestHash: "request-hash",
+      assert.deepEqual(await client.postMessage("http://botified.local", "service-secret", {
         messageId: "message-1",
-        acceptedKind: "queued",
-        timelineCursor: "timeline:main:1",
-        turnId: "turn-1"
-      }
-    );
-  });
-
-  it("posts and parses a canonical legacy delivery receipt without inventing current fields", async () => {
-    const client = new FetchBotifiedRuntimeHttpClient(async () =>
-      jsonResponse({
-        outcome: "completed",
-        receipt_kind: "canonical_legacy",
-        delivery_key: "delivery_task-1",
-        request_hash: "request-hash",
-        message_id: "delivery_task-1",
-        payload_sha256: "a".repeat(64)
-      })
-    );
-
-    assert.deepEqual(
-      await client.postMessageWithDelivery(
-        "http://botified.local",
-        "service-secret",
-        {
-          text: "run once",
-          deliveryKey: "delivery_task-1",
-          requestHash: "request-hash"
-        }
-      ),
-      {
-        receiptKind: "canonical_legacy",
-        outcome: "completed",
-        deliveryKey: "delivery_task-1",
-        requestHash: "request-hash",
-        messageId: "delivery_task-1",
-        payloadSha256: "a".repeat(64)
-      }
-    );
-  });
-
-  it("rejects incomplete and mixed delivery receipts", async () => {
-    for (const body of [
-      {
-        outcome: "completed",
-        delivery_key: "delivery_task-1",
-        request_hash: "request-hash",
-        message_id: "message-1",
-        accepted_kind: "started",
-        timeline_cursor: "timeline:main:1"
-      },
-      {
-        outcome: "completed",
-        receipt_kind: "canonical_legacy",
-        delivery_key: "delivery_task-1",
-        request_hash: "request-hash",
-        message_id: "delivery_task-1",
-        payload_sha256: "a".repeat(64),
-        turn_id: "invented-current-field"
-      }
-    ]) {
-      const client = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse(body));
-      await assert.rejects(
-        () =>
-          client.postMessageWithDelivery(
-            "http://botified.local",
-            "service-secret",
-            {
-              text: "run once",
-              deliveryKey: "delivery_task-1",
-              requestHash: "request-hash"
-            }
-          ),
-        (error: unknown) =>
-          error instanceof BotifiedHttpError &&
-          error.code === "invalid_delivery_receipt"
-      );
+        text: "run once"
+      }), {
+        type: "ordinary",
+        kind,
+        inputId: "message-1",
+        messageId: "message-1",
+        timelineCursor: "evt_1",
+        queueLength: 1,
+        state: "running"
+      });
+      assert.equal(calls, 1);
     }
+  });
+
+  it("returns a successful slash response as opaque command data without inventing a cursor", async () => {
+    const response = { ok: true, command: "tasks", rows: [{ id: "task_1" }] };
+    const client = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse(response));
+
+    assert.deepEqual(await client.postMessage("http://botified.local", "service-secret", {
+      messageId: "message-slash",
+      text: "/tasks"
+    }), {
+      type: "slash",
+      response
+    });
+  });
+
+  it("rejects malformed ordinary message admissions", async () => {
+    const client = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse({
+      ok: true,
+      kind: "input_accepted",
+      input_id: "message-1",
+      message_id: "message-1",
+      queue_length: 0,
+      state: "idle"
+    }));
+
+    await assert.rejects(
+      () => client.postMessage("http://botified.local", "service-secret", {
+        messageId: "message-1",
+        text: "run once"
+      }),
+      (error: unknown) => error instanceof BotifiedHttpError
+        && error.code === "invalid_message_response"
+    );
   });
 
   it("sends bearer auth for timeline reads and ignores blank heartbeat lines", async () => {
@@ -317,7 +273,7 @@ describe("Botified HTTP client", () => {
     ]);
   });
 
-  it("streams typed LLM previews and stops exact background work with a durable command key", async () => {
+  it("streams typed LLM previews", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
       if (String(input) === "http://botified.local/v1/llm-text-preview?provider_request_id=request_1&cycle_id=cycle_1&input_id=input_1") {
@@ -330,17 +286,7 @@ describe("Botified HTTP client", () => {
         ].join(""), { headers: { "content-type": "text/event-stream" } });
       }
 
-      assert.equal(String(input), "http://botified.local/v1/tasks/stop");
-      assert.equal(init.method, "POST");
-      assert.equal(init.body, JSON.stringify({
-        command_key: "stop-command-1",
-        expected_task_id: "work/1"
-      }));
-      return jsonResponse({
-        command_key: "stop-command-1",
-        task_id: "work/1",
-        outcome: "accepted"
-      }, { status: 202 });
+      throw new Error(`Unexpected request: ${String(input)}`);
     });
 
     assert.deepEqual(await collect(client.streamLlmTextPreview("http://botified.local", "service-secret", {
@@ -366,17 +312,9 @@ describe("Botified HTTP client", () => {
         delta: "hello"
       }
     ]);
-    assert.deepEqual(await client.stopBackgroundTask("http://botified.local", "service-secret", {
-      commandKey: "stop-command-1",
-      expectedTaskId: "work/1"
-    }), {
-      commandKey: "stop-command-1",
-      taskId: "work/1",
-      outcome: "accepted"
-    });
   });
 
-  it("uploads files and aborts an exact turn with a durable command key", async () => {
+  it("uploads files and sends a bodyless abort", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(new Headers(init.headers).get("authorization"), "Bearer service-secret");
 
@@ -391,14 +329,11 @@ describe("Botified HTTP client", () => {
 
       assert.equal(String(input), "http://botified.local/v1/abort");
       assert.equal(init.method, "POST");
-      assert.equal(init.body, JSON.stringify({
-        command_key: "abort-command-1",
-        expected_turn_id: "turn_1"
-      }));
+      assert.equal(init.body, undefined);
       return jsonResponse({
-        command_key: "abort-command-1",
-        turn_id: "turn_1",
-        outcome: "completed"
+        ok: true,
+        state: "aborting",
+        queue_length: 2
       });
     });
 
@@ -409,44 +344,11 @@ describe("Botified HTTP client", () => {
     }), {
       files: [{ file_id: "file_1", filename: "note.txt" }]
     });
-    assert.deepEqual(await client.abort("http://botified.local", "service-secret", {
-      commandKey: "abort-command-1",
-      expectedTurnId: "turn_1"
-    }), {
-      commandKey: "abort-command-1",
-      turnId: "turn_1",
-      outcome: "completed"
+    assert.deepEqual(await client.abort("http://botified.local", "service-secret"), {
+      ok: true,
+      state: "aborting",
+      queueLength: 2
     });
-  });
-
-  it("parses stable exact-control conflicts and rejects mismatched receipt identity", async () => {
-    const conflict = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse({
-      command_key: "abort-command-2",
-      turn_id: "turn_stale",
-      outcome: "conflict"
-    }, { status: 409 }));
-    assert.deepEqual(await conflict.abort("http://botified.local", "service-secret", {
-      commandKey: "abort-command-2",
-      expectedTurnId: "turn_stale"
-    }), {
-      commandKey: "abort-command-2",
-      turnId: "turn_stale",
-      outcome: "conflict"
-    });
-
-    const mismatch = new FetchBotifiedRuntimeHttpClient(async () => jsonResponse({
-      command_key: "different-command",
-      task_id: "work/1",
-      outcome: "already_terminal"
-    }));
-    await assert.rejects(
-      mismatch.stopBackgroundTask("http://botified.local", "service-secret", {
-        commandKey: "stop-command-2",
-        expectedTaskId: "work/1"
-      }),
-      (error: unknown) => error instanceof BotifiedHttpError
-        && error.code === "invalid_background_task_stop_response"
-    );
   });
 
   it("downloads files with bearer auth and returns response metadata", async () => {
@@ -539,10 +441,7 @@ describe("Botified HTTP client", () => {
     );
 
     await assert.rejects(
-      client.abort("http://botified.local","service-secret",{
-        commandKey:"abort-command-error",
-        expectedTurnId:"turn-error"
-      }),
+      client.abort("http://botified.local","service-secret"),
       (error: unknown) => {
         assert.equal(error instanceof BotifiedHttpError, true);
         const httpError = error as BotifiedHttpError;

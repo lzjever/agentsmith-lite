@@ -109,6 +109,6 @@ function presentation(state:"active"|"released"|"failed"):TaskDetail{
     lifecycle:{state:"active"},
     currentTurn:{state:state==="active"?"running":"ready",turnId:state==="active"?"turn_1":null},
     sandboxState:{state,runId:"run_1",cause:state==="failed"?{code:"startup_failed",message:"Startup failed"}:null},
-    capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:true,releaseSandbox:state==="active",editTask:true,archiveTask:true,deleteTask:true}
+    capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:state==="active",editTask:true,archiveTask:true,deleteTask:true}
   };
 }

@@ -57,7 +57,6 @@ function taskPresentation() {
       sendMessage: true,
       editQueuedMessage: true,
       abortTurn: false,
-      stopWork: false,
       openTerminal: false,
       releaseSandbox: false,
       editTask: true,

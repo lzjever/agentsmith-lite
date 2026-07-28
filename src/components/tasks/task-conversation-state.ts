@@ -94,7 +94,7 @@ export type TaskPresentationAction =
   | {
       type: "canonical_mutation_accepted";
       taskId: string;
-      kind: "message" | "message_edit" | "message_delete" | "release" | "terminal_start" | "abort" | "stop";
+      kind: "message" | "message_edit" | "message_delete" | "release" | "terminal_start" | "abort";
       fence: TaskCommandFence;
       targetRunId?: string;
       interaction?: TaskInteractionItem | null;

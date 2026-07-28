@@ -276,40 +276,6 @@ describe("task interaction projection", () => {
     assert.equal(field(lateBackgroundUpdate, "deliveryStatus"), "failed");
   });
 
-  it("does not restore background stop capability from a later running event", () => {
-    const queued = projectBotified(canonicalEvent(
-      1,
-      "background_task.started",
-      { task_id: "work-stopping", state: "queued", work_summary: "Compile" },
-      "background_task"
-    ));
-    assert.equal(field(queued, "canStop"), false);
-    const running = projectBotified(canonicalEvent(
-      2,
-      "background_task.started",
-      { task_id: "work-stopping", state: "running", work_summary: "Compile" },
-      "background_task"
-    ), state(queued));
-    assert.equal(field(running, "canStop"), true);
-
-    const stoppedState = state(running);
-    assert.equal(stoppedState.interaction.kind, "background_task");
-    if (stoppedState.interaction.kind !== "background_task") return;
-    stoppedState.interaction = {
-      ...stoppedState.interaction,
-      revision: stoppedState.interaction.revision + 1,
-      canStop: false
-    };
-
-    const lateRunning = projectBotified(canonicalEvent(
-      3,
-      "background_task.started",
-      { task_id: "work-stopping", state: "running", work_summary: "stale" },
-      "background_task"
-    ), stoppedState);
-    assert.equal(field(lateRunning, "executionStatus"), "running");
-    assert.equal(field(lateRunning, "canStop"), false);
-  });
 
   it("merges ask/reply and canonical callback identities", () => {
     const asked = projectBotified(canonicalEvent(
@@ -455,7 +421,7 @@ describe("task interaction projection", () => {
     assert.equal(delivered.interaction?.body, "Start work");
     assert.equal(field(stale, "status"), "accepted");
 
-    const retrying = projectProduct({
+    const failed = projectProduct({
       sourceKind: "product",
       taskId: "task-1",
       sourceId: "retry-message",
@@ -465,7 +431,7 @@ describe("task interaction projection", () => {
       type: "message_delivery",
       messageId: "retry-message",
       content: "Retry me",
-      status: "retrying"
+      status: "failed"
     });
     const lateDispatching = projectProduct({
       sourceKind: "product",
@@ -477,8 +443,8 @@ describe("task interaction projection", () => {
       type: "message_delivery",
       messageId: "retry-message",
       status: "dispatching"
-    }, state(retrying));
-    assert.equal(field(lateDispatching, "status"), "retrying");
+    }, state(failed));
+    assert.equal(field(lateDispatching, "status"), "failed");
 
     const canonicalAcceptance = projectBotified(canonicalEvent(4, "input.accepted", {
       input_id: "botified-input-1",
@@ -526,64 +492,6 @@ describe("task interaction projection", () => {
     assert.notEqual(nextTurn.interaction?.id, aborted.interaction?.id);
   });
 
-  it("projects background stop without surrendering body, terminal status, or canStop ownership", () => {
-    const running = projectBotified(canonicalEvent(1, "background_task.started", {
-      task_id: "work-stop-1",
-      tool_call_id: "call-stop-1",
-      state: "running",
-      work_summary: "Compile release"
-    }, "background_task"));
-    const stoppingSource: ProductTaskInteractionSource = {
-      sourceKind: "product",
-      taskId: "task-1",
-      sourceId: "background-work:work-stop-1:stop",
-      sourceRevision: 2,
-      occurredAt: "2026-07-13T10:00:02.000Z",
-      position: 2,
-      type: "background_work_stopped",
-      workTaskId: "work-stop-1",
-      toolCallId: "call-stop-1",
-      status: "cancelling"
-    };
-    const stopping = projectProduct(stoppingSource, state(running));
-    const persistedStopping: TaskInteractionProjectionState = {
-      ...state(stopping),
-      sourceKind: "product",
-      sourceId: stoppingSource.sourceId,
-      sourceRevision: stoppingSource.sourceRevision
-    };
-    const duplicate = projectProduct(stoppingSource, persistedStopping);
-    const outOfOrder = projectProduct({ ...stoppingSource, sourceRevision:1, status:"running" }, persistedStopping);
-    const cancelledSource: ProductTaskInteractionSource = {
-      ...stoppingSource,
-      sourceRevision: 3,
-      occurredAt: "2026-07-13T10:00:03.000Z",
-      status: "cancelled"
-    };
-    const cancelled = projectProduct(cancelledSource, persistedStopping);
-    const lateRunning = projectProduct({
-      ...stoppingSource,
-      sourceRevision: 4,
-      occurredAt: "2026-07-13T10:00:04.000Z",
-      status: "running"
-    }, {
-      ...state(cancelled),
-      sourceKind: "product",
-      sourceId: cancelledSource.sourceId,
-      sourceRevision: cancelledSource.sourceRevision
-    });
-
-    assert.equal(stopping.interaction?.id, running.interaction?.id);
-    assert.equal(stopping.interaction?.body, "Compile release");
-    assert.equal(field(stopping, "executionStatus"), "running");
-    assert.equal(field(stopping, "canStop"), false);
-    assert.equal(duplicate.interaction, null);
-    assert.equal(outOfOrder.interaction, null);
-    assert.equal(field(cancelled, "executionStatus"), "cancelled");
-    assert.equal(field(lateRunning, "executionStatus"), "cancelled");
-    assert.equal(field(lateRunning, "canStop"), false);
-    assert.equal(lateRunning.interaction?.body, "Compile release");
-  });
 
   it("returns an internal artifact upsert without exposing storage fields in the interaction", () => {
     const result = projectBotified(canonicalEvent(1, "file.published", {

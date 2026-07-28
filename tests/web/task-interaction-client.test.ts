@@ -39,13 +39,12 @@ describe("task interaction API client", () => {
     );
   });
 
-  it("uses the interaction, message, turn, sandbox, work, and task routes with idempotency keys", async () => {
+  it("uses the interaction, message, Abort, sandbox, and task routes", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input); calls.push({ url, init });
       if (url.endsWith("/me")) return Response.json({ user: { id: "user_1", email: "user@example.test" }, csrfToken: "csrf" });
-      if(url.endsWith("/turn/abort"))return Response.json({outcome:"completed",keyDisposition:"retire",taskId:"task/1",runId:"run_1",turnId:"turn_1",result:"completed"});
-      if(url.endsWith("/work/interaction%2F1/stop"))return Response.json({outcome:"accepted_in_progress",keyDisposition:"retain",taskId:"task/1",runId:"run_1",interactionId:"interaction/1"});
+      if(url.endsWith("/turn/abort"))return Response.json({taskId:"task/1",runId:"run_1",state:"aborting",queueLength:0});
       return Response.json({ outcome:"completed",keyDisposition:"retire",messageId: "message_1", disposition: "queued_for_active_run", duplicate: false, queuedMessage: null, interaction: null, presentation:taskPresentation() });
     };
 
@@ -54,61 +53,23 @@ describe("task interaction API client", () => {
     const sent = await apiClient.sendTaskMessage("task/1", "Continue", "send-key");
     const edited = await apiClient.updateTaskMessage("task/1", "message/1", "Updated", "edit-key");
     const deleted = await apiClient.deleteTaskMessage("task/1", "message/1", "delete-key");
-    const aborted=await apiClient.abortTaskTurn("task/1",{expectedRunId:"run_1",turnId:"turn_1"},"abort-key");
+    const aborted=await apiClient.abortTaskTurn("task/1",{expectedRunId:"run_1"});
     await apiClient.releaseTaskSandbox("task/1",{expectedRunId:"run_1"},"release-key");
-    const stopped=await apiClient.stopTaskWork("task/1",{expectedRunId:"run_1",interactionId:"interaction/1"},"stop-key");
     await apiClient.editTask("task/1", "New title", "task-edit-key");
     await apiClient.archiveTask("task/1", "archive-key");
 
     assert.match(calls[1]!.url, /tasks\/task%2F1\/interactions\?cursor=before\+1$/);
-    assert.deepEqual(calls.slice(2).map((call) => [call.init.method, new Headers(call.init.headers).get("idempotency-key")]), [["POST", "send-key"], ["PATCH", "edit-key"], ["DELETE", "delete-key"], ["POST", "abort-key"], ["POST", "release-key"], ["POST", "stop-key"], ["PATCH", "task-edit-key"], ["POST", "archive-key"]]);
+    assert.deepEqual(calls.slice(2).map((call) => [call.init.method, new Headers(call.init.headers).get("idempotency-key")]), [["POST", "send-key"], ["PATCH", "edit-key"], ["DELETE", "delete-key"], ["POST", null], ["POST", "release-key"], ["PATCH", "task-edit-key"], ["POST", "archive-key"]]);
     assert.match(calls[6]!.url, /tasks\/task%2F1\/sandbox\/release$/);
     assert.equal(calls[6]!.init.body,JSON.stringify({expectedRunId:"run_1"}));
-    assert.equal(calls[5]!.init.body,JSON.stringify({expectedRunId:"run_1",turnId:"turn_1"}));
-    assert.match(calls[7]!.url, /tasks\/task%2F1\/work\/interaction%2F1\/stop$/);
-    assert.equal(calls[7]!.init.body,JSON.stringify({expectedRunId:"run_1",interactionId:"interaction/1"}));
-    assert.match(calls[8]!.url, /tasks\/task%2F1$/);
-    assert.match(calls[9]!.url, /tasks\/task%2F1\/archive$/);
+    assert.equal(calls[5]!.init.body,JSON.stringify({expectedRunId:"run_1"}));
+    assert.match(calls[7]!.url, /tasks\/task%2F1$/);
+    assert.match(calls[8]!.url, /tasks\/task%2F1\/archive$/);
     assert.equal(sent.outcome, "completed");
     assert.equal(sent.disposition, "queued_for_active_run");
     assert.equal(edited.messageId, "message_1");
     assert.equal(deleted.messageId, "message_1");
-    assert.equal(aborted.outcome,"completed");
-    assert.equal(stopped.outcome,"accepted_in_progress");
-  });
-
-  it("retains Abort and Stop keys when any receipt identity differs from the locked request", async () => {
-    const abortRequest={expectedRunId:"run_1",turnId:"turn_1"};
-    for(const receipt of [
-      {taskId:"task_other",runId:"run_1",turnId:"turn_1"},
-      {taskId:"task_1",runId:"run_other",turnId:"turn_1"},
-      {taskId:"task_1",runId:"run_1",turnId:"turn_other"}
-    ]){
-      globalThis.fetch=async()=>Response.json({
-        outcome:"completed",keyDisposition:"retire",...receipt,result:"completed"
-      });
-      assert.deepEqual(await apiClient.abortTaskTurn("task_1",abortRequest,"abort-key"),{
-        outcome:"outcome_unknown",
-        keyDisposition:"retain",
-        error:new Error("The Task command returned a receipt for a different target.")
-      });
-    }
-
-    const stopRequest={expectedRunId:"run_1",interactionId:"interaction_1"};
-    for(const receipt of [
-      {taskId:"task_other",runId:"run_1",interactionId:"interaction_1"},
-      {taskId:"task_1",runId:"run_other",interactionId:"interaction_1"},
-      {taskId:"task_1",runId:"run_1",interactionId:"interaction_other"}
-    ]){
-      globalThis.fetch=async()=>Response.json({
-        outcome:"completed",keyDisposition:"retire",...receipt,result:"completed"
-      });
-      assert.deepEqual(await apiClient.stopTaskWork("task_1",stopRequest,"stop-key"),{
-        outcome:"outcome_unknown",
-        keyDisposition:"retain",
-        error:new Error("The Task command returned a receipt for a different target.")
-      });
-    }
+    assert.deepEqual(aborted,{taskId:"task/1",runId:"run_1",state:"aborting",queueLength:0});
   });
 
   it("passes the opaque cursor to the task interaction stream", async () => {
@@ -165,6 +126,6 @@ function taskPresentation(capabilityOverrides:Record<string,boolean>={}){
   return{
     task:{id:"task_1",workspaceId:"workspace_1",projectId:"project_1",endpointId:"endpoint_1",fileLibraryId:"library_1",title:"Task",prompt:"Prompt",createdAt:"2026-07-13T00:00:00.000Z",updatedAt:"2026-07-13T00:00:00.000Z"},
     lifecycle:{state:"active"},currentTurn:{state:"running"},sandboxState:{state:"active",runId:"run_1",cause:null},
-    capabilities:{sendMessage:true,editQueuedMessage:true,abortTurn:true,stopWork:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:true,deleteTask:true,...capabilityOverrides}
+    capabilities:{sendMessage:true,editQueuedMessage:true,abortTurn:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:true,deleteTask:true,...capabilityOverrides}
   };
 }

@@ -10,8 +10,8 @@ import { createLocalInMemoryProductStore } from "../../packages/adapters-postgre
 import { createTestApiServer as createRawApiServer, type TestApiServerOptions as ApiServerOptions, type RunningApiServer } from "../../packages/api-entry-node/src/server.js";
 import {
   type BotifiedAbortResult,
-  type BotifiedDeliveryMessageInput,
-  type BotifiedDeliveryReceipt,
+  type BotifiedMessageInput,
+  type BotifiedMessageResult,
   type BotifiedRuntimeHttpClient,
   type BotifiedLlmTextPreviewOptions,
   type BotifiedTimelineReadResult,
@@ -248,7 +248,6 @@ describe("task interactions API", () => {
       sendMessage: false,
       editQueuedMessage: false,
       abortTurn: false,
-      stopWork: false,
       openTerminal: false,
       releaseSandbox: true,
       editTask: false,
@@ -287,7 +286,7 @@ describe("task interactions API", () => {
 
     assert.equal(detail.sandboxState.state,"failed");
     assert.equal(detail.sandboxState.runId,"run_missing");
-    assert.deepEqual(detail.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
+    assert.deepEqual(detail.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
   });
 
   it("uses a safe download header for persisted artifact names with path and control characters", async () => {
@@ -342,480 +341,131 @@ describe("task interactions API", () => {
     assert.deepEqual(new Uint8Array(await download.arrayBuffer()), artifactBytes);
   });
 
-  it("freezes exact background work stop through server-side interaction correlation", async () => {
-    const store = createLocalInMemoryProductStore();
-    const botified = new FakeBotifiedClient([]);
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"background", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, "http://botified.internal");
+
+  it("aborts only the exact active Run with one Botified call and exposes no Stop route",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"abort exact run",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Abort files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const interaction = { id:"interaction-work", revision:1, taskId:task.id, kind:"background_task" as const, title:"Background task", body:null, contentMode:"none" as const, position:1, occurredAt:task.createdAt, updatedAt:task.createdAt, executionStatus:"running" as const, deliveryStatus:null, label:"Compile", workSummary:null, result:null, error:null, detailsOmitted:false, canStop:true };
-    await store.persistTaskInteractionMutation({ taskId:task.id, changes:[{ sourceKind:"botified", sourceId:"evt_test_1", sourceRevision:0, interaction, correlation:{workTaskId:"t_0123456789abcdef"} }] });
+    const run=await store.sandboxRuns.get(current.currentRunId);assert.ok(run);
 
-    const stopped = await auth.requestJson("POST", `/api/v1/tasks/${task.id}/work/${interaction.id}/stop`, {
-      expectedRunId:current.currentRunId,
-      interactionId:interaction.id
+    const stale=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
+      expectedRunId:"run_stale"
     });
-    assert.equal(stopped.outcome,"completed");
-    assert.equal(stopped.keyDisposition,"retire");
-    assert.equal(stopped.interactionId,interaction.id);
-    assert.equal("workTaskId" in stopped,false);
-    assert.deepEqual(botified.stopCalls,[{
-      commandKey:botified.stopCalls[0]?.commandKey,
-      expectedTaskId:"t_0123456789abcdef"
-    }]);
-  });
+    assert.equal(stale.status,409);
+    assert.equal(botified.abortCalls.length,0);
 
-  it("aborts only the projected canonical turn on the frozen run after endpoint drift", async () => {
-    const store = createLocalInMemoryProductStore();
-    const botified = new FakeBotifiedClient([]);
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"abort exact turn", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, "http://frozen-botified.internal");
-    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
-    const run = await store.sandboxRuns.get(current.currentRunId); assert.ok(run);
-    const projection = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
-    assert.deepEqual(projection.presentation.currentTurn, { state:"running", turnId:"turn-current" });
-    assert.equal(projection.presentation.capabilities.abortTurn, true);
-
-    const endpoint = await store.findEndpoint(task.endpointId); assert.ok(endpoint);
-    await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
-    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"exact-abort-product-key"};
-    const abortResponse=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
-      method:"POST",headers,body:JSON.stringify({
-        expectedRunId:current.currentRunId,
-        turnId:projection.presentation.currentTurn.turnId
-      })
+    const response=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
+      expectedRunId:current.currentRunId
     });
-    assert.equal(abortResponse.status,200);
-    const aborted=await abortResponse.json() as Record<string,unknown>;
-
-    assert.equal(aborted.outcome,"completed");
-    assert.equal(aborted.keyDisposition,"retire");
-    assert.equal(aborted.runId,current.currentRunId);
-    assert.equal(aborted.turnId,"turn-current");
+    assert.equal(response.status,200);
+    assert.deepEqual(await response.json(),{
+      taskId:task.id,runId:current.currentRunId,state:"aborting",queueLength:0
+    });
     assert.deepEqual(botified.abortCalls,[{
       baseUrl:`http://${run.resourceNames.service}.${run.namespace}.svc.cluster.local:${run.botifiedPort}`,
-      serviceKey:task.id,
-      commandKey:botified.abortCalls[0]?.commandKey,
-      expectedTurnId:"turn-current"
+      serviceKey:task.id
     }]);
 
-    const changedPayload=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
-      method:"POST",headers,body:JSON.stringify({
-        expectedRunId:current.currentRunId,
-        turnId:"turn-must-not-rebind"
-      })
+    const stopped=await auth.request("POST",`/api/v1/tasks/${task.id}/work/interaction_1/stop`,{
+      expectedRunId:current.currentRunId,interactionId:"interaction_1"
     });
-    assert.equal(changedPayload.status,409);
-    assert.deepEqual(await changedPayload.json(),{
-      outcome:"rejected_before_acceptance",
-      keyDisposition:"retain",
-      error:"Idempotency-Key was already used with a different request",
-      code:"idempotency_payload_mismatch"
-    });
-    assert.equal(botified.abortCalls.length,1);
-
-    const staleRun=await auth.request("POST", `/api/v1/tasks/${task.id}/turn/abort`, {
-      expectedRunId:"run-stale",
-      turnId:"turn-current"
-    });
-    assert.equal(staleRun.status,409);
-    const staleReceipt=await staleRun.json();
-    assert.equal(staleReceipt.outcome,"rejected_before_acceptance");
-    assert.equal(staleReceipt.keyDisposition,"retire");
-    assert.equal(staleReceipt.code,"task_run_target_conflict");
-    assert.equal(botified.abortCalls.length,1);
+    assert.equal(stopped.status,404);
   });
 
-  it("does not expose Abort capability without an official canonical turn id", async () => {
-    const store = createLocalInMemoryProductStore();
-    const botified = new FakeBotifiedClient([]);
-    botified.stateTurnId = undefined;
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"legacy state", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, "http://botified.internal");
-
-    const projection = await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`);
-    assert.deepEqual(projection.presentation.currentTurn, { state:"running", turnId:null });
-    assert.equal(projection.presentation.capabilities.abortTurn, false);
-  });
-
-  it("maps an exact Botified Abort conflict to a terminal product receipt", async () => {
-    const store = createLocalInMemoryProductStore();
-    const botified = new FakeBotifiedClient([]);
-    botified.abortOutcome = "conflict";
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, store });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"abort conflict", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, "http://botified.internal");
-    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
-
-    const response = await auth.request("POST", `/api/v1/tasks/${task.id}/turn/abort`, {
-      expectedRunId:current.currentRunId,
-      turnId:"turn-current"
-    });
-    assert.equal(response.status,409);
-    const receipt = await response.json();
-    assert.equal(receipt.outcome,"completed");
-    assert.equal(receipt.result,"conflict");
-    assert.equal(receipt.keyDisposition,"retire");
-    assert.equal(receipt.turnId,"turn-current");
-  });
-
-  it("recovers a durable exact Abort through the existing runtime sync owner", async () => {
-    const store = createLocalInMemoryProductStore();
-    const botified = new FakeBotifiedClient([]);
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, runtimeTickIntervalMs:60_000, store });
-    const auth = await createProjectWithEndpoint(api.baseUrl);
-    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"recover abort", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
-    const task = await store.findTask(created.task.id as string); assert.ok(task?.createdByUserId);
-    await makeTaskRunActive(store, task, "http://botified.internal");
-    const current = await store.findTask(task.id); assert.ok(current?.currentRunId);
-    const timestamp = new Date(Date.now()-120_000).toISOString();
-    const claimed = await store.beginTaskControlCommand({
-      taskId:task.id,
-      expectedRunId:current.currentRunId,
-      interactionId:null,
-      downstreamCommandKey:"botified-abort-recovery-key",
-      downstreamTargetId:"turn-recovery",
-      idempotency:{
-        actorId:task.createdByUserId,
-        projectId:task.projectId,
-        operation:"abort-turn",
-        key:"product-abort-recovery-key",
-        requestHash:"product-abort-recovery-hash",
-        resourceId:task.id,
-        claimToken:"crashed-control-owner",
-        now:timestamp,
-        leaseExpiresAt:new Date(Date.now()-60_000).toISOString()
-      }
-    });
-    assert.equal(claimed.kind,"claimed");
-
-    const background=createApplicationServices({
-      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
-    });
-    await background.tasks.syncActiveTasksOnce();
-
-    assert.deepEqual(botified.abortCalls,[{
-      baseUrl:botified.abortCalls[0]?.baseUrl,
-      serviceKey:task.id,
-      commandKey:"botified-abort-recovery-key",
-      expectedTurnId:"turn-recovery"
-    }]);
-    const replay=await store.beginTaskControlCommand({
-      taskId:task.id,
-      expectedRunId:current.currentRunId,
-      interactionId:null,
-      downstreamCommandKey:"must-not-replace",
-      downstreamTargetId:"turn-recovery",
-      idempotency:{
-        actorId:task.createdByUserId,
-        projectId:task.projectId,
-        operation:"abort-turn",
-        key:"product-abort-recovery-key",
-        requestHash:"product-abort-recovery-hash",
-        resourceId:task.id,
-        claimToken:"must-not-claim",
-        now:new Date().toISOString(),
-        leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
-      }
-    });
-    assert.equal(replay.kind,"replay");
-    assert.deepEqual(replay.kind==="replay"?replay.responseBody:null,{
-      outcome:"completed",
-      keyDisposition:"retire",
-      taskId:task.id,
-      runId:current.currentRunId,
-      turnId:"turn-recovery",
-      result:"completed"
-    });
-  });
-
-  it("recovers unknown Abort and Stop POSTs with only their frozen command keys and targets",async()=>{
+  it("returns 503 for an ambiguous Abort without changing Run authority",async()=>{
     const store=createLocalInMemoryProductStore();
     const botified=new FakeBotifiedClient([]);
+    botified.abortError=new TypeError("response lost after dispatch");
     api=await createApiServer({
       port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      taskControlLeaseMs:5,runtimeTickIntervalMs:60_000,store
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,store
     });
     const auth=await createProjectWithEndpoint(api.baseUrl);
     const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"recover exact controls",endpointId:auth.endpointId,
-      fileLibrary:{mode:"create_new",name:"Task files"}
-    });
-    const task=await store.findTask(created.task.id as string);assert.ok(task?.createdByUserId);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const controlHeaders=(key:string)=>({
-      "content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":key
-    });
-    const background=()=>createApplicationServices({
-      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,taskControlLeaseMs:5,
-      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
-    });
-
-    const abortBody=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
-    botified.abortError=new TypeError("response lost after POST");
-    const unknownAbort=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
-      method:"POST",headers:controlHeaders("unknown-abort-key"),body:abortBody
-    });
-    assert.equal(unknownAbort.status,409);
-    assert.equal((await unknownAbort.json()).code,"task_control_outcome_unknown");
-    assert.equal(botified.abortCalls.length,1);
-    const firstAbort=botified.abortCalls[0]!;
-    botified.abortError=undefined;
-    await new Promise((resolve)=>setTimeout(resolve,10));
-    await background().tasks.syncActiveTasksOnce();
-    assert.equal(botified.abortCalls.length,2);
-    assert.deepEqual(botified.abortCalls[1],firstAbort);
-    const abortReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
-      method:"POST",headers:controlHeaders("unknown-abort-key"),body:abortBody
-    });
-    assert.equal(abortReplay.status,200);
-    assert.equal(botified.abortCalls.length,2);
-
-    const interaction={
-      id:"interaction-stop-recovery",revision:1,taskId:task.id,kind:"background_task" as const,
-      title:"Background task",body:null,contentMode:"none" as const,position:1,
-      occurredAt:task.createdAt,updatedAt:task.createdAt,executionStatus:"running" as const,
-      deliveryStatus:null,label:"Compile",workSummary:null,result:null,error:null,
-      detailsOmitted:false,canStop:true
-    };
-    await store.persistTaskInteractionMutation({
-      taskId:task.id,
-      changes:[{sourceKind:"botified",sourceId:"stop-recovery-event",sourceRevision:0,interaction,correlation:{workTaskId:"t_0123456789abcdef"}}]
-    });
-    const stopBody=JSON.stringify({expectedRunId:current.currentRunId,interactionId:interaction.id});
-    botified.stopError=new TypeError("response lost after POST");
-    const unknownStop=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/work/${interaction.id}/stop`,{
-      method:"POST",headers:controlHeaders("unknown-stop-key"),body:stopBody
-    });
-    assert.equal(unknownStop.status,409);
-    assert.equal((await unknownStop.json()).code,"task_control_outcome_unknown");
-    assert.equal(botified.stopCalls.length,1);
-    const firstStop=botified.stopCalls[0]!;
-    botified.stopError=undefined;
-    await new Promise((resolve)=>setTimeout(resolve,10));
-    await background().tasks.syncActiveTasksOnce();
-    assert.equal(botified.stopCalls.length,2);
-    assert.deepEqual(botified.stopCalls[1],firstStop);
-    const stopReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/work/${interaction.id}/stop`,{
-      method:"POST",headers:controlHeaders("unknown-stop-key"),body:stopBody
-    });
-    assert.equal(stopReplay.status,200);
-    assert.equal(botified.stopCalls.length,2);
-  });
-
-  it("replays an accepted exact control until Botified completes the same command",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    botified.abortOutcomes=["accepted","completed"];
-    api=await createApiServer({
-      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      taskControlLeaseMs:5,runtimeTickIntervalMs:60_000,store
-    });
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"accepted exact control",endpointId:auth.endpointId,
-      fileLibrary:{mode:"create_new",name:"Task files"}
+      prompt:"ambiguous abort",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Ambiguous abort files"}
     });
     const task=await store.findTask(created.task.id as string);assert.ok(task);
     await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"accepted-abort-key"};
-    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
 
-    assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body})).status,202);
-    const first=botified.abortCalls[0]!;
-    await new Promise((resolve)=>setTimeout(resolve,10));
-    const recovered=createApplicationServices({
-      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,taskControlLeaseMs:5,
-      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    const response=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
+      expectedRunId:current.currentRunId
     });
-    await recovered.tasks.syncActiveTasksOnce();
-    assert.deepEqual(botified.abortCalls,[first,first]);
-    assert.equal((await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body})).status,200);
-    assert.equal(botified.abortCalls.length,2);
+    assert.equal(response.status,503);
+    assert.equal((await response.json()).code,"botified_abort_outcome_unknown");
+    assert.equal(botified.abortCalls.length,1);
+    assert.equal((await store.sandboxRuns.get(current.currentRunId))?.state,"active");
+
+    await createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    }).tasks.syncActiveTasksOnce();
+    assert.equal(botified.abortCalls.length,1);
   });
 
-  it("release supersedes a pending exact control before restart can call Botified",async()=>{
+  it("never reposts an ambiguous or expired dispatching message",async()=>{
     const store=createLocalInMemoryProductStore();
     const botified=new FakeBotifiedClient([]);
     api=await createApiServer({
       port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      runtimeTickIntervalMs:60_000,store
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store
     });
     const auth=await createProjectWithEndpoint(api.baseUrl);
     const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"release pending control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
+      prompt:"message ambiguity",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Message ambiguity files"}
     });
-    const task=await store.findTask(created.task.id as string);assert.ok(task?.createdByUserId);
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
     await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const expired=new Date(Date.now()-60_000).toISOString();
-    assert.equal((await store.beginTaskControlCommand({
-      taskId:task.id,expectedRunId:current.currentRunId,interactionId:null,
-      downstreamCommandKey:"release-frozen-command",downstreamTargetId:"turn-current",
-      idempotency:{
-        actorId:task.createdByUserId,projectId:task.projectId,operation:"abort-turn",
-        key:"release-pending-product",requestHash:"release-pending-hash",resourceId:task.id,
-        claimToken:"release-pending-claim",now:expired,leaseExpiresAt:expired
-      }
-    })).kind,"claimed");
-
-    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
-      expectedRunId:current.currentRunId
-    })).status,202);
-    const recovered=createApplicationServices({
+    botified.postMessageCalls.length=0;
+    const timestamp=new Date(Date.now()-120_000).toISOString();
+    const pending=await store.createPendingTaskMessage(
+      {id:"message_ambiguous",taskId:task.id,actorId:task.createdByUserId??null,content:"run once",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+      {sourceKind:"product",sourceId:"message:message_ambiguous",sourceRevision:0,interaction:{id:"interaction_message_ambiguous",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"run once",contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+    );
+    assert.ok(pending);
+    botified.postMessageError=new TypeError("response lost after dispatch");
+    const services=()=>createApplicationServices({
       store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
       botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
       providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
     });
-    await recovered.tasks.syncActiveTasksOnce();
-    assert.deepEqual(botified.abortCalls,[]);
-    const replay=await store.findTaskIdempotency({
-      actorId:task.createdByUserId,projectId:task.projectId,operation:"abort-turn",
-      key:"release-pending-product",requestHash:"release-pending-hash"
-    });
-    assert.equal(replay?.kind,"replay");
-    if(replay?.kind==="replay"){
-      assert.equal(replay.responseStatus,409);
-      assert.equal((replay.responseBody as {code:string}).code,"task_control_superseded_by_release");
-    }
-  });
 
-  it("release wins after an exact control POST starts and its completion cannot overwrite authority",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    let unblock!:()=>void;
-    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
-    api=await createApiServer({
-      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      runtimeTickIntervalMs:60_000,store
-    });
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"release in-flight control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
-    });
-    const task=await store.findTask(created.task.id as string);assert.ok(task);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
-      method:"POST",
-      headers:{"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"in-flight-abort"},
-      body:JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"})
-    });
-    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
-    assert.equal(botified.abortCalls.length,1);
-    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
-      expectedRunId:current.currentRunId
-    })).status,202);
-    unblock();
-    const response=await abortResponse;
-    assert.equal(response.status,409);
-    assert.deepEqual(await response.json(),{
-      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
-      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
-    });
-  });
+    await services().tasks.syncActiveTasksOnce();
+    assert.equal(botified.postMessageCalls.length,1);
+    assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"failed");
+    await services().tasks.syncActiveTasksOnce();
+    assert.equal(botified.postMessageCalls.length,1);
 
-  it("returns the superseded receipt when Botified accepts after Release commits",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    botified.abortOutcome="accepted";
-    let unblock!:()=>void;
-    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
-    api=await createApiServer({
-      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      runtimeTickIntervalMs:60_000,store
-    });
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"late accepted control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
-    });
-    const task=await store.findTask(created.task.id as string);assert.ok(task);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"late-accepted-abort"};
-    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
-    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
-    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
-    assert.equal(botified.abortCalls.length,1);
-    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
-      expectedRunId:current.currentRunId
-    })).status,202);
-    unblock();
+    const expired=await store.createPendingTaskMessage(
+      {id:"message_expired_dispatch",taskId:task.id,actorId:task.createdByUserId??null,content:"must not post",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:new Date(Date.now()-60_000).toISOString(),updatedAt:timestamp,deletedAt:null},
+      {sourceKind:"product",sourceId:"message:message_expired_dispatch",sourceRevision:0,interaction:{id:"interaction_message_expired_dispatch",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"must not post",contentMode:"full",position:2,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+    );
+    assert.ok(expired);
+    assert.ok(await store.claimTaskMessage({
+      id:expired.id,claimToken:"legacy-dispatch",claimedAt:timestamp,
+      leaseExpiresAt:new Date(Date.now()-1_000).toISOString()
+    }));
+    botified.postMessageError=undefined;
 
-    const expected={
-      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
-      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
-    };
-    const response=await abortResponse;
-    assert.equal(response.status,409);
-    assert.deepEqual(await response.json(),expected);
-    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
-    assert.equal(replay.status,409);
-    assert.deepEqual(await replay.json(),expected);
-    assert.equal(botified.abortCalls.length,1);
-  });
-
-  it("returns the superseded receipt when Botified fails after Release commits",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    botified.abortError=new TypeError("late network failure");
-    let unblock!:()=>void;
-    botified.abortWait=new Promise<void>((resolve)=>{unblock=resolve;});
-    api=await createApiServer({
-      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
-      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
-      runtimeTickIntervalMs:60_000,store
-    });
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-      prompt:"late failed control",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}
-    });
-    const task=await store.findTask(created.task.id as string);assert.ok(task);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":"late-failed-abort"};
-    const body=JSON.stringify({expectedRunId:current.currentRunId,turnId:"turn-current"});
-    const abortResponse=fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
-    for(let attempt=0;attempt<20&&botified.abortCalls.length===0;attempt+=1)await new Promise<void>((resolve)=>setImmediate(resolve));
-    assert.equal(botified.abortCalls.length,1);
-    assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
-      expectedRunId:current.currentRunId
-    })).status,202);
-    unblock();
-
-    const expected={
-      outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:current.currentRunId,
-      turnId:"turn-current",result:"conflict",code:"task_control_superseded_by_release"
-    };
-    const response=await abortResponse;
-    assert.equal(response.status,409);
-    assert.deepEqual(await response.json(),expected);
-    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{method:"POST",headers,body});
-    assert.equal(replay.status,409);
-    assert.deepEqual(await replay.json(),expected);
-    assert.equal(botified.abortCalls.length,1);
+    await services().tasks.syncActiveTasksOnce();
+    const failed=await store.findTaskMessage(expired.id);
+    assert.equal(failed?.deliveryStatus,"failed");
+    assert.match(failed?.safeError??"",/outcome is unknown/i);
+    assert.equal(botified.postMessageCalls.length,1);
   });
 
   it("rejects a second interactive terminal and releases occupancy after an abnormal close", async () => {
@@ -1389,14 +1039,14 @@ describe("task interactions API", () => {
     await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
     const endpointDisabled = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(endpointDisabled.items.length,initial.items.length);
-    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:true,stopWork:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
+    assert.deepEqual(endpointDisabled.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:true,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false});
 
     await store.updateEndpoint(endpoint);
     const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
     await store.updateProjectMembership({...owner,role:"viewer",updatedAt:new Date(Date.parse(owner.updatedAt)+1_000).toISOString()});
     const viewer = await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
     assert.equal(viewer.items.length,initial.items.length);
-    assert.deepEqual(viewer.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,stopWork:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
+    assert.deepEqual(viewer.presentation.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
 
     await store.updateProjectMembership(owner);
     const findCredential = store.findStoredProjectCredential.bind(store);
@@ -1406,183 +1056,8 @@ describe("task interactions API", () => {
     assert.equal(credentialDisabled.presentation.capabilities.sendMessage,false);
     assert.equal(credentialDisabled.presentation.capabilities.openTerminal,true);
     assert.equal(credentialDisabled.presentation.capabilities.abortTurn,true);
-    assert.equal(credentialDisabled.presentation.capabilities.stopWork,true);
   });
 
-  it("replays the fixed accepted message receipt after background and capability changes",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"background replay",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Replay files"}});
-    const task=await store.findTask(created.task.id as string);assert.ok(task);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
-    const project=await store.findProject(task.projectId);assert.ok(project);const owner=await store.findProjectMembership(task.projectId,project.ownerUserId);assert.ok(owner);
-    const content="deliver after request interruption",key="background-message-key",messageId="message_background_replay";
-    const requestHash=createHash("sha256").update(JSON.stringify({content,taskId:task.id}),"utf8").digest("base64url");
-    const timestamp=new Date().toISOString();
-    const pending={
-      id:messageId,
-      taskId:task.id,
-      actorId:owner.userId,
-      content,
-      deliveryKey:`delivery_${messageId}`,
-      requestHash:createHash("sha256").update(content,"utf8").digest("base64url"),
-      claimToken:null,
-      receipt:null,
-      timelineCursor:null,
-      deliveryStatus:"pending" as const,
-      claimedAt:null,
-      leaseExpiresAt:null,
-      attemptCount:0,
-      nextRetryAt:null,
-      safeError:null,
-      createdAt:timestamp,
-      updatedAt:timestamp,
-      deletedAt:null
-    };
-    const fixedResponseBody={kind:"task_message" as const,messageId,taskId:task.id,projectId:task.projectId,actorId:owner.userId,receipt:{
-      messageId,disposition:"queued_for_active_run" as const,duplicate:false,queuedMessage:null,interaction:null,
-      presentation:(await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`))
-    }};
-    const persisted=await store.createTaskMessageAtomically({
-      taskId:task.id,
-      expectedCurrentRunId:current.currentRunId,
-      message:pending,
-      idempotency:{actorId:owner.userId,projectId:task.projectId,operation:"message",key,requestHash,resourceId:messageId,claimToken:"claim_background_replay",now:timestamp,leaseExpiresAt:new Date(Date.parse(timestamp)+60_000).toISOString()},
-      auditEvent:{id:"audit_background_replay",projectId:task.projectId,actorId:owner.userId,action:"task.message.create",status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,messageId,deliveryStatus:"pending"},createdAt:timestamp},
-      admission:{namespace:"agentsmith",namespaceLimit:100},
-      rejectionPresentation:{} as import("../../packages/contracts/src/api.js").TaskPresentation,
-      rejectedAuditEvent:{id:"audit_background_replay_rejected",projectId:task.projectId,actorId:owner.userId,action:"sandbox.started",status:"rejected",resourceKind:"sandbox",resourceId:task.id,detail:{taskId:task.id,trigger:"task_message"},createdAt:timestamp},
-      responseStatus:200,
-      responseBody:fixedResponseBody,
-      interactionChange:{sourceKind:"product",sourceId:`message:${messageId}`,sourceRevision:0,interaction:{id:`interaction_${messageId}`,revision:1,taskId:task.id,kind:"user_message",title:"You",body:content,contentMode:"full",position:0,occurredAt:timestamp,updatedAt:timestamp,actorId:owner.userId,status:"pending"}}
-    });
-    assert.equal(persisted.kind,"created");
-    const headers={"content-type":"application/json",cookie:auth.cookie,"x-csrf-token":auth.csrf,"idempotency-key":key};
-    const acceptedReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
-    assert.equal(acceptedReplay.status,200);
-    assert.equal(((await acceptedReplay.json()) as {duplicate:boolean}).duplicate,false);
-
-    const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
-    await background.tasks.syncActiveTasksOnce();
-    assert.deepEqual(await store.beginTaskIdempotency({actorId:owner.userId,projectId:task.projectId,operation:"message",key,requestHash,resourceId:"unused-replay-resource",claimToken:"unused-replay-claim",now:new Date().toISOString(),leaseExpiresAt:new Date(Date.now()+60_000).toISOString()}),{
-      kind:"replay",
-      resourceId:messageId,
-      responseStatus:200,
-      responseBody:fixedResponseBody
-    });
-    const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
-    assert.equal(replay.status,200);
-    const replayBody=await replay.json() as {duplicate:boolean;messageId:string;presentation:{sandboxState:{state:string;runId:string|null};capabilities:{sendMessage:boolean;releaseSandbox:boolean}}};
-    assert.equal(replayBody.duplicate,false);
-    assert.equal(replayBody.messageId,messageId);
-    assert.deepEqual(replayBody.presentation.sandboxState,{state:"active",runId:current.currentRunId,cause:null});
-    assert.equal(replayBody.presentation.capabilities.sendMessage,true);
-    assert.equal(replayBody.presentation.capabilities.releaseSandbox,true);
-    assert.equal((await store.listTaskMessages(task.id)).filter((message)=>message.content===content).length,1);
-    assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
-
-    const endpoint=await store.findEndpoint(task.endpointId);assert.ok(endpoint);
-    await store.updateEndpoint({...endpoint,capabilities:["text"],updatedAt:new Date(Date.parse(endpoint.updatedAt)+1_000).toISOString()});
-    const capabilityReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/messages`,{method:"POST",headers,body:JSON.stringify({content})});
-    assert.equal(capabilityReplay.status,200);
-    const capabilityBody=await capabilityReplay.json() as {duplicate:boolean;presentation:{task:{endpointId:string};capabilities:{sendMessage:boolean;openTerminal:boolean;releaseSandbox:boolean}}};
-    assert.deepEqual(capabilityBody,replayBody);
-    assert.equal((await store.listTaskMessages(task.id)).filter((message)=>message.content===content).length,1);
-    assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
-  });
-
-  it("replays an expired delivery lease by POST with the persisted key, hash, and payload",async()=>{
-    const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
-    api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
-    const auth=await createProjectWithEndpoint(api.baseUrl);
-    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"lease replay",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Lease replay files"}});
-    const task=await store.findTask(created.task.id as string);assert.ok(task);
-    await makeTaskRunActive(store,task,"http://botified.internal");
-    botified.deliveryCalls.length=0;
-    botified.legacyPayloadSha256="d86500d18e1b86cf7a2b8e900f5b0462843b45791b608c462457530c88d70d34";
-    const timestamp=new Date(Date.now()-120_000).toISOString();
-    const content="persisted delivery payload";
-    const message=await store.createPendingTaskMessage(
-      {id:"message_expired_delivery",taskId:task.id,actorId:task.createdByUserId??null,content,deliveryKey:"delivery_message_expired",requestHash:"persisted-request-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
-      {sourceKind:"product",sourceId:"message:message_expired_delivery",sourceRevision:0,interaction:{id:"interaction_message_expired_delivery",revision:1,taskId:task.id,kind:"user_message",title:"You",body:content,contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
-    );
-    assert.ok(message);
-    const claimed=await store.claimTaskMessage({id:message.id,claimToken:"expired-claim",claimedAt:timestamp,leaseExpiresAt:new Date(Date.now()-60_000).toISOString()});
-    assert.ok(claimed);
-    const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
-
-    await background.tasks.syncActiveTasksOnce();
-
-    assert.deepEqual(botified.deliveryCalls,[{
-      baseUrl:"http://botified.internal",
-      serviceKey:task.id,
-      input:{text:content,deliveryKey:"delivery_message_expired",requestHash:"persisted-request-hash"}
-    }]);
-    const accepted=await store.findTaskMessage(message.id);
-    assert.equal(accepted?.deliveryStatus,"accepted");
-    assert.equal(accepted?.attemptCount,1);
-    assert.deepEqual(accepted?.receipt,{
-      accepted:true,
-      deliveryKey:"delivery_message_expired",
-      requestHash:"persisted-request-hash",
-      messageId:"delivery_message_expired"
-    });
-    assert.equal(accepted?.timelineCursor,null);
-
-    botified.legacyPayloadSha256="b".repeat(64);
-    const mismatched=await store.createPendingTaskMessage(
-      {id:"message_mismatched_digest",taskId:task.id,actorId:task.createdByUserId??null,content:"different persisted payload",deliveryKey:"delivery_message_mismatched",requestHash:"mismatched-request-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
-      {sourceKind:"product",sourceId:"message:message_mismatched_digest",sourceRevision:0,interaction:{id:"interaction_message_mismatched_digest",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"different persisted payload",contentMode:"full",position:2,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
-    );
-    assert.ok(mismatched);
-    assert.ok(await store.claimTaskMessage({id:mismatched.id,claimToken:"mismatched-claim",claimedAt:timestamp,leaseExpiresAt:new Date(Date.now()-60_000).toISOString()}));
-
-    await background.tasks.syncActiveTasksOnce();
-
-    const rejected=await store.findTaskMessage(mismatched.id);
-    assert.equal(rejected?.deliveryStatus,"failed");
-    assert.equal(rejected?.receipt,null);
-  });
-
-  for(const receiptKind of ["current","canonical_legacy"] as const){
-    it(`rejects a ${receiptKind} delivery receipt whose message ID differs from its delivery key`,async()=>{
-      const store=createLocalInMemoryProductStore();
-      const botified=new FakeBotifiedClient([]);
-      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store});
-      const auth=await createProjectWithEndpoint(api.baseUrl);
-      const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:`${receiptKind} identity`,endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:`${receiptKind} identity files`}});
-      const task=await store.findTask(created.task.id as string);assert.ok(task);
-      await makeTaskRunActive(store,task,"http://botified.internal");
-      botified.deliveryCalls.length=0;
-      botified.deliveryMessageId="different-message-id";
-      if(receiptKind==="canonical_legacy")botified.legacyPayloadSha256="d86500d18e1b86cf7a2b8e900f5b0462843b45791b608c462457530c88d70d34";
-      const timestamp=new Date().toISOString();
-      const messageId=`message_${receiptKind}_identity_mismatch`;
-      const deliveryKey=`delivery_${receiptKind}_identity_mismatch`;
-      const message=await store.createPendingTaskMessage(
-        {id:messageId,taskId:task.id,actorId:task.createdByUserId??null,content:"persisted delivery payload",deliveryKey,requestHash:`${receiptKind}-identity-hash`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
-        {sourceKind:"product",sourceId:`message:${messageId}`,sourceRevision:0,interaction:{id:`interaction_${messageId}`,revision:1,taskId:task.id,kind:"user_message",title:"You",body:"persisted delivery payload",contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
-      );
-      assert.ok(message);
-      const background=createApplicationServices({store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}});
-
-      await background.tasks.syncActiveTasksOnce();
-
-      const rejected=await store.findTaskMessage(message.id);
-      assert.equal(rejected?.deliveryStatus,"failed");
-      assert.equal(rejected?.receipt,null);
-      assert.match(rejected?.safeError??"",/delivery receipt identity mismatch/);
-      assert.equal(botified.deliveryCalls.length,1);
-
-      await background.tasks.syncActiveTasksOnce();
-
-      assert.equal(botified.deliveryCalls.length,1);
-    });
-  }
 
   it("leaves a pending message unclaimed while its current Run is not startup-ready",async()=>{
     const store=createLocalInMemoryProductStore();
@@ -1598,7 +1073,7 @@ describe("task interactions API", () => {
     await rm(path.join(dataRoot,project.rootPath,"tasks",task.id,".agentsmith-preparation.json"));
     const timestamp=new Date().toISOString();
     const message=await store.createPendingTaskMessage(
-      {id:"message_not_ready_tick",taskId:task.id,actorId:task.createdByUserId??null,content:"wait for readiness",deliveryKey:"delivery_message_not_ready_tick",requestHash:"not-ready-hash",claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+      {id:"message_not_ready_tick",taskId:task.id,actorId:task.createdByUserId??null,content:"wait for readiness",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
       {sourceKind:"product",sourceId:"message:message_not_ready_tick",sourceRevision:0,interaction:{id:"interaction_message_not_ready_tick",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"wait for readiness",contentMode:"full",position:0,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
     );
     assert.ok(message);
@@ -2870,7 +2345,7 @@ describe("task interactions API", () => {
       const background=createApplicationServices({
         store,dataRoot,builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
-        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
       const sync=background.tasks.syncActiveTasksOnce();
@@ -2889,7 +2364,7 @@ describe("task interactions API", () => {
       const recovered=createApplicationServices({
         store,dataRoot,builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
-        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
       await new Promise((resolve)=>setTimeout(resolve,2));
@@ -2915,7 +2390,7 @@ describe("task interactions API", () => {
       const restarted=createApplicationServices({
         store,dataRoot,builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
-        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
       assert.deepEqual((await restarted.tasks.syncActiveTasksOnce()).failedTaskIds,[]);
@@ -3241,28 +2716,21 @@ class DeferredDestroySocket extends net.Socket{
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   readonly postMessageCalls: Array<{ baseUrl: string; serviceKey: string; message: string }> = [];
-  readonly deliveryCalls: Array<{ baseUrl:string;serviceKey:string;input:BotifiedDeliveryMessageInput }> = [];
   readonly readStateCalls: Array<{ baseUrl: string; serviceKey: string }> = [];
   readonly readTimelineCalls: Array<{ baseUrl: string; serviceKey: string; cursor: string | undefined }> = [];
   readonly downloadFileCalls: Array<{ baseUrl: string; serviceKey: string; fileId: string }> = [];
-  readonly abortCalls:Array<{baseUrl:string;serviceKey:string;commandKey:string;expectedTurnId:string}>=[];
-  readonly stopCalls:Array<{commandKey:string;expectedTaskId:string}>=[];
+  readonly abortCalls:Array<{baseUrl:string;serviceKey:string}>=[];
   readonly downloads: Record<string, Uint8Array> = {};
   abortError: unknown;
-  stopError: unknown;
+  postMessageError: unknown;
   abortWait: Promise<void> | undefined;
   previewFailure: unknown;
   healthFailure: unknown;
   previewSignal: AbortSignal | undefined;
   previewWaitForAbort = false;
   stateTurnId: string | undefined = "turn-current";
-  abortOutcome: BotifiedAbortResult["outcome"] = "completed";
-  abortOutcomes:BotifiedAbortResult["outcome"][]=[];
-  stopOutcomes:BotifiedAbortResult["outcome"][]=[];
   timelineSessionId: string | undefined;
   stateSessionId: string | undefined;
-  legacyPayloadSha256: string | undefined;
-  deliveryMessageId: string | undefined;
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
 
@@ -3271,28 +2739,17 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     return { status: "ok" };
   }
 
-  async postMessageWithDelivery(baseUrl: string, serviceKey: string, input: BotifiedDeliveryMessageInput): Promise<BotifiedDeliveryReceipt> {
-    this.deliveryCalls.push({baseUrl,serviceKey,input:structuredClone(input)});
+  async postMessage(baseUrl: string, serviceKey: string, input: BotifiedMessageInput): Promise<BotifiedMessageResult> {
     this.postMessageCalls.push({baseUrl,serviceKey,message:input.text});
-    if(this.legacyPayloadSha256){
-      return {
-        receiptKind:"canonical_legacy",
-        outcome:"completed",
-        deliveryKey:input.deliveryKey,
-        requestHash:input.requestHash,
-        messageId:this.deliveryMessageId??input.deliveryKey,
-        payloadSha256:this.legacyPayloadSha256
-      };
-    }
+    if(this.postMessageError)throw this.postMessageError;
     return {
-      receiptKind:"current",
-      outcome:"completed",
-      deliveryKey:input.deliveryKey,
-      requestHash:input.requestHash,
-      messageId:this.deliveryMessageId??input.deliveryKey,
-      acceptedKind:"queued",
+      type:"ordinary",
+      kind:"input_queued",
+      inputId:`input:${input.messageId}`,
+      messageId:input.messageId,
       timelineCursor:"post-cursor",
-      turnId:`turn:${input.deliveryKey}`
+      queueLength:1,
+      state:"running"
     };
   }
 
@@ -3336,19 +2793,13 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     };
   }
 
-  async abort(baseUrl:string,serviceKey:string,input:{commandKey:string;expectedTurnId:string}):Promise<BotifiedAbortResult>{
-    this.abortCalls.push({baseUrl,serviceKey,...input});
+  async abort(baseUrl:string,serviceKey:string):Promise<BotifiedAbortResult>{
+    this.abortCalls.push({baseUrl,serviceKey});
     await this.abortWait;
     if (this.abortError) {
       throw this.abortError;
     }
-    return{commandKey:input.commandKey,turnId:input.expectedTurnId,outcome:this.abortOutcomes.shift()??this.abortOutcome};
-  }
-
-  async stopBackgroundTask(_baseUrl:string,_serviceKey:string,input:{commandKey:string;expectedTaskId:string}){
-    this.stopCalls.push(structuredClone(input));
-    if(this.stopError)throw this.stopError;
-    return{commandKey:input.commandKey,taskId:input.expectedTaskId,outcome:this.stopOutcomes.shift()??"completed" as const};
+    return{ok:true,state:"aborting",queueLength:0};
   }
 
   async *streamLlmTextPreview(_baseUrl:string,_serviceKey:string,options:BotifiedLlmTextPreviewOptions={}) {

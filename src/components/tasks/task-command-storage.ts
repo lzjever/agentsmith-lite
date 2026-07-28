@@ -46,28 +46,16 @@ export type TaskSandboxReleaseCommandMetadata = TaskMessageCommandMetadata & {
   request:{expectedRunId:string};
 };
 
-export type TaskTurnAbortCommandMetadata=TaskMessageCommandMetadata&{
-  request:{expectedRunId:string;turnId:string};
-};
-
-export type TaskBackgroundWorkStopCommandMetadata=TaskMessageCommandMetadata&{
-  request:{expectedRunId:string;interactionId:string};
-};
-
 export type TaskCommandKind =
   | "task-create"
   | "task-message"
   | "task-terminal-start"
-  | "task-sandbox-release"
-  | "task-turn-abort"
-  | "task-work-stop";
+  | "task-sandbox-release";
 type TaskCommandMetadata =
   | TaskCreateCommandMetadata
   | TaskMessageCommandMetadata
   | TaskTerminalStartCommandMetadata
-  | TaskSandboxReleaseCommandMetadata
-  | TaskTurnAbortCommandMetadata
-  | TaskBackgroundWorkStopCommandMetadata;
+  | TaskSandboxReleaseCommandMetadata;
 type TaskCommandStorageIdentity =
   | TaskCreateStorageIdentity
   | TaskMessageStorageIdentity;
@@ -125,7 +113,7 @@ export function taskCommandMetadataKey(
   identity: TaskMessageStorageIdentity
 ): string;
 export function taskCommandMetadataKey(
-  kind: "task-terminal-start"|"task-sandbox-release"|"task-turn-abort"|"task-work-stop",
+  kind: "task-terminal-start"|"task-sandbox-release",
   identity: TaskMessageStorageIdentity
 ): string;
 export function taskCommandMetadataKey(
@@ -249,16 +237,6 @@ export function writeTaskCommandMetadata(
   metadata: TaskSandboxReleaseCommandMetadata
 ): "saved" | "too_large" | "unavailable";
 export function writeTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-turn-abort",
-  metadata:TaskTurnAbortCommandMetadata
-):"saved"|"too_large"|"unavailable";
-export function writeTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-work-stop",
-  metadata:TaskBackgroundWorkStopCommandMetadata
-):"saved"|"too_large"|"unavailable";
-export function writeTaskCommandMetadata(
   storage: Storage | undefined,
   kind: TaskCommandKind,
   metadata: TaskCommandMetadata
@@ -306,16 +284,6 @@ export function readTaskCommandMetadata(
   kind: "task-sandbox-release",
   identity: TaskMessageStorageIdentity
 ): TaskCommandMetadataRead<TaskSandboxReleaseCommandMetadata>;
-export function readTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-turn-abort",
-  identity:TaskMessageStorageIdentity
-):TaskCommandMetadataRead<TaskTurnAbortCommandMetadata>;
-export function readTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-work-stop",
-  identity:TaskMessageStorageIdentity
-):TaskCommandMetadataRead<TaskBackgroundWorkStopCommandMetadata>;
 export function readTaskCommandMetadata(
   storage: Storage | undefined,
   kind: TaskCommandKind,
@@ -372,16 +340,6 @@ export function restoreTaskCommandMetadata(
   identity: TaskMessageStorageIdentity
 ): TaskSandboxReleaseCommandMetadata | null;
 export function restoreTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-turn-abort",
-  identity:TaskMessageStorageIdentity
-):TaskTurnAbortCommandMetadata|null;
-export function restoreTaskCommandMetadata(
-  storage:Storage|undefined,
-  kind:"task-work-stop",
-  identity:TaskMessageStorageIdentity
-):TaskBackgroundWorkStopCommandMetadata|null;
-export function restoreTaskCommandMetadata(
   storage: Storage | undefined,
   kind: TaskCommandKind,
   identity: TaskCommandStorageIdentity
@@ -407,7 +365,7 @@ export function taskCommandRemountDecision<T extends TaskCommandMetadata>(
   return { status: "cleanup" };
 }
 
-export function taskRuntimeCommandRemountDecision<T extends TaskTerminalStartCommandMetadata|TaskSandboxReleaseCommandMetadata|TaskTurnAbortCommandMetadata|TaskBackgroundWorkStopCommandMetadata>(
+export function taskRuntimeCommandRemountDecision<T extends TaskTerminalStartCommandMetadata|TaskSandboxReleaseCommandMetadata>(
   metadata:TaskCommandMetadataRead<T>
 ):TaskCommandRemountDecision<T>{
   if(metadata.status==="found")return{status:"restore",metadata:metadata.metadata};
@@ -428,7 +386,7 @@ export function clearTaskCommandMetadata(
 ): void;
 export function clearTaskCommandMetadata(
   storage: Storage | undefined,
-  kind: "task-terminal-start"|"task-sandbox-release"|"task-turn-abort"|"task-work-stop",
+  kind: "task-terminal-start"|"task-sandbox-release",
   identity: TaskMessageStorageIdentity
 ): void;
 export function clearTaskCommandMetadata(
@@ -447,7 +405,7 @@ export function retireTaskCommandMetadata(
 ): boolean;
 export function retireTaskCommandMetadata(
   storage: Storage | undefined,
-  kind: "task-terminal-start"|"task-sandbox-release"|"task-turn-abort"|"task-work-stop",
+  kind: "task-terminal-start"|"task-sandbox-release",
   identity: TaskMessageStorageIdentity,
   attempt: { key: string; fingerprint: string }
 ): boolean;
@@ -594,16 +552,6 @@ export function persistTaskCommandMetadata(
   storage: Storage | undefined,
   kind: "task-sandbox-release",
   metadata: TaskSandboxReleaseCommandMetadata
-): void;
-export function persistTaskCommandMetadata(
-  storage: Storage | undefined,
-  kind: "task-turn-abort",
-  metadata: TaskTurnAbortCommandMetadata
-): void;
-export function persistTaskCommandMetadata(
-  storage: Storage | undefined,
-  kind: "task-work-stop",
-  metadata: TaskBackgroundWorkStopCommandMetadata
 ): void;
 export function persistTaskCommandMetadata(
   storage: Storage | undefined,
@@ -762,7 +710,7 @@ function clearTaskCommandStorage(
   for (const [draftKey, metadataKey] of pairs) {
     clearStoragePairByKeys(storage, draftKey, metadataKey);
   }
-  for(const kind of ["task-terminal-start","task-sandbox-release","task-turn-abort","task-work-stop"] as const){
+  for(const kind of ["task-terminal-start","task-sandbox-release"] as const){
     const prefix=`${TASK_COMMAND_PREFIX}:${kind}:`;
     for(const key of keys){
       if(key.startsWith(prefix)&&matchesEncodedIdentity(key.slice(prefix.length),encodedIdentity)){
@@ -856,18 +804,6 @@ function isTaskCommandMetadata(
       && Object.keys(value.request).join(",")==="expectedRunId"
       && typeof value.request.expectedRunId==="string"
       && Boolean(value.request.expectedRunId);
-  }
-  if(kind==="task-turn-abort"){
-    return keys==="createdAt,fingerprint,key,projectId,request,taskId,userId"
-      && Object.keys(value.request).sort().join(",")==="expectedRunId,turnId"
-      && typeof value.request.expectedRunId==="string"&&Boolean(value.request.expectedRunId)
-      && typeof value.request.turnId==="string"&&Boolean(value.request.turnId);
-  }
-  if(kind==="task-work-stop"){
-    return keys==="createdAt,fingerprint,key,projectId,request,taskId,userId"
-      && Object.keys(value.request).sort().join(",")==="expectedRunId,interactionId"
-      && typeof value.request.expectedRunId==="string"&&Boolean(value.request.expectedRunId)
-      && typeof value.request.interactionId==="string"&&Boolean(value.request.interactionId);
   }
   return keys==="acceptedRunId,createdAt,fingerprint,key,projectId,request,taskId,userId"
     && (value.acceptedRunId===null||typeof value.acceptedRunId==="string"&&Boolean(value.acceptedRunId))

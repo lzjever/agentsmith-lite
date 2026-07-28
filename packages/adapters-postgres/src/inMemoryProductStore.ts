@@ -62,14 +62,9 @@ import type {
   TaskArtifactStoreListQuery,
   TaskArtifactStoreListPage,
   TaskDeliveryClaimInput,
-  TaskDeliveryReclaimInput,
-  TaskMessageReceiptInput,
-  TaskDeliveryDeferInput,
+  TaskDeliverySuccessInput,
   TaskDeliveryFailureInput,
   BeginTaskIdempotencyInput,
-  BeginTaskControlCommandInput,
-  BeginTaskControlCommandResult,
-  InProgressTaskControlCommand,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
   CompleteTaskIdempotencyForResourceInput,
@@ -1333,7 +1328,7 @@ export class InMemoryProductStore implements ProductStore {
       const index=this.messages.findIndex((message)=>message.id===input.messageId&&message.taskId===input.taskId);
       const current=this.messages[index];
       if(!task||task.projectId!==input.idempotency.projectId||task.deletedAt||task.archivedAt||!current||current.deletedAt||(current.deliveryStatus??"pending")!=="pending"||(current.updatedAt??current.createdAt)!==input.expectedUpdatedAt)throw new AtomicTaskMessageConflict();
-      const updated=normalizeStoredMessage({...current,content:input.content,requestHash:input.requestHash,updatedAt:input.updatedAt});
+      const updated=normalizeStoredMessage({...current,content:input.content,updatedAt:input.updatedAt});
       this.messages[index]=clone(updated);
       this.appendInteractionChanges(input.taskId,[input.interactionChange]);
       if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))await this.appendProjectAuditEvent(input.auditEvent);
@@ -1480,73 +1475,6 @@ export class InMemoryProductStore implements ProductStore {
     return { kind: "claimed", resourceId: input.resourceId, claimToken: input.claimToken };
   }
 
-  async beginTaskControlCommand(input:BeginTaskControlCommandInput):Promise<BeginTaskControlCommandResult>{
-    return this.atomicTaskMessageMutation([],async()=>{
-      const key=taskIdempotencyKey(input.idempotency);
-      const existing=this.taskIdempotency.get(key);
-      if(existing){
-        if(existing.requestHash!==input.idempotency.requestHash)return{kind:"hash_mismatch"};
-        if(existing.status==="completed")return{
-          kind:"replay",
-          responseStatus:existing.responseStatus!,
-          responseBody:clone(existing.responseBody)
-        };
-        const command=inMemoryTaskControlCommand(existing);
-        if(!command)return{kind:"hash_mismatch"};
-        if(existing.leaseExpiresAt>input.idempotency.now)return{kind:"in_progress",command:taskControlEnvelope(command)};
-        const claimed={...existing,claimToken:input.idempotency.claimToken,leaseExpiresAt:input.idempotency.leaseExpiresAt,updatedAt:input.idempotency.now};
-        this.taskIdempotency.set(key,claimed);
-        return{kind:"claimed",command:{...command,claimToken:claimed.claimToken}};
-      }
-
-      const task=this.tasks.get(input.taskId);
-      const run=await this.sandboxRunRecords.get(input.expectedRunId);
-      if(
-        input.idempotency.resourceId!==input.taskId||
-        !task||task.deletedAt||task.archivedAt||
-        task.projectId!==input.idempotency.projectId||
-        task.currentRunId!==input.expectedRunId||
-        !run||run.state!=="active"||!taskRunScopeMatches(task,run)
-      )return{kind:"target_conflict"};
-
-      let downstreamTargetId=input.downstreamTargetId;
-      if(input.idempotency.operation==="abort-turn"){
-        if(input.interactionId!==null||!downstreamTargetId)return{kind:"target_conflict"};
-      }else{
-        if(!input.interactionId||downstreamTargetId!==null)return{kind:"target_conflict"};
-        const change=this.interactionChanges
-          .filter((candidate)=>candidate.interaction.taskId===input.taskId&&candidate.interaction.id===input.interactionId)
-          .sort((left,right)=>right.interaction.revision-left.interaction.revision||right.changeSeq-left.changeSeq)[0];
-        if(!change||change.interaction.kind!=="background_task")return{kind:"interaction_not_found"};
-        if(change.interaction.executionStatus!=="running"||!change.interaction.canStop||!change.correlation?.workTaskId)return{kind:"target_not_stoppable"};
-        downstreamTargetId=change.correlation.workTaskId;
-      }
-      const record:InMemoryTaskIdempotencyRecord={
-        ...input.idempotency,
-        status:"in_progress",
-        responseStatus:null,
-        responseBody:null,
-        updatedAt:input.idempotency.now,
-        expectedRunId:input.expectedRunId,
-        interactionId:input.interactionId,
-        downstreamCommandKey:input.downstreamCommandKey,
-        downstreamTargetId
-      };
-      this.taskIdempotency.set(key,record);
-      return{kind:"claimed",command:inMemoryTaskControlCommand(record)!};
-    });
-  }
-
-  async listInProgressTaskControlCommands(limit:number):Promise<InProgressTaskControlCommand[]>{
-    return[...this.taskIdempotency.values()]
-      .filter((record)=>record.status==="in_progress"&&(record.operation==="abort-turn"||record.operation==="work-stop"))
-      .sort((left,right)=>left.updatedAt.localeCompare(right.updatedAt))
-      .slice(0,Math.max(1,Math.floor(limit)))
-      .map(inMemoryTaskControlCommand)
-      .filter((command):command is InProgressTaskControlCommand=>command!==null)
-      .map(clone);
-  }
-
   async findTaskIdempotency(input:TaskIdempotencyLookupInput):Promise<TaskIdempotencyBeginResult|null>{
     const row=this.taskIdempotency.get(taskIdempotencyKey(input));
     if(!row)return null;
@@ -1606,30 +1534,9 @@ export class InMemoryProductStore implements ProductStore {
         !task||task.deletedAt||task.projectId!==input.idempotency.projectId||task.currentRunId!==input.runId||
         !project||record.resourceId!==input.runId
       )return"conflict" as const;
-      const controls=[...this.taskIdempotency.entries()]
-        .filter(([,candidate])=>
-          candidate.status==="in_progress"&&candidate.resourceId===input.taskId&&
-          (candidate.operation==="abort-turn"||candidate.operation==="work-stop")
-        )
-        .sort(([left],[right])=>compareC(left,right));
-      const terminalControls=controls.map(([controlKey,control])=>{
-        const command=inMemoryTaskControlCommand(control);
-        if(
-          !command||command.taskId!==input.taskId||
-          command.projectId!==input.idempotency.projectId
-        )throw new Error("Exact Task control envelope is inconsistent with released Run");
-        return command.expectedRunId===input.runId
-          ?[controlKey,control,supersededTaskControlReceipt(command)] as const
-          :null;
-      }).filter((control):control is NonNullable<typeof control>=>control!==null);
       return this.sandboxRunRecords.requestExplicitCleanup(input,(current,requested)=>{
         if(!taskRunScopeMatches(task,current))throw new Error("Sandbox release Task scope changed");
         this.terminalizeTerminalStartOwner(requested,input.idempotency.updatedAt);
-        for(const [controlKey,control,responseBody] of terminalControls){
-          this.taskIdempotency.set(controlKey,{
-            ...control,status:"completed",responseStatus:409,responseBody,updatedAt:input.idempotency.updatedAt
-          });
-        }
         if(current.state==="released"){
           this.taskIdempotency.set(key,{
             ...record,status:"completed",responseStatus:input.idempotency.responseStatus,
@@ -1798,41 +1705,24 @@ export class InMemoryProductStore implements ProductStore {
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { return clone(this.messages.find((value) => value.id === id) ?? null); }
   async listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]> {
     return this.messages.filter((message) => !message.deletedAt && hasPersistedMessageInteraction(this.interactionChanges,message) && (
-      (message.deliveryStatus ?? "pending") === "pending" && (!message.nextRetryAt || message.nextRetryAt <= now) ||
-      message.deliveryStatus === "dispatching" && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now) && (!message.nextRetryAt || message.nextRetryAt <= now)
+      (message.deliveryStatus ?? "pending") === "pending" ||
+      message.deliveryStatus === "dispatching" && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now)
     )).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).slice(0, limit).map(clone);
   }
   async claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null> {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     const source=current?this.tasks.get(current.taskId):undefined;
-    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
-    const updated: PersistedTaskMessage = { ...current, deliveryStatus: "dispatching", claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
+    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
+    const updated: PersistedTaskMessage = { ...current, deliveryStatus: "dispatching", claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, safeError: null, updatedAt: input.claimedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
   }
-  async reclaimTaskMessage(input: TaskDeliveryReclaimInput): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === input.id);
-    const current = this.messages[index];
-    const source = current ? this.tasks.get(current.taskId) : undefined;
-    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || current.deliveryStatus !== "dispatching" || current.claimToken !== input.expectedClaimToken || !current.leaseExpiresAt || current.leaseExpiresAt > input.claimedAt || (current.nextRetryAt && current.nextRetryAt > input.claimedAt)||hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
-    const updated: PersistedTaskMessage = { ...current, claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, attemptCount: (current.attemptCount ?? 0) + 1, safeError: null, updatedAt: input.claimedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
-  }
-  async recordTaskMessageReceipt(input: TaskMessageReceiptInput): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === input.id);
-    const current = this.messages[index];
-    if (!current || current.deletedAt || current.deliveryStatus!=="dispatching" || current.claimToken !== input.claimToken || current.deliveryKey !== input.receipt.deliveryKey || current.requestHash !== input.receipt.requestHash || !input.receipt.accepted) return null;
-    const updated: PersistedTaskMessage = { ...current, receipt: clone(input.receipt), timelineCursor: input.timelineCursor, deliveryStatus: "accepted", leaseExpiresAt: null, nextRetryAt: null, safeError: null, updatedAt: input.updatedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
-  }
-  async deferTaskMessage(input: TaskDeliveryDeferInput): Promise<PersistedTaskMessage | null> {
+  async acceptTaskMessage(input: TaskDeliverySuccessInput): Promise<PersistedTaskMessage | null> {
     const index = this.messages.findIndex((value) => value.id === input.id);
     const current = this.messages[index];
     if (!current || current.deletedAt || current.deliveryStatus!=="dispatching" || current.claimToken !== input.claimToken) return null;
-    const updated: PersistedTaskMessage = { ...current, deliveryStatus: input.releaseClaim ? "pending" : current.deliveryStatus ?? "dispatching", claimToken: input.releaseClaim ? null : current.claimToken ?? null, claimedAt: input.releaseClaim ? null : current.claimedAt ?? null, leaseExpiresAt: input.releaseClaim ? null : current.leaseExpiresAt ?? null, safeError: input.safeError, nextRetryAt: input.nextRetryAt, updatedAt: input.updatedAt };
+    const updated: PersistedTaskMessage = { ...current, deliveryStatus:"accepted", leaseExpiresAt:null, safeError:null, updatedAt:input.updatedAt };
     this.messages[index] = clone(updated);
     return clone(updated);
   }
@@ -2499,16 +2389,10 @@ function taskRunScopeMatches(task:PersistedAgentTask,run:PersistedSandboxRunStat
 function normalizeStoredMessage(message: PersistedTaskMessage): PersistedTaskMessage {
   return {
     ...clone(message),
-    deliveryKey: message.deliveryKey ?? null,
-    requestHash: message.requestHash ?? null,
     claimToken: message.claimToken ?? null,
-    receipt: message.receipt ?? null,
-    timelineCursor: message.timelineCursor ?? null,
     deliveryStatus: message.deliveryStatus ?? "pending",
     claimedAt: message.claimedAt ?? null,
     leaseExpiresAt: message.leaseExpiresAt ?? null,
-    attemptCount: message.attemptCount ?? 0,
-    nextRetryAt: message.nextRetryAt ?? null,
     safeError: message.safeError ?? null,
     updatedAt: message.updatedAt ?? message.createdAt,
     deletedAt: message.deletedAt ?? null
@@ -2598,57 +2482,6 @@ interface InMemoryTaskIdempotencyRecord {
   now: string;
   updatedAt: string;
   fileDeletion?: FileDeletionOperationState;
-  expectedRunId?:string|null;
-  interactionId?:string|null;
-  downstreamCommandKey?:string|null;
-  downstreamTargetId?:string|null;
-}
-
-function inMemoryTaskControlCommand(record:InMemoryTaskIdempotencyRecord):InProgressTaskControlCommand|null{
-  if(
-    (record.operation!=="abort-turn"&&record.operation!=="work-stop")||
-    !record.expectedRunId||!record.downstreamCommandKey||!record.downstreamTargetId||
-    (record.operation==="abort-turn"&&record.interactionId!==null)||
-    (record.operation==="work-stop"&&!record.interactionId)
-  )return null;
-  return{
-    actorId:record.actorId,
-    projectId:record.projectId,
-    operation:record.operation,
-    key:record.key,
-    requestHash:record.requestHash,
-    resourceId:record.resourceId,
-    claimToken:record.claimToken,
-    taskId:record.resourceId,
-    expectedRunId:record.expectedRunId,
-    interactionId:record.interactionId??null,
-    downstreamCommandKey:record.downstreamCommandKey,
-    downstreamTargetId:record.downstreamTargetId
-  };
-}
-
-function taskControlEnvelope(command:InProgressTaskControlCommand){
-  return{
-    taskId:command.taskId,
-    expectedRunId:command.expectedRunId,
-    interactionId:command.interactionId,
-    downstreamCommandKey:command.downstreamCommandKey,
-    downstreamTargetId:command.downstreamTargetId
-  };
-}
-
-function supersededTaskControlReceipt(command:InProgressTaskControlCommand){
-  return{
-    outcome:"completed",
-    keyDisposition:"retire",
-    taskId:command.taskId,
-    runId:command.expectedRunId,
-    ...(command.operation==="abort-turn"
-      ?{turnId:command.downstreamTargetId}
-      :{interactionId:command.interactionId!}),
-    result:"conflict",
-    code:"task_control_superseded_by_release"
-  };
 }
 
 interface InMemoryFileLibraryDeletion {
@@ -2689,8 +2522,7 @@ function taskIdempotencyRecordOwnsFileDeletion(
 function canonicalTaskMessage(message:PersistedTaskMessage,resourceId:string):PersistedTaskMessage {
   return {
     ...message,
-    id:resourceId,
-    deliveryKey:`delivery_message_${resourceId}`
+    id:resourceId
   };
 }
 

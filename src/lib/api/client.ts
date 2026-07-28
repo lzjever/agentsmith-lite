@@ -4,11 +4,11 @@ import {
   PROJECT_AUDIT_ACTIONS,
   PROJECT_AUDIT_RESOURCE_KINDS,
 } from "../../../packages/contracts/src/api.ts";
-import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskBackgroundWorkStopReceipt, TaskBackgroundWorkStopRequest, TaskCapabilities, TaskCreateCommandOutcome, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageCommandOutcome, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskSandboxReleaseRequest, TaskTerminalStartReceipt, TaskTerminalStartRequest, TaskTurnAbortReceipt, TaskTurnAbortRequest, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
+import type { AgentTask, AgentTaskArtifact, CreateTaskInput, CredentialDirectoryQuery, CredentialPage as ApiCredentialPage, EndpointDirectoryQuery, EndpointPage as ApiEndpointPage, EndpointView, FileLibraryProjection, ProfileGreetingPreference, ProfileResponse, Project as ApiProject, ProjectAlert as ApiProjectAlert, ProjectAlertPage as ApiProjectAlertPage, ProjectAlertQuery as ApiProjectAlertQuery, ProjectAlertRuleView as ApiProjectAlertRule, ProjectAlertType as ApiProjectAlertType, ProjectAlertView as ApiProjectAlertView, ProjectAuditAction, ProjectAuditEventView, ProjectAuditIdentity as ApiProjectAuditIdentity, ProjectAuditIdentityPage as ApiProjectAuditIdentityPage, ProjectAuditIdentityQuery as ApiProjectAuditIdentityQuery, ProjectAuditPage as ApiProjectAuditPage, ProjectAuditQuery as ApiProjectAuditQuery, ProjectAuditResourceKind, ProjectContextContentType, ProjectContextEntry, ProjectContextEntryMetadata, ProjectContextPage, ProjectContextScope, ProjectDetail as ApiProjectDetail, ProjectDirectoryItem as ApiProjectDirectoryItem, ProjectDirectoryPage as ApiProjectDirectoryPage, ProjectEndpointUsagePage as ApiProjectEndpointUsagePage, ProjectEndpointUsageQuery, ProjectFileListEntry, ProjectFileListResponse, ProjectFileStorageRefreshResponse, ProjectResourcePolicyView as ApiProjectResourcePolicy, ProjectSandboxRunHistoryPage as ApiProjectSandboxRunHistoryPage, ProjectUsageOverview as ApiProjectUsageOverview, PublicModelEndpoint, RenameFileLibraryInput, TaskArtifactKind, TaskArtifactListPage, TaskArtifactListQuery, TaskCapabilities, TaskCreateCommandOutcome, TaskDetailProjection, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskListPage as ApiTaskListPage, TaskListQuery as ApiTaskListQuery, TaskMessageCommandOutcome, TaskMessageReceipt, TaskPresentation, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskSandboxReleaseRequest, TaskTerminalStartReceipt, TaskTerminalStartRequest, TaskTurnAbortRequest, TaskTurnAbortResponse, Workspace as ApiWorkspace, WorkspaceDetail as ApiWorkspaceDetail, WorkspaceDirectoryItem as ApiWorkspaceDirectoryItem, WorkspaceDirectoryPage as ApiWorkspaceDirectoryPage } from "../../../packages/contracts/src/api.js";
 import type { ProjectMembershipCandidate, ProjectMembershipCandidatePage, ProjectMembershipPage, ProjectMembershipView, WorkspaceMembershipPage, WorkspaceMembershipView } from "../../../packages/contracts/src/api.js";
 
 export type { ProjectAuditAction } from "../../../packages/contracts/src/api.js";
-export type { TaskBackgroundWorkStopReceipt, TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, TaskTurnAbortReceipt } from "../../../packages/contracts/src/api.js";
+export type { TaskCapabilities, TaskInteractionItem, TaskInteractionSnapshot, TaskInteractionStreamEvent, TaskMessageReceipt, TaskQueuedMessage, TaskSandboxReleaseReceipt, TaskTerminalStartReceipt, TaskTurnAbortResponse } from "../../../packages/contracts/src/api.js";
 export type { ProfileGreetingPreference };
 export type FileLibrary = FileLibraryProjection;
 export type FileLibraryTaskLink = NonNullable<FileLibrary["boundTask"]>;
@@ -196,8 +196,7 @@ export type TaskTerminalStartClientOutcome =
 export type TaskSandboxReleaseClientOutcome =
   | TaskSandboxReleaseReceipt
   | TaskCommandUnknownOutcome;
-export type TaskTurnAbortClientOutcome=TaskTurnAbortReceipt|TaskCommandUnknownOutcome;
-export type TaskBackgroundWorkStopClientOutcome=TaskBackgroundWorkStopReceipt|TaskCommandUnknownOutcome;
+export type TaskTurnAbortClientOutcome=TaskTurnAbortResponse;
 export type TaskCommandFailureOutcome =
   | Extract<TaskCreateCommandOutcome, { outcome: "rejected_before_acceptance" }>
   | Extract<TaskTerminalStartReceipt, { outcome:"completed";error:unknown }>
@@ -500,36 +499,6 @@ function parseTaskSandboxReleaseOutcome(value:unknown):TaskSandboxReleaseReceipt
     ?value as unknown as TaskSandboxReleaseReceipt:null;
 }
 
-function parseTaskTurnAbortOutcome(value:unknown):TaskTurnAbortReceipt|null{
-  if(isRejectedTaskCommandOutcome(value))return value as unknown as TaskTurnAbortReceipt;
-  if(!isRecord(value)||typeof value.taskId!=="string"||!value.taskId||
-    typeof value.runId!=="string"||!value.runId||typeof value.turnId!=="string"||!value.turnId)return null;
-  if(value.outcome==="accepted_in_progress"&&value.keyDisposition==="retain"&&
-    Object.keys(value).sort().join(",")==="keyDisposition,outcome,runId,taskId,turnId")return value as unknown as TaskTurnAbortReceipt;
-  return validTaskControlCompletion(value,["runId","taskId","turnId"])
-    ?value as unknown as TaskTurnAbortReceipt
-    :null;
-}
-
-function parseTaskBackgroundWorkStopOutcome(value:unknown):TaskBackgroundWorkStopReceipt|null{
-  if(isRejectedTaskCommandOutcome(value))return value as unknown as TaskBackgroundWorkStopReceipt;
-  if(!isRecord(value)||typeof value.taskId!=="string"||!value.taskId||
-    typeof value.runId!=="string"||!value.runId||typeof value.interactionId!=="string"||!value.interactionId)return null;
-  if(value.outcome==="accepted_in_progress"&&value.keyDisposition==="retain"&&
-    Object.keys(value).sort().join(",")==="interactionId,keyDisposition,outcome,runId,taskId")return value as unknown as TaskBackgroundWorkStopReceipt;
-  return validTaskControlCompletion(value,["interactionId","runId","taskId"])
-    ?value as unknown as TaskBackgroundWorkStopReceipt
-    :null;
-}
-
-function validTaskControlCompletion(value:Record<string,unknown>,identityKeys:string[]):boolean{
-  if(value.outcome!=="completed"||value.keyDisposition!=="retire"||
-    !["completed","already_terminal","conflict"].includes(String(value.result)))return false;
-  const expected=[...identityKeys,"keyDisposition","outcome","result",...(value.code===undefined?[]:["code"])].sort().join(",");
-  return Object.keys(value).sort().join(",")===expected&&
-    (value.code===undefined||typeof value.code==="string");
-}
-
 function isRejectedTaskCommandOutcome(
   value: unknown
 ): value is Record<string, unknown> {
@@ -793,15 +762,9 @@ export const apiClient = {
   ),
   updateTaskMessage: (taskId: string, messageId: string, content: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "PATCH", idempotencyKey, { content }),
   deleteTaskMessage: (taskId: string, messageId: string, idempotencyKey: string) => jsonIdempotent<TaskMessageReceipt>(`/tasks/${encodeURIComponent(taskId)}/messages/${encodeURIComponent(messageId)}`, "DELETE", idempotencyKey),
-  abortTaskTurn:(taskId:string,input:TaskTurnAbortRequest,idempotencyKey:string):Promise<TaskTurnAbortClientOutcome>=>taskCommand(
+  abortTaskTurn:(taskId:string,input:TaskTurnAbortRequest):Promise<TaskTurnAbortClientOutcome>=>request(
     `/tasks/${encodeURIComponent(taskId)}/turn/abort`,
-    idempotencyKey,
-    input,
-    parseTaskTurnAbortOutcome,
-    undefined,
-    (outcome)=>outcome.outcome==="rejected_before_acceptance"||(
-      outcome.taskId===taskId&&outcome.runId===input.expectedRunId&&outcome.turnId===input.turnId
-    )
+    {method:"POST",body:JSON.stringify(input)}
   ),
   releaseTaskSandbox:(
     taskId:string,
@@ -815,16 +778,6 @@ export const apiClient = {
     undefined,
     (outcome)=>outcome.outcome==="rejected_before_acceptance"||(
       outcome.taskId===taskId&&outcome.runId===input.expectedRunId
-    )
-  ),
-  stopTaskWork:(taskId:string,input:TaskBackgroundWorkStopRequest,idempotencyKey:string):Promise<TaskBackgroundWorkStopClientOutcome>=>taskCommand(
-    `/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(input.interactionId)}/stop`,
-    idempotencyKey,
-    input,
-    parseTaskBackgroundWorkStopOutcome,
-    undefined,
-    (outcome)=>outcome.outcome==="rejected_before_acceptance"||(
-      outcome.taskId===taskId&&outcome.runId===input.expectedRunId&&outcome.interactionId===input.interactionId
     )
   ),
   editTask: (taskId: string, title: string, idempotencyKey: string) => jsonIdempotent<TaskPresentation>(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", idempotencyKey, { title }),
@@ -1101,7 +1054,7 @@ function isStrictSandboxCapacityDetails(value: unknown): value is {
 function isTaskCapabilities(value: unknown): value is TaskCapabilities {
   return isRecord(value)
     && typeof value.sendMessage === "boolean" && typeof value.editQueuedMessage === "boolean"
-    && typeof value.abortTurn === "boolean" && typeof value.stopWork === "boolean"
+    && typeof value.abortTurn === "boolean"
     && typeof value.openTerminal === "boolean" && typeof value.releaseSandbox === "boolean" && typeof value.editTask === "boolean"
     && typeof value.archiveTask === "boolean" && typeof value.deleteTask === "boolean";
 }
@@ -1116,10 +1069,10 @@ function isTaskQueuedMessageArray(value: unknown): value is TaskQueuedMessage[] 
 function isTaskInteractionItem(value: unknown): value is TaskInteractionItem {
   if (!isTaskInteractionBase(value)) return false;
   switch (value.kind) {
-    case "user_message": return isStringUnion(value.status, ["pending", "dispatching", "retrying", "accepted", "queued", "rejected", "failed"]);
+    case "user_message": return isStringUnion(value.status, ["pending", "dispatching", "accepted", "queued", "rejected", "failed"]);
     case "assistant_message": return isStringUnion(value.status, ["generating", "completed", "failed", "aborted"]);
-    case "tool": return isStringUnion(value.executionStatus, ["pending", "running", "completed", "failed", "cancelled"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.toolName === "string" && isNullableString(value.command) && isNullableString(value.outputTail) && isNullableNumber(value.exitCode) && typeof value.detailsOmitted === "boolean" && typeof value.canStop === "boolean";
-    case "background_task": return isStringUnion(value.executionStatus, ["queued", "running", "completed", "failed", "cancelled", "timed_out", "lost"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.label === "string" && isNullableString(value.workSummary) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean" && typeof value.canStop === "boolean";
+    case "tool": return isStringUnion(value.executionStatus, ["pending", "running", "completed", "failed", "cancelled"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.toolName === "string" && isNullableString(value.command) && isNullableString(value.outputTail) && isNullableNumber(value.exitCode) && typeof value.detailsOmitted === "boolean";
+    case "background_task": return isStringUnion(value.executionStatus, ["queued", "running", "completed", "failed", "cancelled", "timed_out", "lost"]) && isNullableDeliveryStatus(value.deliveryStatus) && typeof value.label === "string" && isNullableString(value.workSummary) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";
     case "task_question": return isStringUnion(value.status, ["waiting", "answered", "expired", "rejected", "reply_failed"]) && typeof value.question === "string" && isNullableString(value.expect) && isNullableString(value.answer);
     case "task_notice": return isStringUnion(value.status, ["accepted", "rejected"]) && isNullableString(value.sender);
     case "task_result": return isStringUnion(value.executionStatus, ["completed", "failed", "cancelled", "timed_out", "lost"]) && isDeliveryStatus(value.deliveryStatus) && isNullableString(value.result) && isNullableString(value.error) && typeof value.detailsOmitted === "boolean";

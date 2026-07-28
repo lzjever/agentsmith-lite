@@ -27,7 +27,6 @@ const capabilities: TaskCapabilities = {
   sendMessage: true,
   editQueuedMessage: true,
   abortTurn: true,
-  stopWork: true,
   openTerminal: true,
   releaseSandbox: true,
   editTask: true,

@@ -1,33 +1,33 @@
 "use client";
 
-import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Square, Wrench } from "lucide-react";
-import { Banner, Button, Collapsible, IconButton, Markdown, Spinner, Text } from "@astryxdesign/core";
+import { Check, CheckCircle2, CircleAlert, Clock3, Copy, FileOutput, Loader2, Wrench } from "lucide-react";
+import { Banner, Collapsible, IconButton, Markdown, Spinner, Text } from "@astryxdesign/core";
 import { memo, useState, type ReactNode } from "react";
 import type { TaskInteractionItem } from "../../lib/api/client";
 import { TaskArtifactActions } from "./TaskArtifactActions";
 import type { TaskAssistantPreview } from "./task-conversation-state";
 import { formatArtifactBytes, formatTaskDate } from "./task-ui";
 
-export function TaskInteractionList({ taskId, items, preview, allowStopWork, onStopWork }: { taskId: string; items: TaskInteractionItem[]; preview: TaskAssistantPreview; allowStopWork:boolean; onStopWork: (interactionId: string) => Promise<void> }) {
+export function TaskInteractionList({ taskId, items, preview }: { taskId: string; items: TaskInteractionItem[]; preview: TaskAssistantPreview }) {
   if (items.length === 0 && !preview) return <div className="grid min-h-52 place-items-center border border-dashed border-border px-5 text-center"><Spinner label="Waiting for task messages." /></div>;
-  return <ol className="space-y-3" aria-label="Task interactions"><SettledTaskInteractionItems taskId={taskId} items={items} allowStopWork={allowStopWork} onStopWork={onStopWork} />{preview ? <li><article className="border-l-2 border-accent bg-muted px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><Text display="block" type="supporting" color="secondary" className="mt-2">Preview only</Text><Text as="div" display="block" type="supporting" className="mt-2 whitespace-pre-wrap break-words">{preview.body}</Text></article></li> : null}</ol>;
+  return <ol className="space-y-3" aria-label="Task interactions"><SettledTaskInteractionItems taskId={taskId} items={items} />{preview ? <li><article className="border-l-2 border-accent bg-muted px-4 py-3"><ItemHeader title="Assistant" timestamp={null} status="Generating" /><Text display="block" type="supporting" color="secondary" className="mt-2">Preview only</Text><Text as="div" display="block" type="supporting" className="mt-2 whitespace-pre-wrap break-words">{preview.body}</Text></article></li> : null}</ol>;
 }
 
-const SettledTaskInteractionItems = memo(function SettledTaskInteractionItems({ taskId, items, allowStopWork, onStopWork }: { taskId: string; items: TaskInteractionItem[]; allowStopWork:boolean; onStopWork: (interactionId: string) => Promise<void> }) {
-  return <>{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} allowStopWork={allowStopWork} onStopWork={onStopWork} />)}</>;
+const SettledTaskInteractionItems = memo(function SettledTaskInteractionItems({ taskId, items }: { taskId: string; items: TaskInteractionItem[] }) {
+  return <>{items.map((item) => <TaskInteractionItemView key={item.id} taskId={taskId} item={item} />)}</>;
 });
 
-const TaskInteractionItemView = memo(function TaskInteractionItemView({ taskId, item, allowStopWork, onStopWork }: { taskId: string; item: TaskInteractionItem; allowStopWork:boolean; onStopWork: (interactionId: string) => Promise<void> }) {
+const TaskInteractionItemView = memo(function TaskInteractionItemView({ taskId, item }: { taskId: string; item: TaskInteractionItem }) {
   let content: ReactNode;
   switch (item.kind) {
     case "user_message": content = <UserMessage item={item} />; break;
     case "assistant_message": content = <AssistantMessage item={item} />; break;
-    case "tool": content = <WorkItem item={item} icon={<Wrench size={16} />} allowStopWork={allowStopWork} onStopWork={onStopWork} />; break;
-    case "background_task": content = <WorkItem item={item} icon={<Loader2 size={16} />} allowStopWork={allowStopWork} onStopWork={onStopWork} />; break;
+    case "tool": content = <WorkItem item={item} icon={<Wrench size={16} />} />; break;
+    case "background_task": content = <WorkItem item={item} icon={<Loader2 size={16} />} />; break;
     case "task_question": content = <NoticeItem item={item} label="Question" />; break;
     case "task_notice": content = <NoticeItem item={item} label="Notice" />; break;
-    case "task_result": content = <WorkItem item={item} icon={<CheckCircle2 size={16} />} allowStopWork={allowStopWork} onStopWork={onStopWork} />; break;
-    case "subagent_result": content = <WorkItem item={item} icon={<CheckCircle2 size={16} />} allowStopWork={allowStopWork} onStopWork={onStopWork} />; break;
+    case "task_result": content = <WorkItem item={item} icon={<CheckCircle2 size={16} />} />; break;
+    case "subagent_result": content = <WorkItem item={item} icon={<CheckCircle2 size={16} />} />; break;
     case "file": content = <FileItem taskId={taskId} item={item} />; break;
     case "system_error": content = <SystemError item={item} />; break;
     default: return assertNever(item);
@@ -57,24 +57,11 @@ function AssistantMessage({ item }: { item: Extract<TaskInteractionItem, { kind:
   return <article className="border-l-2 border-accent bg-muted px-4 py-3"><ItemHeader title="Assistant" timestamp={item.occurredAt} status={item.status} action={action} />{copyError ? <Banner className="mt-2" status="error" title="Message could not be copied" description={copyError} isDismissable onDismiss={() => setCopyError("")} /> : null}<ContentNotice contentMode={item.contentMode} />{item.body ? <div className="mt-2"><Markdown density="compact">{item.body}</Markdown></div> : null}</article>;
 }
 
-function WorkItem({ item, icon, allowStopWork, onStopWork }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode; allowStopWork:boolean; onStopWork: (interactionId: string) => Promise<void> }) {
-  const [stopping, setStopping] = useState(false);
-  const [stopRequestedRevision, setStopRequestedRevision] = useState<number>();
-  const [stopError, setStopError] = useState("");
+function WorkItem({ item, icon }: { item: Extract<TaskInteractionItem, { kind: "tool" | "background_task" | "task_result" | "subagent_result" }>; icon: ReactNode }) {
   const status = item.executionStatus;
-  const canStop = allowStopWork && (item.kind === "tool" || item.kind === "background_task") && item.canStop;
-  const stopRequested = stopRequestedRevision === item.revision;
   const summary = workSummary(item);
   const details = workDetails(item);
-  async function stop() {
-    if (!canStop || stopping || stopRequested) return;
-    setStopping(true);
-    setStopError("");
-    try { await onStopWork(item.id); setStopRequestedRevision(item.revision); }
-    catch (reason) { setStopError(reason instanceof Error ? reason.message : "Work could not be stopped."); }
-    finally { setStopping(false); }
-  }
-  return <article className="border-l-2 border-warning px-4 py-3"><div className="flex min-w-0 flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2 text-primary">{icon}<div className="min-w-0"><Text display="block" type="supporting" weight="medium" className="truncate">{workTitle(item)}</Text><Text display="block" type="supporting" color="secondary" className="mt-0.5">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</Text></div></div>{canStop ? <Button variant="ghost" size="sm" isDisabled={stopping || stopRequested} icon={<Square size={14} />} label={stopping ? "Stopping work..." : stopRequested ? "Stop requested" : "Stop work"} onClick={() => void stop()} /> : null}</div>{canStop && stopError ? <Banner className="mt-2" status="error" title="Work could not be stopped" description={stopError} /> : null}<ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <Text display="block" type={item.kind === "tool" ? "code" : "supporting"} color="secondary" className="mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all">{summary}</Text> : null}{details ? <div className="mt-3"><Collapsible trigger="Execution details" defaultIsOpen={false}><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-card p-3 text-secondary"><Text type="code" color="secondary">{details}</Text></pre></Collapsible></div> : null}</article>;
+  return <article className="border-l-2 border-warning px-4 py-3"><div className="flex min-w-0 items-center gap-2 text-primary">{icon}<div className="min-w-0"><Text display="block" type="supporting" weight="medium" className="truncate">{workTitle(item)}</Text><Text display="block" type="supporting" color="secondary" className="mt-0.5">{statusLabel(status)}{item.deliveryStatus ? ` · delivery ${statusLabel(item.deliveryStatus)}` : ""}</Text></div></div><ContentNotice contentMode={item.contentMode} detailsOmitted={item.detailsOmitted} />{summary ? <Text display="block" type={item.kind === "tool" ? "code" : "supporting"} color="secondary" className="mt-2 max-h-10 overflow-hidden whitespace-pre-wrap break-all">{summary}</Text> : null}{details ? <div className="mt-3"><Collapsible trigger="Execution details" defaultIsOpen={false}><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words border border-border bg-card p-3 text-secondary"><Text type="code" color="secondary">{details}</Text></pre></Collapsible></div> : null}</article>;
 }
 
 function NoticeItem({ item, label }: { item: Extract<TaskInteractionItem, { kind: "task_question" | "task_notice" }>; label: string }) {
