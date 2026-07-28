@@ -328,6 +328,10 @@ export interface PersistedSandboxRunState {
   startedByUserId: string;
   startedAt: string | null;
   startupReadyAt: string | null;
+  startupConfigMapName?:string|null;
+  startupConfigHash?:string|null;
+  startupPodUid?:string|null;
+  startupPodIp?:string|null;
   startupActionDeadlineAt: string | null;
   botifiedPort: number;
   resourceNames: PersistedSandboxRunResourceNames;
@@ -357,7 +361,6 @@ export interface PersistedSandboxRunState {
   failureCode: SandboxFailureCode | null;
   failureCause: string | null;
   fencingToken: number;
-  resumeUnfinished?: boolean;
   startupClaimToken?: string | null;
   startupLeaseExpiresAt?: string | null;
   cleanupClaimedAt?: string | null;
@@ -429,6 +432,15 @@ export interface CompleteSandboxStartupActionInput {
   leaseExpiresAt:string;
 }
 
+export interface RecoverSandboxStartupActionInput {
+  taskId:string;
+  runId:string;
+  expectedFencingToken:number;
+  claimToken:string;
+  actionDeadlineAt:string;
+  recoveredAt:string;
+}
+
 export interface BeginSandboxStartupActionInput {
   taskId:string;
   runId:string;
@@ -455,6 +467,28 @@ export interface MarkTaskSandboxStartupReadyInput {
   runId: string;
   expectedFencingToken: number;
   readyAt: string;
+}
+
+export interface RecordTaskSandboxStartupPodInput {
+  taskId:string;
+  runId:string;
+  expectedFencingToken:number;
+  startupClaimToken?:string;
+  expectedConfigMapName:string;
+  expectedConfigHash:string;
+  podUid:string;
+  podIp:string|null;
+  observedAt:string;
+}
+
+export interface InitializeTaskSandboxStartupConfigInput {
+  taskId:string;
+  runId:string;
+  expectedFencingToken:number;
+  startupClaimToken?:string;
+  configMapName:string;
+  configHash:string;
+  initializedAt:string;
 }
 
 export interface FailTaskSandboxStartupAtomicallyInput {
@@ -554,6 +588,10 @@ export interface ActivateTaskSandboxRunInput {
   expectedFencingToken: number;
   startupClaimToken: string;
   actionDeadlineAt: string;
+  expectedConfigMapName:string|null;
+  expectedConfigHash:string|null;
+  expectedPodUid:string|null;
+  expectedPodIp:string|null;
   activatedAt: string;
   auditEvent: ProjectAuditEvent;
 }
@@ -568,6 +606,11 @@ export interface CompleteSandboxRunReleaseInput {
   run: PersistedSandboxRunState;
   settlement: SandboxUsageSettlement;
   auditEvent: ProjectAuditEvent;
+  releaseReceipt?:{
+    responseStatus:number;
+    responseBody:unknown;
+    updatedAt:string;
+  };
 }
 
 export type CompleteSandboxRunReleaseResult = "applied" | "already_applied" | "conflict";
@@ -578,7 +621,9 @@ export interface TaskSandboxReleaseMutationInput {
   runId: string;
   taskId: string;
   expectedFencingToken: number;
-  run: PersistedSandboxRunState;
+  intent:{
+    requestedAt:string;
+  };
   idempotency: CompleteTaskIdempotencyInput;
 }
 
@@ -766,9 +811,12 @@ export interface ProductStore {
   failSandboxRun(input: SandboxRunFailureInput): Promise<PersistedSandboxRunState | null>;
   failTaskSandboxStartupAtomically(input: FailTaskSandboxStartupAtomicallyInput): Promise<FailTaskSandboxStartupAtomicallyResult>;
   markTaskSandboxStartupReady(input: MarkTaskSandboxStartupReadyInput): Promise<PersistedSandboxRunState | null>;
+  initializeTaskSandboxStartupConfig(input:InitializeTaskSandboxStartupConfigInput):Promise<PersistedSandboxRunState|null>;
+  recordTaskSandboxStartupPod(input:RecordTaskSandboxStartupPodInput):Promise<PersistedSandboxRunState|null>;
   claimSandboxStartup(input: SandboxStartupOperationInput): Promise<SandboxStartupClaimResult>;
   beginSandboxStartupAction(input:BeginSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>;
   completeSandboxStartupAction(input:CompleteSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>;
+  recoverSandboxStartupAction(input:RecoverSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>;
   drainSandboxStartupAction(input:DrainSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>;
   querySandboxUsageSettlements(query: ProjectSandboxSettlementQuery): Promise<ProjectSandboxSettlementPage>;
   listSandboxUsageSettlements(projectId: string, startedByUserId: string): Promise<SandboxUsageSettlement[]>;

@@ -38,6 +38,13 @@ export interface SandboxRenderInput {
   resourceNames?: SandboxResourceNameOverrides;
 }
 
+export function sandboxRuntimeConfigMapName(baseName:string,configHash:string):string{
+  const suffix=configHash.replace(/^sha256:/,"").toLowerCase().slice(0,16);
+  if(!/^[a-f0-9]{8,16}$/.test(suffix))throw new Error("Sandbox runtime config hash is invalid");
+  const base=kubernetesDnsLabelName(baseName);
+  return kubernetesDnsLabelName(`${base.slice(0,Math.max(1,63-suffix.length-1))}-${suffix}`);
+}
+
 export function renderSandboxResources(input: SandboxRenderInput): SandboxRenderResult {
   const labels = sandboxResourceLabels(input);
   const generatedNames = sandboxResourceNamesForTask(input.taskId);
@@ -106,6 +113,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
         namespace: input.namespace,
         labels
       },
+      immutable: true,
       data: {
         "botified-config.yaml": "<generated-by-api>"
       }

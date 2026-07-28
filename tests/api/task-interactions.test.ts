@@ -678,7 +678,7 @@ describe("task interactions API", () => {
 
     assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
       expectedRunId:current.currentRunId
-    })).status,200);
+    })).status,202);
     const recovered=createApplicationServices({
       store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
       botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
@@ -723,7 +723,7 @@ describe("task interactions API", () => {
     assert.equal(botified.abortCalls.length,1);
     assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
       expectedRunId:current.currentRunId
-    })).status,200);
+    })).status,202);
     unblock();
     const response=await abortResponse;
     assert.equal(response.status,409);
@@ -758,7 +758,7 @@ describe("task interactions API", () => {
     assert.equal(botified.abortCalls.length,1);
     assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
       expectedRunId:current.currentRunId
-    })).status,200);
+    })).status,202);
     unblock();
 
     const expected={
@@ -799,7 +799,7 @@ describe("task interactions API", () => {
     assert.equal(botified.abortCalls.length,1);
     assert.equal((await auth.request("POST",`/api/v1/tasks/${task.id}/sandbox/release`,{
       expectedRunId:current.currentRunId
-    })).status,200);
+    })).status,202);
     unblock();
 
     const expected={
@@ -1351,7 +1351,8 @@ describe("task interactions API", () => {
               port: {
                 applyResource: async () => "applied" as const,
                 deleteResource: async () => "deleted" as const,
-                getPodReadiness: async () => "ready" as const,
+                getPodReadiness: async () => "not_found" as const,
+                getConfigMapData:async()=> "not_found" as const,
                 listManagedResources: async () => []
               }
             }
@@ -1374,7 +1375,8 @@ describe("task interactions API", () => {
       port: {
         applyResource: async () => "applied" as const,
         deleteResource: async () => "deleted" as const,
-        getPodReadiness: async () => "ready" as const,
+        getPodReadiness: async () => "not_found" as const,
+        getConfigMapData:async()=> "not_found" as const,
         listManagedResources: async () => []
       }
     };
@@ -1419,7 +1421,8 @@ describe("task interactions API", () => {
       port: {
         applyResource: async () => "applied" as const,
         deleteResource: async () => "deleted" as const,
-        getPodReadiness: async () => "ready" as const,
+        getPodReadiness: async () => "not_found" as const,
+        getConfigMapData:async()=> "not_found" as const,
         listManagedResources: async () => []
       }
     };
@@ -1452,7 +1455,7 @@ describe("task interactions API", () => {
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
     const store=createLocalInMemoryProductStore();
     try{
-      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return structuredClone(resources);}}}});
+      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return structuredClone(resources);}}}});
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"release through API",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}})).task;
       assert.equal((await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`)).capabilities.releaseSandbox,true);
@@ -1463,7 +1466,40 @@ describe("task interactions API", () => {
       const headers={...baseHeaders,"idempotency-key":"release-api-key"};
       const first=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});const firstBody=await first.json();
       const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});const replayBody=await replay.json();
-      assert.equal(first.status,200);assert.equal(replay.status,200);assert.deepEqual(replayBody,firstBody);assert.equal((firstBody as {presentation:{sandboxState:{state:string}}}).presentation.sandboxState.state,"release_requested");
+      assert.equal(first.status,202);assert.equal(replay.status,202);assert.deepEqual(replayBody,firstBody);
+      assert.deepEqual(firstBody,{outcome:"accepted_in_progress",keyDisposition:"retain",taskId:task.id,runId:JSON.parse(body).expectedRunId});
+      const requested=await store.sandboxRuns.get(JSON.parse(body).expectedRunId);assert.ok(requested);
+      const releasedAt=new Date(Date.parse(requested.updatedAt)+1).toISOString();
+      const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+      const finalReceipt={outcome:"completed",keyDisposition:"retire",taskId:requested.taskId,runId:requested.runId};
+      assert.equal(await store.completeSandboxRunRelease({
+        runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
+        settlement:{
+          runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
+          taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
+          startedAt:requested.startedAt,releasedAt,
+          durationSeconds:requested.startedAt===null?0:(Date.parse(releasedAt)-Date.parse(requested.startedAt))/1000,
+          resources:requested.resourceSnapshot,releaseReason:requested.releaseReason!
+        },
+        auditEvent:{
+          id:"audit_release_api_final",projectId:requested.projectId,actorId:null,
+          subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
+          resourceKind:"sandbox",resourceId:requested.taskId,
+          detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
+          createdAt:releasedAt
+        },
+        releaseReceipt:{responseStatus:200,responseBody:finalReceipt,updatedAt:releasedAt}
+      }),"applied");
+      const final=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});
+      assert.equal(final.status,200);
+      assert.deepEqual(await final.json(),finalReceipt);
+      const releasedHeaders={...baseHeaders,"idempotency-key":"release-api-after-final"};
+      const releasedFirst=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:releasedHeaders,body});
+      const releasedReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers:releasedHeaders,body});
+      assert.equal(releasedFirst.status,200);
+      assert.deepEqual(await releasedFirst.json(),finalReceipt);
+      assert.equal(releasedReplay.status,200);
+      assert.deepEqual(await releasedReplay.json(),finalReceipt);
     }finally{if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;}
   });
 
@@ -1513,7 +1549,8 @@ describe("task interactions API", () => {
         liveSandbox:{port:{
           async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(){return"not_found" as const;},
+          async getConfigMapData(){return"not_found" as const;},
           async listManagedResources(){return structuredClone(resources);}
         }}
       });
@@ -1535,7 +1572,7 @@ describe("task interactions API", () => {
         method:"POST",headers:{...baseHeaders,"idempotency-key":"release-pending-terminal"},
         body:JSON.stringify({expectedRunId:run.runId})
       });
-      assert.equal(release.status,200);
+      assert.equal(release.status,202);
       const requested=await store.sandboxRuns.get(run.runId);assert.equal(requested?.state,"release_requested");
       assert.ok(requested);
       const releasedAt=new Date(Date.parse(requested.updatedAt)+1).toISOString();
@@ -1554,8 +1591,21 @@ describe("task interactions API", () => {
           resourceKind:"sandbox",resourceId:requested.taskId,
           detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
           createdAt:releasedAt
+        },
+        releaseReceipt:{
+          responseStatus:200,
+          responseBody:{outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:run.runId},
+          updatedAt:releasedAt
         }
       }),"applied");
+      const releaseReplay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{
+        method:"POST",headers:{...baseHeaders,"idempotency-key":"release-pending-terminal"},
+        body:JSON.stringify({expectedRunId:run.runId})
+      });
+      assert.equal(releaseReplay.status,200);
+      assert.deepEqual(await releaseReplay.json(),{
+        outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:run.runId
+      });
 
       const next=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{
         method:"POST",headers:{...baseHeaders,"idempotency-key":"terminal-after-release"},
@@ -1595,9 +1645,22 @@ describe("task interactions API", () => {
         runtimeTickIntervalMs:60_000,store,botifiedClient:new FakeBotifiedClient([]),
         botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{port:{
-          async applyResource(resource){applyCalls+=1;resources.push(structuredClone(resource));return"applied" as const;},
+          async applyResource(resource){
+            applyCalls+=1;
+            const next=structuredClone(resource);
+            if(next.kind==="Pod")next.metadata.uid="pod-uid-terminal-start";
+            resources.push(next);
+            return"applied" as const;
+          },
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(_namespace,name){
+            const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+            return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.31"}:"not_found" as const;
+          },
+          async getConfigMapData(_namespace,name){
+            const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+            return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+          },
           async listManagedResources(){return structuredClone(resources);}
         }}
       });
@@ -1642,12 +1705,22 @@ describe("task interactions API", () => {
         botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{port:{
           async applyResource(resource){
-            applyCalls+=1;resources.push(structuredClone(resource));
+            applyCalls+=1;
+            const next=structuredClone(resource);
+            if(next.kind==="Pod")next.metadata.uid="pod-uid-terminal-start";
+            resources.push(next);
             if(applyCalls===1){startupEntered();await startupGate;}
             return"applied" as const;
           },
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(_namespace,name){
+            const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+            return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.31"}:"not_found" as const;
+          },
+          async getConfigMapData(_namespace,name){
+            const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+            return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+          },
           async listManagedResources(){return structuredClone(resources);}
         }},
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
@@ -1688,6 +1761,7 @@ describe("task interactions API", () => {
       },
       async deleteResource(){return"not_found" as const;},
       async getPodReadiness(){return"not_found" as const;},
+      async getConfigMapData(){return"not_found" as const;},
       async listManagedResources(){return[];}
     };
     try{
@@ -1727,7 +1801,8 @@ describe("task interactions API", () => {
         {expectedRunId:task.currentRunId},
         "release-local-owner"
       );
-      assert.equal(release.outcome,"completed");
+      assert.equal(release.outcome,"accepted_in_progress");
+      assert.equal(release.keyDisposition,"retain");
       assert.equal(startupSignal?.aborted,true);
       await within(sync,500,"Aborted Terminal startup did not converge");
 
@@ -1753,7 +1828,7 @@ describe("task interactions API", () => {
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,
         botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return[];}}}
+        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];}}}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
@@ -1807,7 +1882,7 @@ describe("task interactions API", () => {
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
         sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"ready" as const;},async listManagedResources(){return[];}}}
+        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];}}}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
@@ -1882,12 +1957,25 @@ describe("task interactions API", () => {
       if(run?.state==="starting"&&run.startupClaimToken)throw new Error("terminal-owned session mismatch must not use generic Run failure");
       return failRun(input);
     };
+    const liveResources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
     try{
       const livePort={
-        async applyResource(){return"applied" as const;},
+        async applyResource(resource:import("../../packages/contracts/src/api.js").KubernetesResource){
+          const next=structuredClone(resource);
+          if(next.kind==="Pod")next.metadata.uid="pod-uid-session-mismatch";
+          liveResources.push(next);
+          return"applied" as const;
+        },
         async deleteResource(){return"deleted" as const;},
-        async getPodReadiness(){return"ready" as const;},
-        async listManagedResources(){return[];}
+        async getPodReadiness(_namespace:string,name:string){
+          const pod=liveResources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+          return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.51"}:"not_found" as const;
+        },
+        async getConfigMapData(_namespace:string,name:string){
+          const config=liveResources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+          return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+        },
+        async listManagedResources(){return structuredClone(liveResources);}
       };
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
@@ -1939,7 +2027,8 @@ describe("task interactions API", () => {
     const livePort={
       async applyResource(){applies+=1;return"applied" as const;},
       async deleteResource(){return"deleted" as const;},
-      async getPodReadiness(){return"ready" as const;},
+      async getPodReadiness(){return"not_found" as const;},
+      async getConfigMapData(){return"not_found" as const;},
       async listManagedResources(){return[];}
     };
     try{
@@ -1997,11 +2086,24 @@ describe("task interactions API", () => {
     const store=createLocalInMemoryProductStore();
     const botified=new FakeBotifiedClient([]);
     botified.healthFailure=new Error("Botified readiness failed definitively");
+    const liveResources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
     const livePort={
-      async applyResource(){return"applied" as const;},
+      async applyResource(resource:import("../../packages/contracts/src/api.js").KubernetesResource){
+        const next=structuredClone(resource);
+        if(next.kind==="Pod")next.metadata.uid="pod-uid-terminal-failure";
+        liveResources.push(next);
+        return"applied" as const;
+      },
       async deleteResource(){return"deleted" as const;},
-      async getPodReadiness(){return"ready" as const;},
-      async listManagedResources(){return[];}
+      async getPodReadiness(_namespace:string,name:string){
+        const pod=liveResources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+        return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.61"}:"not_found" as const;
+      },
+      async getConfigMapData(_namespace:string,name:string){
+        const config=liveResources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+        return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+      },
+      async listManagedResources(){return structuredClone(liveResources);}
     };
     try{
       api=await createApiServer({
@@ -2056,19 +2158,27 @@ describe("task interactions API", () => {
     }
   });
 
-  it("drains an accepted Kubernetes mutation whose response was lost before failing its Terminal receipt",async()=>{
+  it("converges an accepted Kubernetes mutation by exact inventory reread without applying any resource twice",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
-    let mutationAborted=false;
+    let mutationAborted=false,loseFirstResponse=true;
+    const applyCounts=new Map<string,number>();
     const port={
       async applyResource(
         resource:import("../../packages/contracts/src/api.js").KubernetesResource,
         _labels:Record<string,string>,
         signal?:AbortSignal
       ){
-        resources.push(structuredClone(resource));
+        const resourceKey=`${resource.kind}/${resource.metadata.name}`;
+        applyCounts.set(resourceKey,(applyCounts.get(resourceKey)??0)+1);
+        const next=structuredClone(resource);
+        if(next.kind==="Pod")next.metadata.uid="pod-uid-unknown-recovery";
+        const existing=resources.findIndex((candidate)=>candidate.kind===resource.kind&&candidate.metadata.name===resource.metadata.name);
+        if(existing>=0)resources[existing]=next;else resources.push(next);
+        if(!loseFirstResponse)return"applied" as const;
+        loseFirstResponse=false;
         return new Promise<"applied">((_resolve,reject)=>{
           const abort=()=>{
             mutationAborted=true;
@@ -2084,7 +2194,14 @@ describe("task interactions API", () => {
         resources.splice(index,1);
         return"deleted" as const;
       },
-      async getPodReadiness(){return"ready" as const;},
+      async getPodReadiness(_namespace:string,name:string){
+        const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+        return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.21"}:"not_found" as const;
+      },
+      async getConfigMapData(_namespace:string,name:string){
+        const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+        return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+      },
       async listManagedResources(){return structuredClone(resources);}
     };
     try{
@@ -2109,25 +2226,19 @@ describe("task interactions API", () => {
       });
       await background.tasks.syncActiveTasksOnce();
       const pending=(await store.sandboxRuns.list()).find((run)=>run.taskId===task.id);assert.ok(pending);
-      assert.equal(pending.state,"starting");
-      assert.ok(pending.startupClaimToken);
-      assert.ok(pending.startupActionDeadlineAt);
-      assert.equal(resources.length,1);
       assert.equal(mutationAborted,true);
-
-      const afterDeadline=new Date(Date.parse(pending.startupActionDeadlineAt)+1);
-      const lifecycle=new SandboxLifecycleService(store,{namespace:pending.namespace,port,now:()=>afterDeadline});
-      const reaped=await lifecycle.reapSandboxRunsOnce({apply:true,runId:pending.runId});
-      assert.deepEqual(reaped.errors,[]);
-      assert.equal(resources.length,0);
-      const failed=await store.sandboxRuns.get(pending.runId);assert.ok(failed);
-      assert.equal(failed.state,"failed");
-      assert.equal(failed.startupClaimToken,null);
-      assert.equal(failed.startupActionDeadlineAt,null);
+      const active=await store.sandboxRuns.get(pending.runId);assert.ok(active);
+      assert.equal(active.state,"active");
+      assert.ok(active.startupConfigHash);
+      assert.equal(active.startupPodUid,"pod-uid-unknown-recovery");
+      assert.equal(active.startupClaimToken,null);
+      assert.equal(active.startupActionDeadlineAt,null);
+      assert.equal(new Set(resources.map((resource)=>`${resource.kind}/${resource.metadata.name}`)).size,6);
+      assert.deepEqual([...applyCounts.values()],[1,1,1,1,1,1]);
 
       const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/terminal/start`,{method:"POST",headers,body:terminalBody});
-      assert.equal(replay.status,502);
-      assert.equal((await replay.json() as {error:{code:string}}).error.code,"sandbox_start_failed");
+      assert.equal(replay.status,200);
+      assert.deepEqual(await replay.json(),{outcome:"completed",keyDisposition:"retire",runId:active.runId});
     }finally{
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
     }
@@ -2150,9 +2261,21 @@ describe("task interactions API", () => {
         runtimeTickIntervalMs:60_000,store,botifiedClient:botified,
         botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:{
-          async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},
+          async applyResource(resource){
+            const next=structuredClone(resource);
+            if(next.kind==="Pod")next.metadata.uid="pod-uid-readiness-failure";
+            resources.push(next);
+            return"applied" as const;
+          },
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(_namespace,name){
+            const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+            return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.41"}:"not_found" as const;
+          },
+          async getConfigMapData(_namespace,name){
+            const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+            return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+          },
           async listManagedResources(){return structuredClone(resources);}
         }}
       });
@@ -2169,9 +2292,22 @@ describe("task interactions API", () => {
         store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
         sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
         liveSandbox:{readinessTimeoutMs:0,readinessPollMs:1,port:{
-          async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},
+          async applyResource(resource){
+            const next=structuredClone(resource);
+            if(next.kind==="Pod")next.metadata.uid="pod-uid-readiness-failure";
+            const index=resources.findIndex((candidate)=>candidate.kind===next.kind&&candidate.metadata.name===next.metadata.name);
+            if(index>=0)resources[index]=next;else resources.push(next);
+            return"applied" as const;
+          },
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(_namespace,name){
+            const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+            return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.41"}:"not_found" as const;
+          },
+          async getConfigMapData(_namespace,name){
+            const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+            return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+          },
           async listManagedResources(){return structuredClone(resources);}
         }},
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
@@ -2290,8 +2426,20 @@ describe("task interactions API", () => {
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
-    const botified=new FakeBotifiedClient([]);
+    const botified=new class extends FakeBotifiedClient {
+      private failNextState=true;
+      override async readState(baseUrl:string,serviceKey:string){
+        if(this.failNextState){
+          this.failNextState=false;
+          throw new TypeError("cold open outcome unknown");
+        }
+        return super.readState(baseUrl,serviceKey);
+      }
+    }([]);
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
+    let podSequence=0;
+    let readinessReads=0;
+    let configReads=0;
     let startupEntered!:()=>void;
     let continueStartup!:()=>void;
     const entered=new Promise<void>((resolve)=>{startupEntered=resolve;});
@@ -2299,13 +2447,25 @@ describe("task interactions API", () => {
     let gateReleased=false;
     const liveSandbox={port:{
       async applyResource(resource:import("../../packages/contracts/src/api.js").KubernetesResource){
-        resources.push(structuredClone(resource));
+        const next=structuredClone(resource);
+        if(next.kind==="Pod"&&!next.metadata.uid)next.metadata.uid=`pod-uid-${++podSequence}`;
+        const index=resources.findIndex((candidate)=>candidate.kind===next.kind&&candidate.metadata.name===next.metadata.name);
+        if(index>=0)resources[index]=next;else resources.push(next);
         startupEntered();
         if(!gateReleased)await startupGate;
         return"applied" as const;
       },
       async deleteResource(){return"deleted" as const;},
-      async getPodReadiness(){return"ready" as const;},
+      async getPodReadiness(_namespace:string,name:string){
+        readinessReads+=1;
+        const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+        return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.17"}:"not_found" as const;
+      },
+      async getConfigMapData(_namespace:string,name:string){
+        configReads+=1;
+        const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+        return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+      },
       async listManagedResources(){return structuredClone(resources);}
     }};
     try{
@@ -2355,7 +2515,7 @@ describe("task interactions API", () => {
       const background=createApplicationServices({
         store,dataRoot,builtinAdminPassword:"production-admin-password",
         sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
-        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
       const sync=background.tasks.syncActiveTasksOnce();
@@ -2363,9 +2523,49 @@ describe("task interactions API", () => {
       gateReleased=true;
       continueStartup();
       await sync;
-      await background.tasks.syncActiveTasksOnce();
+      const interruptedTask=await store.findTask(task.id as string);assert.ok(interruptedTask?.currentRunId);
+      const interruptedRun=await store.sandboxRuns.get(interruptedTask.currentRunId);assert.ok(interruptedRun);
+      assert.equal(interruptedRun.state,"starting");
+      assert.equal(interruptedRun.startupPodUid,"pod-uid-1");
+      assert.equal(interruptedRun.startupPodIp,"10.42.0.17");
+      assert.equal(interruptedRun.startupClaimToken,null);
+      assert.equal((await store.findTaskMessage(firstBody.messageId))?.deliveryStatus,"pending");
 
+      const recovered=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await new Promise((resolve)=>setTimeout(resolve,2));
+      const recoveredSync=await recovered.tasks.syncActiveTasksOnce();
+
+      const activeTask=await store.findTask(task.id as string);assert.ok(activeTask?.currentRunId);
+      const activeRun=await store.sandboxRuns.get(activeTask.currentRunId);assert.ok(activeRun);
+      assert.deepEqual(recoveredSync.failedTaskIds,[]);
+      assert.equal(activeRun.state,"active");
+      assert.equal(activeRun.startupPodUid,"pod-uid-1");
+      assert.equal(activeRun.startupPodIp,"10.42.0.17");
+      assert.ok(activeRun.startupConfigMapName?.endsWith(activeRun.startupConfigHash!.slice("sha256:".length,23)));
+      assert.equal(resources.filter((resource)=>resource.kind==="Pod").length,1);
+      const configs=resources.filter((resource)=>resource.kind==="ConfigMap").map((resource)=>
+        (resource.data as Record<string,string>)["botified-config.yaml"]
+      );
+      assert.equal(configs.length,1);
+      assert.ok(readinessReads>=2,"activation must reread the exact Pod after Botified health/state");
+      assert.ok(configReads>=1,"activation must reread the exact ConfigMap bytes");
       assert.equal((await store.findTaskMessage(firstBody.messageId))?.deliveryStatus,"accepted");
+      assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
+
+      const restarted=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",
+        sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,botifiedClient:botified,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox,taskRetryDelayMs:0,
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      assert.deepEqual((await restarted.tasks.syncActiveTasksOnce()).failedTaskIds,[]);
+      assert.equal(podSequence,1);
+      assert.equal(resources.filter((resource)=>resource.kind==="ConfigMap").length,1);
       assert.equal(botified.postMessageCalls.filter((call)=>call.message===content).length,1);
     }finally{
       gateReleased=true;
@@ -2417,7 +2617,7 @@ async function releaseTaskRunFixture(
     runId:run.runId,
     taskId:task.id,
     expectedFencingToken:run.fencingToken,
-    run:requested,
+    intent:{requestedAt},
     idempotency:{actorId:claim.actorId,projectId:claim.projectId,operation:claim.operation,key:claim.key,requestHash:claim.requestHash,claimToken:claim.claimToken,responseStatus:200,responseBody:{released:true},updatedAt:requestedAt}
   }),"applied");
   const releasedAt=new Date(Date.parse(requestedAt)+1).toISOString();
@@ -2461,12 +2661,16 @@ async function makeTaskRunActive(
     startedByUserId:task.createdByUserId,
     startedAt:null,
     startupReadyAt:null,
+    startupConfigMapName:`${task.id}-config-fixture`,
+    startupConfigHash:"sha256:fixture",
+    startupPodUid:`${task.id}-pod-uid`,
+    startupPodIp:"10.42.0.17",
     startupActionDeadlineAt:null,
     botifiedPort:3099,
     resourceNames:{
       pod:`${task.id}-pod`,
       service:`${task.id}-service`,
-      configMap:`${task.id}-config`,
+      configMap:`${task.id}-config-fixture`,
       secret:`${task.id}-secret`,
       serviceAccount:`${task.id}-account`,
       networkPolicy:`${task.id}-policy`
@@ -2524,6 +2728,10 @@ async function makeTaskRunActive(
     expectedFencingToken:run.fencingToken,
     startupClaimToken,
     actionDeadlineAt:readinessDeadlineAt,
+    expectedConfigMapName:run.startupConfigMapName!,
+    expectedConfigHash:run.startupConfigHash!,
+    expectedPodUid:run.startupPodUid!,
+    expectedPodIp:run.startupPodIp!,
     activatedAt:timestamp,
     auditEvent:{
       id:`audit_started_${runId}`,

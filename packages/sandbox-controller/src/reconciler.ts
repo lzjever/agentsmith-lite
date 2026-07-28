@@ -71,7 +71,7 @@ export interface SandboxRunState extends SandboxIdentity {
   failureCode: SandboxFailureCode | null;
   failureCause: string | null;
   fencingToken: number;
-  resumeUnfinished?: boolean;
+  startupPodUid?:string|null;
   startupClaimToken?: string | null;
   startupLeaseExpiresAt?: string | null;
   cleanupClaimedAt?: string | null;
@@ -162,6 +162,7 @@ const DELETE_ORDER: readonly SandboxCoreResourceKind[] = [
 
 export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxReconcileResult {
   const actions: SandboxReconcileAction[] = [];
+  const errors:string[]=[];
   const observedResources = input.observedResources.filter((resource) => resource.metadata.namespace === input.namespace);
 
   for (const run of input.desiredRuns) {
@@ -187,6 +188,27 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
           cleanupClaimedAt:null
         }),
         reason: "terminal_runner_failure"
+      });
+      continue;
+    }
+    const expectedPod=run.startupPodUid
+      ?observedResources.find((resource)=>
+        resource.kind==="Pod"&&resource.metadata.name===run.resourceNames.pod&&hasLabels(resource,identityLabels(run))
+      )
+      :undefined;
+    if(run.startupPodUid&&expectedPod?.metadata.uid!==run.startupPodUid){
+      actions.push({
+        type:"store_run_state",
+        run:nextRunState(run,{
+          state:"failed",
+          releaseReason:"failed",
+          failureCode:"startup_failed",
+          failureCause:"Recorded sandbox Pod is missing or was replaced",
+          failedAt:input.now.toISOString(),
+          releaseRequestedAt:input.now.toISOString(),
+          cleanupClaimedAt:null
+        }),
+        reason:"terminal_runner_failure"
       });
       continue;
     }
@@ -229,7 +251,7 @@ export function reconcileSandboxRuns(input: SandboxReconcileInput): SandboxRecon
       )
     : { actions: [], errors: [] };
   actions.push(...orphanPlan.actions);
-  return { actions, errors: orphanPlan.errors };
+  return { actions, errors:[...errors,...orphanPlan.errors] };
 }
 
 export function applySandboxReconcileActions(

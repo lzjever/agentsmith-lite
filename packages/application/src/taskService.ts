@@ -83,9 +83,11 @@ import { sandboxResourceNamesForTask, sandboxServiceNameForTask } from "../../sa
 import { APP_KUBERNETES_SERVICE_NAME, APP_KUBERNETES_SERVICE_PORT } from "../../sandbox-controller/src/appManifestRenderer.js";
 import {
   reconcileSandboxRuns,
+  sandboxIdentityLabels,
   type SandboxReconcileAction,
   type SandboxRunState
 } from "../../sandbox-controller/src/reconciler.js";
+import { sandboxRuntimeConfigMapName } from "../../sandbox-controller/src/manifestRenderer.js";
 import { EndpointService } from "./endpointService.js";
 import {
   type SandboxKubernetesInventoryPort,
@@ -768,11 +770,12 @@ export class TaskService {
     const key=normalizeIdempotencyKey(idempotencyKey),requestHash=canonicalRequestHash({taskId,expectedRunId}),claimToken=newId("idempotency_claim"),timestamp=nowIso();
     const existing=await this.store.findTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash});
     if(existing?.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
+    if(existing?.kind==="in_progress")return releaseAcceptedReceipt(task.id,existing.resourceId);
     if(existing?.kind==="replay")return replayTaskCommandOutcome<TaskSandboxReleaseReceipt>(existing.responseStatus,existing.responseBody);
     if(task.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
     const begun=await this.store.beginTaskIdempotency({actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,resourceId:expectedRunId,claimToken,now:timestamp,leaseExpiresAt:deadlineIso(timestamp,IDEMPOTENCY_LEASE_MS)});
     if(begun.kind==="hash_mismatch")throw idempotencyPayloadMismatchError();
-    if(begun.kind==="in_progress")throw idempotencyInProgressError();
+    if(begun.kind==="in_progress")return releaseAcceptedReceipt(task.id,begun.resourceId);
     if(begun.kind==="replay")return replayTaskCommandOutcome<TaskSandboxReleaseReceipt>(begun.responseStatus,begun.responseBody);
     try{
       const currentTask=await this.store.findTask(task.id);
@@ -781,9 +784,12 @@ export class TaskService {
       const run=await this.store.sandboxRuns.get(expectedRunId);
       if(!run||run.taskId!==currentTask.id||run.runId!==currentTask.currentRunId)throw taskRunTargetConflictError();
       const cleaned=run.state==="released",updatedAt=nowIso();
-      const nextRun:PersistedSandboxRunState=cleaned?run:{...run,state:"release_requested",releaseReason:run.releaseReason??(run.state==="failed"?"failed":"requested"),releaseRequestedAt:run.releaseRequestedAt??updatedAt,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt};
-      const response:TaskSandboxReleaseReceipt={outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:run.runId,presentation:await this.taskPresentation(userId,currentTask,{run:nextRun,turn:"ready",reachability:"unreachable"})};
-      const result=await this.store.requestTaskSandboxRelease({runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,run:nextRun,idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:200,responseBody:response,updatedAt}});
+      const response=cleaned?releaseCompletedReceipt(task.id,run.runId):releaseAcceptedReceipt(task.id,run.runId);
+      const result=await this.store.requestTaskSandboxRelease({
+        runId:run.runId,taskId:task.id,expectedFencingToken:run.fencingToken,
+        intent:{requestedAt:updatedAt},
+        idempotency:{actorId:userId,projectId:task.projectId,operation:"release-sandbox",key,requestHash,claimToken:begun.claimToken,responseStatus:cleaned?200:202,responseBody:response,updatedAt}
+      });
       if(result==="conflict")throw taskRunTargetConflictError();
       this.startupAbortControllersByRunId.get(run.runId)?.abort(new ProductError("Sandbox startup was superseded by release",409,"sandbox_cleanup_intent_conflict"));
       return response;
@@ -1399,7 +1405,12 @@ export class TaskService {
       !run ||
       !runAllowsMessageDelivery(run);
     if(permanent)return this.failClaimedTaskMessage(message,safeTaskStageError(error),completeIdempotency);
-    const deferred=await this.store.deferTaskMessage({id:message.id,claimToken:message.claimToken!,safeError:safeTaskStageError(error),nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso()});
+    const startupUnknown=error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??"");
+    const deferred=await this.store.deferTaskMessage({
+      id:message.id,claimToken:message.claimToken!,safeError:safeTaskStageError(error),
+      nextRetryAt:deadlineIso(nowIso(),this.retryDelayMs()),updatedAt:nowIso(),
+      ...(startupUnknown?{releaseClaim:true}:{})
+    });
     if(deferred)await this.persistMessageInteraction(deferred);
     return await this.store.findTaskMessage(message.id)??message;
   }
@@ -1758,7 +1769,7 @@ export class TaskService {
     return{
       task:replacement,
       runtimeState:{botifiedBaseUrl:this.botifiedBaseUrlForTask(task.id,botifiedPort)},
-      sandboxRun:this.buildLiveSandboxRun({task:replacement,timestamp:reservedAt,botifiedPort,projectSubPath:project.rootPath,fileLibraryRootSubPath:library.rootSubPath,resourceNames,startedByUserId:userId,resumeUnfinished:false}),
+      sandboxRun:this.buildLiveSandboxRun({task:replacement,timestamp:reservedAt,botifiedPort,projectSubPath:project.rootPath,fileLibraryRootSubPath:library.rootSubPath,resourceNames,startedByUserId:userId}),
       reservedAt
     };
   }
@@ -1774,8 +1785,11 @@ export class TaskService {
       try{
         task=await this.startLiveSandbox({task,run,...(signal?{signal}:{})})??task;
       }catch(error){
-        if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict")throw error;
-        if(error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??""))return task;
+        if(error instanceof ProductError&&error.code==="sandbox_cleanup_intent_conflict"){
+          const current=await this.store.sandboxRuns.get(run.runId);
+          if(!current||!taskMatchesExactSandboxRun(task,current)||current.state!=="starting")throw error;
+        }
+        if(error instanceof ProductError&&["sandbox_startup_deadline_exceeded","sandbox_startup_unknown_result"].includes(error.code??""))throw error;
         const adopted=persistFailure
           ?await this.persistStartingRunFailureOrAdopt(task,run.runId,operation,error)
           :await this.adoptConcurrentlyStartedRun(task,run.runId);
@@ -2215,7 +2229,6 @@ export class TaskService {
     fileLibraryRootSubPath:string;
     resourceNames: SandboxRunState["resourceNames"];
     startedByUserId?: string;
-    resumeUnfinished?: boolean;
   }): PersistedSandboxRunState {
     const paths = this.taskRuntimePaths(input.task);
     return {
@@ -2233,6 +2246,10 @@ export class TaskService {
       startedByUserId: input.startedByUserId??input.task.createdByUserId!,
       startedAt: null,
       startupReadyAt: null,
+      startupConfigMapName:null,
+      startupConfigHash:null,
+      startupPodUid:null,
+      startupPodIp:null,
       startupActionDeadlineAt: null,
       botifiedPort: input.botifiedPort,
       resourceNames: input.resourceNames,
@@ -2255,7 +2272,6 @@ export class TaskService {
       failureCode:null,
       failureCause:null,
       fencingToken: 1,
-      resumeUnfinished:input.resumeUnfinished??true,
       startupClaimToken:null,
       startupLeaseExpiresAt:null,
       cleanupClaimedAt:null,
@@ -2294,117 +2310,211 @@ export class TaskService {
     requireTaskEndpointCapabilities(endpoint);
     const serviceKey=this.serviceKeyForTask(input.task);
     await this.prepareLiveRuntimeDirectories(input.task, input.run.projectSubPath);
-
-    let podAction:Extract<SandboxReconcileAction,{type:"create_resource"|"adopt_resource"}>|undefined;
-    if(live){
-      const actions = reconcileSandboxRuns({
-        namespace: input.run.namespace,
-        desiredRuns: [input.run],
-        observedResources: [],
-        now: new Date()
-      }).actions;
-      const config = generateBotifiedConfig({
-        endpoint,
-        task: {
-          taskId: input.task.id,
-          taskHomePath: BOTIFIED_TASK_HOME_PATH,
-          botifiedDataPath: BOTIFIED_DATA_PATH,
-          serviceKeyEnv: "BOTIFIED_SERVICE_KEY",
-          providerApiKeyEnv: "BOTIFIED_SERVICE_KEY",
-          providerBaseUrl: this.botifiedBrokerBaseUrlForTask(input.task),
-          servicePort: input.run.botifiedPort,
-          resumeUnfinished:input.run.resumeUnfinished??true
-        }
-      });
-      const materialized = materializeLiveCreateActions(actions, {
-        serviceKey,
-        botifiedConfig: serializeBotifiedConfig(config),
-        agentInstructions: taskAgentInstructions(input.task)
-      });
-      for(const action of materialized){
-        if(action.type!=="create_resource"&&action.type!=="adopt_resource"){
-          await applySandboxReconcileActionsToKubernetes(live.port,[action]);
-          continue;
-        }
-        if(action.kind==="Pod")podAction=action;
-        const actionStartedAt=nowIso();
-        const actionDeadlineAt=deadlineIso(actionStartedAt,resolveDurationMs(live.startupActionTimeoutMs,120_000));
-        if(!await this.store.beginSandboxStartupAction({
-          taskId:input.task.id,
-          runId:input.run.runId,
-          expectedFencingToken:input.run.fencingToken,
-          claimToken:startupClaimToken,
-          actionDeadlineAt,
-          startedAt:actionStartedAt
-        }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
-        try{
-          await withHardDeadline(
-            (signal)=>this.trackStartupExternalAction(input.run.runId,applySandboxReconcileActionsToKubernetes(live.port,[action],signal)),
-            actionDeadlineAt,
-            input.signal
-          );
-        }catch{
-          throw new ProductError("Kubernetes startup mutation result is unknown",504,"sandbox_startup_unknown_result");
-        }
-        const completedAt=nowIso();
-        if(!await this.store.completeSandboxStartupAction({
-          taskId:input.task.id,
-          runId:input.run.runId,
-          expectedFencingToken:input.run.fencingToken,
-          claimToken:startupClaimToken,
-          actionDeadlineAt,
-          completedAt,
-          leaseExpiresAt:deadlineIso(completedAt,120_000)
-        }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
+    let run=await this.store.sandboxRuns.get(input.run.runId);
+    if(!run||!taskMatchesExactSandboxRun(input.task,run)||run.state!=="starting")throw new ProductError("Sandbox startup ownership changed",409,"sandbox_cleanup_intent_conflict");
+    const config=generateBotifiedConfig({
+      endpoint,
+      task:{
+        taskId:input.task.id,taskHomePath:BOTIFIED_TASK_HOME_PATH,botifiedDataPath:BOTIFIED_DATA_PATH,
+        serviceKeyEnv:"BOTIFIED_SERVICE_KEY",providerApiKeyEnv:"BOTIFIED_SERVICE_KEY",
+        providerBaseUrl:this.botifiedBrokerBaseUrlForTask(input.task),servicePort:run.botifiedPort
       }
-      if(!podAction)throw new ProductError("Live sandbox pod manifest was not generated",500);
+    });
+    const serializedConfig=serializeBotifiedConfig(config);
+    const configHash=runtimeConfigHash(serializedConfig);
+    const configMapName=run.startupConfigMapName??sandboxRuntimeConfigMapName(run.resourceNames.configMap,configHash);
+    const initialized=await this.store.initializeTaskSandboxStartupConfig({
+      taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      startupClaimToken,configMapName,configHash,initializedAt:nowIso()
+    });
+    if(!initialized)throw new ProductError("Sandbox startup config identity changed",409,"sandbox_cleanup_intent_conflict");
+    run=initialized;
+
+    let finalPodIdentity:{podUid:string;podIp:string}|null=null;
+    let podLabels:Record<string,string>|null=null;
+    if(live){
+      podLabels=sandboxIdentityLabels(run);
+      let observed=await observeSandboxStartupIdentity(live,run,podLabels,input.signal);
+      if(run.startupPodUid){
+        if(!observed||observed.podUid!==run.startupPodUid){
+          throw new ProductError("Recorded sandbox Pod is missing or was replaced",409,"sandbox_cleanup_intent_conflict");
+        }
+      }else{
+        const observedResources=await live.port.listManagedResources(run.namespace);
+        const actions=reconcileSandboxRuns({
+          namespace:run.namespace,desiredRuns:[run],observedResources,now:new Date()
+        });
+        if(actions.errors.length>0)throw new ProductError(actions.errors[0]!,409,"sandbox_cleanup_intent_conflict");
+        const materialized=materializeLiveCreateActions(actions.actions,{
+          serviceKey,botifiedConfig:serializedConfig,agentInstructions:taskAgentInstructions(input.task)
+        });
+        if(materialized.some((action)=>action.type==="create_resource")){
+          await this.runSandboxStartupAction(
+            input.task,run,startupClaimToken,input.signal,
+            (signal)=>applySandboxReconcileActionsToKubernetes(live.port,materialized,signal),
+            async(signal)=>{
+              const reread=await live.port.listManagedResources(run!.namespace);
+              const convergence=reconcileSandboxRuns({
+                namespace:run!.namespace,desiredRuns:[run!],observedResources:reread,now:new Date()
+              });
+              if(convergence.errors.length>0){
+                throw new ProductError(convergence.errors[0]!,409,"sandbox_cleanup_intent_conflict");
+              }
+              return convergence.actions.some((action)=>action.type==="create_resource")
+                ?{resolved:false as const}
+                :{resolved:true as const,value:undefined};
+            }
+          );
+        }
+        observed=await observeSandboxStartupIdentity(live,run,podLabels,input.signal);
+        if(!observed){
+          throw new ProductError("Sandbox resources are incomplete after Kubernetes convergence",504,"sandbox_startup_unknown_result");
+        }
+        const recorded=await this.store.recordTaskSandboxStartupPod({
+          taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
+          expectedConfigMapName:run.startupConfigMapName!,expectedConfigHash:run.startupConfigHash!,
+          podUid:observed.podUid,podIp:observed.podIp??null,observedAt:nowIso()
+        });
+        if(!recorded)throw new ProductError("Sandbox pod identity changed before readiness",409,"sandbox_cleanup_intent_conflict");
+        run=recorded;
+      }
+
+      const ready=await this.runSandboxStartupAction(
+        input.task,run,startupClaimToken,input.signal,
+        (signal)=>waitForPodReady(live,run!.namespace,run!.resourceNames.pod,podLabels!,run!.startupPodUid!,signal),
+        async(signal)=>{
+          const current=await observeSandboxStartupIdentity(live,run!,podLabels!,signal);
+          return current?.podIp
+            ?{resolved:true as const,value:{podUid:current.podUid,podIp:current.podIp}}
+            :{resolved:false as const};
+        }
+      );
+      const verified=await this.store.recordTaskSandboxStartupPod({
+        taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
+        expectedConfigMapName:run.startupConfigMapName!,expectedConfigHash:run.startupConfigHash!,
+        podUid:ready.podUid,podIp:ready.podIp,observedAt:nowIso()
+      });
+      if(!verified)throw new ProductError("Sandbox pod readiness identity changed",409,"sandbox_cleanup_intent_conflict");
+      run=verified;
+      finalPodIdentity=ready;
     }
 
-    const readinessStartedAt=nowIso();
-    const readinessDeadlineAt=deadlineIso(readinessStartedAt,resolveDurationMs(live?.startupActionTimeoutMs,120_000));
-    if(!await this.store.beginSandboxStartupAction({
-      taskId:input.task.id,
-      runId:input.run.runId,
-      expectedFencingToken:input.run.fencingToken,
-      claimToken:startupClaimToken,
-      actionDeadlineAt:readinessDeadlineAt,
-      startedAt:readinessStartedAt
-    }))throw new ProductError("Sandbox readiness ownership changed",409,"sandbox_cleanup_intent_conflict");
-    await withHardDeadline(
-      (signal)=>this.trackStartupExternalAction(input.run.runId,(async()=>{
-        if(live&&podAction){
-          await waitForPodReady(live,input.run.namespace,podAction.name,podAction.labels,signal);
-          await waitForBotifiedServiceReady(live,this.botified,this.botifiedBaseUrlForTask(input.task.id,input.run.botifiedPort),signal);
+    const open=await this.beginSandboxStartupExternalAction(input.task,run,startupClaimToken);
+    try{
+      await withHardDeadline(
+        (signal)=>this.trackStartupExternalAction(run!.runId,(async()=>{
+          if(live)await waitForBotifiedServiceReady(live,this.botified,this.botifiedBaseUrlForTask(input.task.id,run!.botifiedPort),signal);
+          const runtime=await this.readRuntimeState(input.task,serviceKey,signal);
+          await this.readVerifiedBotifiedState(input.task,runtime.baseUrl,serviceKey,signal);
+          if(live&&podLabels){
+            const reread=await observeSandboxStartupIdentity(live,run!,podLabels,signal,true);
+            if(!reread||!reread.podIp)throw new ProductError("Sandbox identity changed before activation",409,"sandbox_cleanup_intent_conflict");
+            finalPodIdentity={podUid:reread.podUid,podIp:reread.podIp};
+          }
+        })()),
+        open.actionDeadlineAt,input.signal
+      );
+    }catch(error){
+      if(
+        error instanceof ProductError&&error.code!=="sandbox_startup_deadline_exceeded"&&
+        !(error instanceof BotifiedTaskPortError&&error.retryable)
+      )throw error;
+      if(live&&podLabels){
+        const reconciled=await observeSandboxStartupIdentity(live,run,podLabels,input.signal,true);
+        if(!reconciled||reconciled.podUid!==run.startupPodUid){
+          throw new ProductError("Sandbox startup result is unknown and identity no longer matches",409,"sandbox_cleanup_intent_conflict");
         }
-        const runtime=await this.readRuntimeState(input.task,serviceKey,signal);
-        await this.readVerifiedBotifiedState(input.task,runtime.baseUrl,serviceKey,signal);
-      })()),
-      readinessDeadlineAt,
-      input.signal
-    );
+      }
+      await this.store.recoverSandboxStartupAction({
+        taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+        claimToken:startupClaimToken,actionDeadlineAt:open.actionDeadlineAt,recoveredAt:nowIso()
+      });
+      throw new ProductError("Botified startup open result is unknown",504,"sandbox_startup_unknown_result");
+    }
+    if(finalPodIdentity){
+      const finalStored=await this.store.recordTaskSandboxStartupPod({
+        taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
+        expectedConfigMapName:run.startupConfigMapName!,expectedConfigHash:run.startupConfigHash!,
+        podUid:finalPodIdentity.podUid,podIp:finalPodIdentity.podIp,observedAt:nowIso()
+      });
+      if(!finalStored)throw new ProductError("Sandbox final identity changed before activation",409,"sandbox_cleanup_intent_conflict");
+      run=finalStored;
+    }
     const activatedAt=nowIso();
     const activated=await this.store.activateTaskSandboxRun({
-      taskId:input.task.id,
-      runId:input.run.runId,
-      expectedFencingToken:input.run.fencingToken,
-      startupClaimToken,
-      actionDeadlineAt:readinessDeadlineAt,
+      taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      startupClaimToken,actionDeadlineAt:open.actionDeadlineAt,
+      expectedConfigMapName:run.startupConfigMapName??null,
+      expectedConfigHash:run.startupConfigHash??null,
+      expectedPodUid:finalPodIdentity?.podUid??null,
+      expectedPodIp:finalPodIdentity?.podIp??null,
       activatedAt,
       auditEvent:{
-        id:`audit_sandbox_started_${input.run.runId}`,
-        projectId:input.run.projectId,
-        actorId:null,
-        subjectUserId:input.run.startedByUserId,
-        action:"sandbox.started",
-        status:"accepted",
-        resourceKind:"sandbox",
-        resourceId:input.run.taskId,
-        detail:{taskId:input.run.taskId,runId:input.run.runId},
-        createdAt:activatedAt
+        id:`audit_sandbox_started_${run.runId}`,projectId:run.projectId,actorId:null,
+        subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",
+        resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:activatedAt
       }
     });
     if(activated.kind==="conflict")throw new ProductError("Sandbox run state fencing token changed before activation",409);
     return activated.task;
+  }
+
+  private async beginSandboxStartupExternalAction(task:PersistedAgentTask,run:PersistedSandboxRunState,claimToken:string):Promise<{actionDeadlineAt:string}>{
+    const startedAt=nowIso();
+    const actionDeadlineAt=deadlineIso(startedAt,resolveDurationMs(this.config.liveSandbox?.startupActionTimeoutMs,120_000));
+    if(!await this.store.beginSandboxStartupAction({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken,actionDeadlineAt,startedAt
+    }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
+    return{actionDeadlineAt};
+  }
+
+  private async completeSandboxStartupExternalAction(task:PersistedAgentTask,run:PersistedSandboxRunState,claimToken:string,actionDeadlineAt:string):Promise<void>{
+    const completedAt=nowIso();
+    if(!await this.store.completeSandboxStartupAction({
+      taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken,actionDeadlineAt,completedAt,leaseExpiresAt:deadlineIso(completedAt,120_000)
+    }))throw new ProductError("Sandbox startup action ownership changed",409,"sandbox_cleanup_intent_conflict");
+  }
+
+  private async runSandboxStartupAction<T>(
+    task:PersistedAgentTask,
+    run:PersistedSandboxRunState,
+    claimToken:string,
+    parentSignal:AbortSignal|undefined,
+    action:(signal:AbortSignal)=>Promise<T>,
+    reconcileUnknown?:(signal:AbortSignal)=>Promise<{resolved:false}|{resolved:true;value:T}>
+  ):Promise<T>{
+    const {actionDeadlineAt}=await this.beginSandboxStartupExternalAction(task,run,claimToken);
+    let value:T;
+    try{
+      value=await withHardDeadline(
+        (signal)=>this.trackStartupExternalAction(run.runId,action(signal)),
+        actionDeadlineAt,parentSignal
+      );
+    }catch(error){
+      if(error instanceof ProductError&&error.code!=="sandbox_startup_deadline_exceeded")throw error;
+      if(error instanceof Error&&/fence mismatch/.test(error.message)){
+        throw new ProductError("Sandbox startup resource fence mismatch",409,"sandbox_cleanup_intent_conflict");
+      }
+      if(reconcileUnknown){
+        parentSignal?.throwIfAborted();
+        const signal=parentSignal??new AbortController().signal;
+        const reconciled=await reconcileUnknown(signal);
+        if(reconciled.resolved){
+          await this.completeSandboxStartupExternalAction(task,run,claimToken,actionDeadlineAt);
+          return reconciled.value;
+        }
+      }
+      const recoveredAt=nowIso();
+      await this.store.recoverSandboxStartupAction({
+        taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+        claimToken,actionDeadlineAt,recoveredAt
+      });
+      throw new ProductError("Kubernetes startup mutation result is unknown",504,"sandbox_startup_unknown_result");
+    }
+    await this.completeSandboxStartupExternalAction(task,run,claimToken,actionDeadlineAt);
+    return value;
   }
 
   private trackStartupExternalAction<T>(runId:string,operation:Promise<T>):Promise<T>{
@@ -2951,6 +3061,14 @@ function completedTaskControlReceipt(
   };
 }
 
+function releaseAcceptedReceipt(taskId:string,runId:string):Extract<TaskSandboxReleaseReceipt,{outcome:"accepted_in_progress"}>{
+  return{outcome:"accepted_in_progress",keyDisposition:"retain",taskId,runId};
+}
+
+function releaseCompletedReceipt(taskId:string,runId:string):Extract<TaskSandboxReleaseReceipt,{outcome:"completed"}>{
+  return{outcome:"completed",keyDisposition:"retire",taskId,runId};
+}
+
 function sandboxRetryableEnvelope(value:unknown):SandboxRetryableErrorEnvelope|null{
   if(!isUnknownRecord(value)||!isUnknownRecord(value.error))return null;
   const error=value.error;
@@ -2999,6 +3117,7 @@ function normalizeIdempotencyKey(value:string|undefined):string{
 }
 
 function canonicalRequestHash(value:unknown):string{return createHash("sha256").update(canonicalJson(value),"utf8").digest("base64url");}
+function runtimeConfigHash(value:string):string{return`sha256:${createHash("sha256").update(value,"utf8").digest("hex")}`;}
 function canonicalJson(value:unknown):string{
   if(value===null||typeof value==="string"||typeof value==="boolean")return JSON.stringify(value);
   if(typeof value==="number"){if(!Number.isFinite(value))throw new ProductError("Task request contains a non-finite number",400);return JSON.stringify(value);}
@@ -3434,8 +3553,9 @@ async function waitForPodReady(
   namespace: string,
   podName: string,
   labels: Record<string, string>,
+  expectedPodUid:string|undefined,
   signal?:AbortSignal
-): Promise<void> {
+): Promise<{podUid:string;podIp:string}> {
   const timeoutMs = Math.max(0, live.readinessTimeoutMs ?? 60_000);
   const pollMs = Math.max(1, live.readinessPollMs ?? 1000);
   const sleep = live.sleep ?? defaultSleep;
@@ -3461,15 +3581,23 @@ async function waitForPodReady(
       continue;
     }
     elapsedMs += Date.now() - requestStartedAt;
-    switch (readiness) {
-      case "ready":
-        return;
-      case "failed":
-        throw new ProductError("Sandbox pod failed before readiness", 502);
+    if(typeof readiness==="object"){
+      if(expectedPodUid&&readiness.podUid!==expectedPodUid){
+        throw new ProductError("Sandbox Pod UID changed during readiness",409,"sandbox_cleanup_intent_conflict");
+      }
+      if(readiness.state==="ready"&&readiness.podIp)return{podUid:readiness.podUid,podIp:readiness.podIp};
+      if(readiness.state==="failed")throw new ProductError("Sandbox pod failed before readiness",502);
+      if(elapsedMs>=timeoutMs)throw new ProductError("Timed out waiting for sandbox pod readiness",504);
+      const delayMs=Math.min(pollMs,timeoutMs-elapsedMs);
+      if(delayMs>0)await sleep(delayMs);
+      elapsedMs+=delayMs;
+      continue;
+    }
+    switch(readiness){
       case "fence_mismatch":
-        throw new ProductError("Sandbox pod readiness fence mismatch", 500);
-      case "pending":
-      case "not_found": {
+        throw new ProductError("Sandbox pod readiness fence mismatch",409,"sandbox_cleanup_intent_conflict");
+      case "not_found":{
+        if(expectedPodUid)throw new ProductError("Recorded sandbox Pod is missing",409,"sandbox_cleanup_intent_conflict");
         if (elapsedMs >= timeoutMs) {
           throw new ProductError("Timed out waiting for sandbox pod readiness", 504);
         }
@@ -3482,6 +3610,31 @@ async function waitForPodReady(
       }
     }
   }
+}
+
+async function observeSandboxStartupIdentity(
+  live:TaskLiveSandboxConfig,
+  run:PersistedSandboxRunState,
+  labels:Record<string,string>,
+  signal?:AbortSignal,
+  requireReady=false
+):Promise<{podUid:string;podIp?:string}|null>{
+  const pod=await live.port.getPodReadiness(run.namespace,run.resourceNames.pod,labels,signal);
+  if(pod==="not_found")return null;
+  if(pod==="fence_mismatch")throw new ProductError("Sandbox Pod identity fence mismatch",409,"sandbox_cleanup_intent_conflict");
+  if(run.startupPodUid&&pod.podUid!==run.startupPodUid){
+    throw new ProductError("Sandbox Pod UID was replaced",409,"sandbox_cleanup_intent_conflict");
+  }
+  if(pod.state==="failed")throw new ProductError("Sandbox pod failed before readiness",502);
+  const config=await live.port.getConfigMapData(run.namespace,run.startupConfigMapName!,labels,signal);
+  if(config==="not_found")return null;
+  if(config==="fence_mismatch")throw new ProductError("Sandbox ConfigMap identity fence mismatch",409,"sandbox_cleanup_intent_conflict");
+  const bytes=config.data["botified-config.yaml"];
+  if(typeof bytes!=="string"||runtimeConfigHash(bytes)!==run.startupConfigHash){
+    throw new ProductError("Sandbox ConfigMap bytes do not match persisted identity",409,"sandbox_cleanup_intent_conflict");
+  }
+  if(requireReady&&(pod.state!=="ready"||!pod.podIp))return null;
+  return{podUid:pod.podUid,...(pod.podIp?{podIp:pod.podIp}:{})};
 }
 
 async function waitForBotifiedServiceReady(

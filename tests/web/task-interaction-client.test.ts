@@ -1,11 +1,33 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { apiClient, taskTerminalWebSocketUrlForApiBase } from "../../src/lib/api/client.ts";
+import { apiClient, restoredTaskReleaseTargetDisposition, taskTerminalWebSocketUrlForApiBase } from "../../src/lib/api/client.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 describe("task interaction API client", () => {
+  it("retires a restored Release target after the canonical Task advances to a new Run",()=>{
+    assert.equal(restoredTaskReleaseTargetDisposition("run_new","run_old"),"retire");
+    assert.equal(restoredTaskReleaseTargetDisposition("run_old","run_old"),"replay");
+  });
+
+  it("parses retained and final typed Release receipts for the exact target",async()=>{
+    const request={expectedRunId:"run_1"};
+    globalThis.fetch=async()=>Response.json({
+      outcome:"accepted_in_progress",keyDisposition:"retain",taskId:"task_1",runId:"run_1"
+    },{status:202});
+    assert.deepEqual(await apiClient.releaseTaskSandbox("task_1",request,"release-key"),{
+      outcome:"accepted_in_progress",keyDisposition:"retain",taskId:"task_1",runId:"run_1"
+    });
+
+    globalThis.fetch=async()=>Response.json({
+      outcome:"completed",keyDisposition:"retire",taskId:"task_1",runId:"run_1"
+    },{status:200});
+    assert.deepEqual(await apiClient.releaseTaskSandbox("task_1",request,"release-key"),{
+      outcome:"completed",keyDisposition:"retire",taskId:"task_1",runId:"run_1"
+    });
+  });
+
   it("builds terminal sockets from both same-origin and absolute development API bases", () => {
     assert.equal(
       taskTerminalWebSocketUrlForApiBase("/app/api/v1", "task/1", "run/1", "https://agentsmith.localhost/app/tasks"),

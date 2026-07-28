@@ -971,7 +971,12 @@ export class PostgresProductStore implements ProductStore {
       await terminalizeTerminalStartOwnerWithClient(client,input.taskId,run,input.activatedAt);
       return{kind:"already_running" as const,task:mapTask(task),run};
     }
-    if(run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.startupClaimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.activatedAt>input.actionDeadlineAt||task.deleted_at!==null||task.archived_at!==null){
+    if(run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.startupClaimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.activatedAt>input.actionDeadlineAt||task.deleted_at!==null||task.archived_at!==null||
+      run.startupConfigMapName!==input.expectedConfigMapName||
+      run.startupConfigHash!==input.expectedConfigHash||
+      run.resourceNames.configMap!==run.startupConfigMapName||
+      run.startupPodUid!==input.expectedPodUid||
+      run.startupPodIp!==input.expectedPodIp){
       return{kind:"conflict" as const};
     }
     const activatedRun={...run,state:"active" as const,startedAt:run.startedAt??input.activatedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,fencingToken:run.fencingToken+1,updatedAt:input.activatedAt};
@@ -1003,6 +1008,14 @@ export class PostgresProductStore implements ProductStore {
     await terminalizeTerminalStartOwnerWithClient(client,current.taskId,input.run,input.run.updatedAt);
     await client.query("insert into sandbox_usage_settlements (run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,started_at,released_at,duration_seconds,cpu_request_millis,memory_request_bytes,cpu_limit_millis,memory_limit_bytes,release_reason) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",[input.settlement.runId,input.settlement.workspaceId,input.settlement.projectId,input.settlement.taskId,input.settlement.fileLibraryId,input.settlement.startedByUserId,input.settlement.startedAt,input.settlement.releasedAt,input.settlement.durationSeconds,input.settlement.resources.cpuRequestMillis,input.settlement.resources.memoryRequestBytes,input.settlement.resources.cpuLimitMillis,input.settlement.resources.memoryLimitBytes,input.settlement.releaseReason]);
     await updateSandboxRunWithClient(client,input.run);
+    if(input.releaseReceipt){
+      await client.query(
+        `update task_idempotency_records
+            set status='completed',response_status=$3,response_body=$4::jsonb,updated_at=$5
+          where project_id=$1 and operation='release-sandbox' and resource_id=$2 and status='in_progress'`,
+        [input.run.projectId,input.runId,input.releaseReceipt.responseStatus,JSON.stringify(input.releaseReceipt.responseBody),input.releaseReceipt.updatedAt]
+      );
+    }
     await setAuthoritativeActiveTaskUsageWithClient(client,task.project_id,input.run.updatedAt);await insertAuditEventWithClient(client,input.auditEvent);return"applied" as const;
   })}
   async failSandboxRun(input:SandboxRunFailureInput):Promise<PersistedSandboxRunState|null>{return transaction(this.pool,async(client)=>{
@@ -1051,6 +1064,56 @@ export class PostgresProductStore implements ProductStore {
       return ready;
     });
   }
+  async initializeTaskSandboxStartupConfig(input:import("../../ports/src/store.js").InitializeTaskSandboxStartupConfigInput):Promise<PersistedSandboxRunState|null>{
+    const observed=await this.sandboxRuns.get(input.runId);if(!observed)return null;
+    return transaction(this.pool,async(client)=>{
+      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+      const run=await selectSandboxRunWithClient(client,input.runId,true);
+      if(
+        !task||!run||task.current_run_id!==run.runId||!sameTaskRunScopeRow(task,run)||
+        run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||
+        input.startupClaimToken!==undefined&&run.startupClaimToken!==input.startupClaimToken
+      )return null;
+      if(run.startupConfigMapName||run.startupConfigHash){
+        return run.startupConfigMapName===input.configMapName&&run.startupConfigHash===input.configHash?run:null;
+      }
+      if(!input.configMapName||!input.configHash)return null;
+      const initialized={
+        ...run,
+        resourceNames:{...run.resourceNames,configMap:input.configMapName},
+        startupConfigMapName:input.configMapName,
+        startupConfigHash:input.configHash,
+        updatedAt:input.initializedAt
+      };
+      await updateSandboxRunWithClient(client,initialized);
+      return initialized;
+    });
+  }
+  async recordTaskSandboxStartupPod(input:import("../../ports/src/store.js").RecordTaskSandboxStartupPodInput):Promise<PersistedSandboxRunState|null>{
+    const observed=await this.sandboxRuns.get(input.runId);if(!observed)return null;
+    return transaction(this.pool,async(client)=>{
+      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+      const run=await selectSandboxRunWithClient(client,input.runId,true);
+      if(
+        !task||!run||task.current_run_id!==run.runId||!sameTaskRunScopeRow(task,run)||
+        run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||
+        input.startupClaimToken!==undefined&&run.startupClaimToken!==input.startupClaimToken||
+        run.startupConfigMapName!==input.expectedConfigMapName||
+        run.startupConfigHash!==input.expectedConfigHash||!input.podUid
+      )return null;
+      if(run.resourceNames.configMap!==run.startupConfigMapName)return null;
+      if(run.startupPodUid&&run.startupPodUid!==input.podUid)return null;
+      if(run.startupPodIp&&run.startupPodIp!==input.podIp)return null;
+      const verified={
+        ...run,
+        startupPodUid:input.podUid,
+        startupPodIp:run.startupPodIp??input.podIp,
+        updatedAt:input.observedAt
+      };
+      await updateSandboxRunWithClient(client,verified);
+      return verified;
+    });
+  }
   async claimSandboxStartup(input:SandboxStartupOperationInput):Promise<import("../../ports/src/store.js").SandboxStartupClaimResult>{
     const observed=await this.sandboxRuns.get(input.runId);
     if(!observed)return{kind:"stale"};
@@ -1091,6 +1154,17 @@ export class PostgresProductStore implements ProductStore {
       const completed={...run,startupLeaseExpiresAt:input.leaseExpiresAt,startupActionDeadlineAt:null,updatedAt:input.completedAt};
       await updateSandboxRunWithClient(client,completed);
       return completed;
+    });
+  }
+  async recoverSandboxStartupAction(input:import("../../ports/src/store.js").RecoverSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>{
+    const observed=await this.sandboxRuns.get(input.runId);if(!observed)return null;
+    return transaction(this.pool,async(client)=>{
+      const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+      const run=await selectSandboxRunWithClient(client,input.runId,true);
+      if(!task||!run||task.current_run_id!==run.runId||!sameTaskRunScopeRow(task,run)||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt)return null;
+      const recovered={...run,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,updatedAt:input.recoveredAt};
+      await updateSandboxRunWithClient(client,recovered);
+      return recovered;
     });
   }
   async drainSandboxStartupAction(input:import("../../ports/src/store.js").DrainSandboxStartupActionInput):Promise<PersistedSandboxRunState|null>{
@@ -1903,7 +1977,7 @@ export class PostgresProductStore implements ProductStore {
     const claim=(await client.query<TaskIdempotencyRow>("select * from task_idempotency_records where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 for update",[idem.actorId,idem.projectId,idem.operation,idem.key])).rows[0];
     if(
       !task||task.deleted_at||task.project_id!==idem.projectId||task.current_run_id!==input.runId||
-      !current||!sameTaskRunScopeRow(task,current)||!sameRunIdentity(current,input.run)||
+      !current||!sameTaskRunScopeRow(task,current)||
       !claim||claim.status!=="in_progress"||claim.request_hash!==idem.requestHash||
       claim.claim_token!==idem.claimToken||claim.resource_id!==input.runId
     )return"conflict" as const;
@@ -1926,16 +2000,34 @@ export class PostgresProductStore implements ProductStore {
         :null;
     }).filter((control):control is NonNullable<typeof control>=>control!==null);
     const already=current.state==="release_requested"||current.state==="released";
+    if(current.fencingToken!==input.expectedFencingToken)return"conflict" as const;
     if(current.state!=="released"){
-      if(current.fencingToken!==input.expectedFencingToken||input.run.runId!==input.runId||input.run.taskId!==input.taskId||input.run.state!=="release_requested"||input.run.fencingToken!==current.fencingToken+1)return"conflict" as const;
-      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,input.run,idem.updatedAt);
-      await updateSandboxRunWithClient(client,{
-        ...input.run,
-        startupActionDeadlineAt:current.startupActionDeadlineAt,
-        ...(current.startupActionDeadlineAt?{startupClaimToken:current.startupClaimToken,startupLeaseExpiresAt:current.startupLeaseExpiresAt}:{})
-      });
+      const requested:PersistedSandboxRunState={
+        ...current,
+        state:"release_requested",
+        releaseReason:current.releaseReason??(current.state==="failed"?"failed":"requested"),
+        releaseRequestedAt:current.releaseRequestedAt??input.intent.requestedAt,
+        ...(!current.startupActionDeadlineAt?{startupClaimToken:null,startupLeaseExpiresAt:null}:{}),
+        cleanupClaimedAt:null,
+        lastCleanupError:null,
+        fencingToken:current.fencingToken+1,
+        updatedAt:input.intent.requestedAt
+      };
+      await terminalizeTerminalStartOwnerWithClient(client,input.taskId,requested,idem.updatedAt);
+      await updateSandboxRunWithClient(client,requested);
     }else{
       await terminalizeTerminalStartOwnerWithClient(client,input.taskId,current,idem.updatedAt);
+      const completed=await client.query(
+        `update task_idempotency_records
+            set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9
+          where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4
+            and request_hash=$5 and claim_token=$6 and status='in_progress'`,
+        [
+          idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,
+          idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt
+        ]
+      );
+      if(completed.rowCount!==1)throw new Error("Released Sandbox Run lost its locked Release receipt");
     }
     for(const control of controls){
       const result=await client.query(
@@ -1951,7 +2043,6 @@ export class PostgresProductStore implements ProductStore {
       );
       if(result.rowCount!==1)throw new Error("Exact Task control supersession lost its locked receipt");
     }
-    await client.query("update task_idempotency_records set status='completed',response_status=$7,response_body=$8::jsonb,updated_at=$9 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4 and request_hash=$5 and claim_token=$6 and status='in_progress'",[idem.actorId,idem.projectId,idem.operation,idem.key,idem.requestHash,idem.claimToken,idem.responseStatus,JSON.stringify(idem.responseBody),idem.updatedAt]);
     return already?"already_requested" as const:"applied" as const;
   })}
   async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{const result=await this.pool.query("update task_idempotency_records set status='completed',response_status=$4,response_body=$5::jsonb,updated_at=$6 where project_id=$1 and operation=$2 and resource_id=$3 and status='in_progress'",[input.projectId,input.operation,input.resourceId,input.responseStatus,JSON.stringify(input.responseBody),input.updatedAt]);return result.rowCount??0;}
@@ -2721,7 +2812,7 @@ const SANDBOX_RUN_COLUMNS = [
   "run_id","workspace_id","project_id","task_id","file_library_id","started_by_user_id","state",
   "namespace","image","pvc_name","project_sub_path","file_library_root_sub_path","botified_port",
   "resource_names","service_key_secret_ref","directories","resource_limits","resource_snapshot","model_ca",
-  "timeline_cursor","terminal_failure","failure_code","failure_cause","fencing_token","resume_unfinished","startup_ready_at","startup_action_deadline_at","startup_claim_token","startup_lease_expires_at","cleanup_claimed_at",
+  "timeline_cursor","terminal_failure","failure_code","failure_cause","fencing_token","startup_ready_at","startup_config_map_name","startup_config_hash","startup_pod_uid","startup_pod_ip","startup_action_deadline_at","startup_claim_token","startup_lease_expires_at","cleanup_claimed_at",
   "cleanup_attempts","last_cleanup_at","last_cleanup_error","release_reason","started_at","release_requested_at",
   "failed_at","released_at","created_at","updated_at"
 ] as const;
@@ -2733,7 +2824,7 @@ function sandboxRunValues(run:PersistedSandboxRunState):unknown[] {
     JSON.stringify(run.resourceNames),JSON.stringify(run.serviceKeySecretRef),JSON.stringify(run.directories),
     JSON.stringify(run.resourceLimits),JSON.stringify(run.resourceSnapshot),run.modelCa?JSON.stringify(run.modelCa):null,
     run.timelineCursor??null,run.terminalFailure?JSON.stringify(run.terminalFailure):null,run.failureCode,run.failureCause,run.fencingToken,
-    run.resumeUnfinished??false,run.startupReadyAt,run.startupActionDeadlineAt,run.startupClaimToken??null,run.startupLeaseExpiresAt??null,run.cleanupClaimedAt??null,run.cleanupAttempts??0,run.lastCleanupAt??null,
+    run.startupReadyAt,run.startupConfigMapName??null,run.startupConfigHash??null,run.startupPodUid??null,run.startupPodIp??null,run.startupActionDeadlineAt,run.startupClaimToken??null,run.startupLeaseExpiresAt??null,run.cleanupClaimedAt??null,run.cleanupAttempts??0,run.lastCleanupAt??null,
     run.lastCleanupError?JSON.stringify(run.lastCleanupError):null,run.releaseReason??null,run.startedAt,
     run.releaseRequestedAt,run.failedAt,run.releasedAt,run.createdAt,run.updatedAt
   ];
@@ -2938,8 +3029,8 @@ interface SandboxRunRow {
   state:PersistedSandboxRunState["state"];namespace:string;image:string;pvc_name:string;project_sub_path:string;
   file_library_root_sub_path:string;botified_port:number;resource_names:unknown;service_key_secret_ref:unknown;
   directories:unknown;resource_limits:unknown;resource_snapshot:unknown;model_ca:unknown|null;timeline_cursor:string|null;
-  terminal_failure:unknown|null;failure_code:PersistedSandboxRunState["failureCode"];failure_cause:string|null;fencing_token:string|number;resume_unfinished:boolean;
-  startup_ready_at:unknown|null;startup_action_deadline_at:unknown|null;startup_claim_token:string|null;startup_lease_expires_at:unknown|null;cleanup_claimed_at:unknown|null;cleanup_attempts:number;last_cleanup_at:unknown|null;last_cleanup_error:unknown|null;
+  terminal_failure:unknown|null;failure_code:PersistedSandboxRunState["failureCode"];failure_cause:string|null;fencing_token:string|number;
+  startup_ready_at:unknown|null;startup_config_map_name:string|null;startup_config_hash:string|null;startup_pod_uid:string|null;startup_pod_ip:string|null;startup_action_deadline_at:unknown|null;startup_claim_token:string|null;startup_lease_expires_at:unknown|null;cleanup_claimed_at:unknown|null;cleanup_attempts:number;last_cleanup_at:unknown|null;last_cleanup_error:unknown|null;
   release_reason:PersistedSandboxRunState["releaseReason"];started_at:unknown|null;release_requested_at:unknown|null;
   failed_at:unknown|null;released_at:unknown|null;created_at:unknown;updated_at:unknown;
 }
@@ -3239,8 +3330,8 @@ function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
     ...(row.model_ca?{modelCa:asRecord(row.model_ca) as unknown as NonNullable<PersistedSandboxRunState["modelCa"]>}:{}),
     timelineCursor:row.timeline_cursor,
     terminalFailure:row.terminal_failure?asRecord(row.terminal_failure) as unknown as NonNullable<PersistedSandboxRunState["terminalFailure"]>:null,
-    failureCode:row.failure_code??null,failureCause:row.failure_cause,fencingToken:Number(row.fencing_token),resumeUnfinished:row.resume_unfinished,
-    startupReadyAt:row.startup_ready_at?toIso(row.startup_ready_at):null,startupActionDeadlineAt:row.startup_action_deadline_at?toIso(row.startup_action_deadline_at):null,startupClaimToken:row.startup_claim_token,startupLeaseExpiresAt:row.startup_lease_expires_at?toIso(row.startup_lease_expires_at):null,
+    failureCode:row.failure_code??null,failureCause:row.failure_cause,fencingToken:Number(row.fencing_token),
+    startupReadyAt:row.startup_ready_at?toIso(row.startup_ready_at):null,startupConfigMapName:row.startup_config_map_name,startupConfigHash:row.startup_config_hash,startupPodUid:row.startup_pod_uid,startupPodIp:row.startup_pod_ip,startupActionDeadlineAt:row.startup_action_deadline_at?toIso(row.startup_action_deadline_at):null,startupClaimToken:row.startup_claim_token,startupLeaseExpiresAt:row.startup_lease_expires_at?toIso(row.startup_lease_expires_at):null,
     cleanupClaimedAt:row.cleanup_claimed_at?toIso(row.cleanup_claimed_at):null,cleanupAttempts:row.cleanup_attempts,
     lastCleanupAt:row.last_cleanup_at?toIso(row.last_cleanup_at):null,
     lastCleanupError:row.last_cleanup_error?asRecord(row.last_cleanup_error) as unknown as NonNullable<PersistedSandboxRunState["lastCleanupError"]>:null,
@@ -3341,7 +3432,9 @@ function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRun
     left.fileLibraryId===right.fileLibraryId&&left.startedByUserId===right.startedByUserId&&left.namespace===right.namespace&&
     left.image===right.image&&left.pvcName===right.pvcName&&left.projectSubPath===right.projectSubPath&&
     left.fileLibraryRootSubPath===right.fileLibraryRootSubPath&&left.botifiedPort===right.botifiedPort&&left.startedAt===right.startedAt&&
-    left.createdAt===right.createdAt&&(left.resumeUnfinished??false)===(right.resumeUnfinished??false)&&
+    left.startupConfigMapName===right.startupConfigMapName&&left.startupConfigHash===right.startupConfigHash&&
+    left.startupPodUid===right.startupPodUid&&left.startupPodIp===right.startupPodIp&&
+    left.createdAt===right.createdAt&&
     strictStructuralEqual(left.resourceNames,right.resourceNames)&&
     strictStructuralEqual(left.serviceKeySecretRef,right.serviceKeySecretRef)&&
     strictStructuralEqual(left.directories,right.directories)&&

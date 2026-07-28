@@ -1,9 +1,145 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
-import { renderSandboxResources } from "../../packages/sandbox-controller/src/manifestRenderer.js";
+import { renderSandboxResources, sandboxRuntimeConfigMapName } from "../../packages/sandbox-controller/src/manifestRenderer.js";
+import {
+  reconcileSandboxRuns,
+  sandboxIdentityLabels,
+  type SandboxRunState
+} from "../../packages/sandbox-controller/src/reconciler.js";
 
 describe("sandbox manifest renderer", () => {
+  it("binds the Pod to the exact content-addressed immutable ConfigMap", () => {
+    const configHash="sha256:4f2acbb10d";
+    const configMapName=sandboxRuntimeConfigMapName("asl-task-t1-config",configHash);
+    const rendered = renderSandboxResources({
+      namespace: "agentsmith",
+      workspaceId: "w1",
+      projectId: "p1",
+      taskId: "t1",
+      runId: "r1",
+      image: "example/botified-runner@sha256:abc",
+      pvcName: "agentsmith-lite-files",
+      projectSubPath: "workspaces/w1/projects/p1",
+      fileLibraryRootSubPath: "libraries/library_one/home",
+      botifiedPort: 3099,
+      serviceKeySecretName: "botified-t1",
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi",
+      resourceNames:{
+        configMap:configMapName
+      }
+    });
+
+    assert.equal(configMapName,"asl-task-t1-config-4f2acbb10d");
+    const configMap=rendered.resources.find((candidate)=>candidate.kind==="ConfigMap");
+    const pod=rendered.resources.find((candidate)=>candidate.kind==="Pod");
+    assert.ok(configMap&&pod);
+    assert.equal(configMap.metadata.name,configMapName);
+    assert.equal(configMap.metadata.annotations,undefined);
+    assert.equal(configMap.immutable,true);
+    const volumes=(pod.spec as {volumes:Array<{name:string;configMap?:{name:string}}>}).volumes;
+    assert.equal(volumes.find((volume)=>volume.name==="botified-config")?.configMap?.name,configMapName);
+    assert.equal((pod.spec as {restartPolicy:string}).restartPolicy,"Never");
+  });
+
+  it("fails the recorded Run for cleanup without recreating or adopting a missing or replaced Pod", () => {
+    const run=sandboxRun({startupPodUid:"pod-uid-original"});
+    const missing=reconcileSandboxRuns({
+      namespace:run.namespace,
+      desiredRuns:[run],
+      observedResources:[],
+      now:new Date(run.updatedAt)
+    });
+    assert.equal(
+      missing.actions.some((action)=>action.type==="create_resource"&&action.kind==="Pod"),
+      false
+    );
+    assert.equal(missing.errors.length,0);
+    assert.equal(
+      missing.actions.some((action)=>
+        action.type==="store_run_state"&&action.run.state==="failed"&&
+        action.run.releaseReason==="failed"&&action.run.releaseRequestedAt===run.updatedAt
+      ),
+      true
+    );
+    const missingFailed=missing.actions.find((action)=>action.type==="store_run_state"&&action.run.state==="failed");
+    assert.ok(missingFailed?.type==="store_run_state");
+    const missingCleanup=reconcileSandboxRuns({
+      namespace:run.namespace,
+      desiredRuns:[missingFailed.run],
+      observedResources:[],
+      now:new Date(run.updatedAt)
+    });
+    assert.equal(
+      missingCleanup.actions.some((action)=>action.type==="store_run_state"&&action.reason==="cleanup_complete"),
+      true
+    );
+
+    const replacedPod=renderSandboxResources({
+      namespace:run.namespace,
+      workspaceId:run.workspaceId,
+      projectId:run.projectId,
+      taskId:run.taskId,
+      runId:run.runId,
+      image:run.image,
+      pvcName:run.pvcName,
+      projectSubPath:run.projectSubPath,
+      fileLibraryRootSubPath:run.fileLibraryRootSubPath,
+      botifiedPort:run.botifiedPort,
+      serviceKeySecretName:run.serviceKeySecretRef.name,
+      cpuRequest:run.resourceLimits.cpuRequest,
+      memoryRequest:run.resourceLimits.memoryRequest,
+      cpuLimit:run.resourceLimits.cpuLimit,
+      memoryLimit:run.resourceLimits.memoryLimit,
+      resourceNames:run.resourceNames
+    }).resources.find((resource)=>resource.kind==="Pod");
+    assert.ok(replacedPod);
+    replacedPod.metadata.uid="pod-uid-replacement";
+    replacedPod.metadata.labels=sandboxIdentityLabels(run);
+
+    const replaced=reconcileSandboxRuns({
+      namespace:run.namespace,
+      desiredRuns:[run],
+      observedResources:[replacedPod],
+      now:new Date(run.updatedAt)
+    });
+    assert.equal(
+      replaced.actions.some((action)=>
+        (action.type==="create_resource"||action.type==="adopt_resource")&&action.kind==="Pod"
+      ),
+      false
+    );
+    assert.equal(replaced.errors.length,0);
+    assert.equal(
+      replaced.actions.some((action)=>
+        action.type==="store_run_state"&&action.run.state==="failed"&&
+        action.run.releaseReason==="failed"
+      ),
+      true
+    );
+    const replacedFailed=replaced.actions.find((action)=>action.type==="store_run_state"&&action.run.state==="failed");
+    assert.ok(replacedFailed?.type==="store_run_state");
+    const replacementCleanup=reconcileSandboxRuns({
+      namespace:run.namespace,
+      desiredRuns:[replacedFailed.run],
+      observedResources:[replacedPod],
+      now:new Date(run.updatedAt)
+    });
+    assert.equal(
+      replacementCleanup.actions.some((action)=>action.type==="delete_resource"&&action.kind==="Pod"),
+      true
+    );
+    assert.equal(
+      replacementCleanup.actions.some((action)=>
+        (action.type==="create_resource"||action.type==="adopt_resource")&&action.kind==="Pod"
+      ),
+      false
+    );
+  });
+
   it("renders Kubernetes-safe resource names while preserving original ids in labels", () => {
     const taskId = "task_2323854661afae8194cd";
     const runId = "run_2323854661afae8194cd";
@@ -492,4 +628,54 @@ function assertDnsLabel(name: string): void {
   assert.match(name, /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/, `${name} should be a DNS label`);
   assert.ok(name.length <= 63, `${name} should fit in a DNS label`);
   assert.equal(name.includes("_"), false, `${name} should not contain underscores`);
+}
+
+function sandboxRun(overrides:Partial<SandboxRunState>={}):SandboxRunState{
+  return{
+    workspaceId:"w1",
+    projectId:"p1",
+    taskId:"t1",
+    runId:"r1",
+    namespace:"agentsmith",
+    state:"starting",
+    image:"example/botified-runner@sha256:abc",
+    pvcName:"agentsmith-lite-files",
+    projectSubPath:"workspaces/w1/projects/p1",
+    fileLibraryRootSubPath:"libraries/library_one/home",
+    fileLibraryId:"library_one",
+    startedByUserId:"user-1",
+    startedAt:null,
+    botifiedPort:3099,
+    resourceNames:{
+      pod:"asl-task-t1",
+      service:"asl-task-t1",
+      configMap:"asl-task-t1-config-4f2acbb10d",
+      secret:"asl-botified-t1",
+      serviceAccount:"asl-task-t1",
+      networkPolicy:"asl-task-t1"
+    },
+    serviceKeySecretRef:{name:"asl-botified-t1",key:"BOTIFIED_SERVICE_KEY"},
+    directories:{libraryHome:"/workspace/task/home",botified:"/workspace/task/botified"},
+    resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},
+    resourceSnapshot:{
+      cpuRequestMillis:"250",
+      memoryRequestBytes:"536870912",
+      cpuLimitMillis:"1000",
+      memoryLimitBytes:"1073741824"
+    },
+    failureCode:null,
+    failureCause:null,
+    fencingToken:1,
+    cleanupClaimedAt:null,
+    cleanupAttempts:0,
+    lastCleanupAt:null,
+    lastCleanupError:null,
+    releaseReason:null,
+    releaseRequestedAt:null,
+    failedAt:null,
+    releasedAt:null,
+    createdAt:"2026-07-27T00:00:00.000Z",
+    updatedAt:"2026-07-27T00:00:00.000Z",
+    ...overrides
+  };
 }

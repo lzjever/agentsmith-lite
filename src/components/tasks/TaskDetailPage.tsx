@@ -4,7 +4,7 @@ import { Archive, ArrowLeft, Info, RefreshCw, TerminalSquare } from "lucide-reac
 import { Banner, Button as AstryxButton, Dialog, DialogHeader, Heading, IconButton, Tab, TabList, Text } from "@astryxdesign/core";
 import Link from "next/link";
 import { useCallback, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { ApiError, apiClient, isReadOnlyMutationError, taskCommandOutcomeError, type Task, type TaskArtifact, type TaskArtifactKind, type TaskInteractionItem, type TaskInteractionSnapshot } from "../../lib/api/client";
+import { ApiError, apiClient, isReadOnlyMutationError, restoredTaskReleaseTargetDisposition, taskCommandOutcomeError, type Task, type TaskArtifact, type TaskArtifactKind, type TaskInteractionItem, type TaskInteractionSnapshot } from "../../lib/api/client";
 import { appPath } from "../../lib/navigation/app-path";
 import { useCurrentUser } from "../app-shell/current-user";
 import { DocumentTitle } from "../layout/DocumentTitle";
@@ -427,12 +427,20 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
 
   async function releaseSandbox(expectedRunId:string,restored?:TaskSandboxReleaseCommandMetadata) {
     const detail = taskPresentationRef.current.presentation;
-    if (!detail?.capabilities.releaseSandbox || releasing || deleting || lifecycleBusy) return;
-    const fence = captureCommandFence();
-    const request={expectedRunId};
+    if ((!restored&&!detail?.capabilities.releaseSandbox) || releasing || deleting || lifecycleBusy) return;
+    const targetRunId=restored?.request.expectedRunId??expectedRunId;
+    const request={expectedRunId:targetRunId};
     const fingerprint=JSON.stringify(request);
     const identity={userId:currentUser.id,projectId,taskId};
     if(restored&&restored.fingerprint!==fingerprint)return;
+    if(restored&&restoredTaskReleaseTargetDisposition(detail?.sandboxState.runId??null,targetRunId)==="retire"){
+      mutationKeys.restore("task-sandbox-release",taskId,restored);
+      retireTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",identity,restored);
+      mutationKeys.canonicalAbsorbed("task-sandbox-release",taskId,restored);
+      if(mounted.current)await requestCanonicalRefresh(true);
+      return;
+    }
+    const fence = captureCommandFence();
     if(restored)mutationKeys.restore("task-sandbox-release",taskId,restored);
     const attempt=mutationKeys.fingerprintKey("task-sandbox-release",taskId,fingerprint);
     setReleasing(true);
@@ -446,6 +454,10 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       if(outcome.outcome==="rejected_before_acceptance"){
         retireTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",identity,attempt);
         throw taskCommandOutcomeError(outcome);
+      }
+      if(outcome.outcome==="accepted_in_progress"){
+        if(mounted.current)await requestCanonicalRefresh(true);
+        return;
       }
       retireTaskCommandMetadata(taskDraftStorage(),"task-sandbox-release",identity,attempt);
       mutationKeys.canonicalAbsorbed("task-sandbox-release",taskId,attempt);
@@ -482,13 +494,6 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
     if(metadata.fingerprint!==JSON.stringify(metadata.request)){
       clearTaskCommandMetadata(storage,"task-sandbox-release",identity);
       mutationKeys.clear("task-sandbox-release");
-      return;
-    }
-    const sandbox=taskPresentation.presentation.sandboxState;
-    if(sandbox.runId!==metadata.request.expectedRunId||["release_requested","released"].includes(sandbox.state)){
-      retireTaskCommandMetadata(storage,"task-sandbox-release",identity,metadata);
-      mutationKeys.restore("task-sandbox-release",taskId,metadata);
-      mutationKeys.canonicalAbsorbed("task-sandbox-release",taskId,metadata);
       return;
     }
     void releaseSandbox(metadata.request.expectedRunId,metadata).catch(()=>undefined);

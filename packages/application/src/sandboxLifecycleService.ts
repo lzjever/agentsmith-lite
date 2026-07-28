@@ -506,7 +506,15 @@ export class SandboxLifecycleService {
     const startedAt=current.startedAt;
     const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
     const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
-    const result=await this.store.completeSandboxRunRelease({runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,auditEvent:{id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},createdAt:releasedAt}});
+    const result=await this.store.completeSandboxRunRelease({
+      runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,
+      auditEvent:{id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},createdAt:releasedAt},
+      releaseReceipt:{
+        responseStatus:200,
+        responseBody:{outcome:"completed",keyDisposition:"retire",taskId:current.taskId,runId:current.runId},
+        updatedAt:releasedAt
+      }
+    });
     if(result==="conflict")return null;
     try{
       await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
@@ -548,7 +556,7 @@ export class SandboxLifecycleService {
   private async persistTerminalFailureTransition(
     actionRun: SandboxRunState
   ): Promise<{ previous: PersistedSandboxRunState; stored: PersistedSandboxRunState } | "skipped" | "conflict"> {
-    if (!actionRun.terminalFailure) {
+    if (!actionRun.terminalFailure && actionRun.failureCode!=="startup_failed") {
       return "skipped";
     }
     const current = await this.store.sandboxRuns.get(actionRun.runId);
@@ -559,10 +567,10 @@ export class SandboxLifecycleService {
     const stored=await this.store.failSandboxRun({
       runId:current.runId,
       expectedFencingToken:current.fencingToken,
-      code:"runner_failed",
-      message:"The sandbox runtime stopped unexpectedly. Retry release to remove its resources.",
+      code:actionRun.failureCode==="startup_failed"?"startup_failed":"runner_failed",
+      message:actionRun.failureCause??"The sandbox runtime stopped unexpectedly. Retry release to remove its resources.",
       failedAt:actionRun.failedAt??now,
-      terminalFailure:structuredClone(actionRun.terminalFailure),
+      ...(actionRun.terminalFailure?{terminalFailure:structuredClone(actionRun.terminalFailure)}:{}),
       auditEvent:{id:`audit_sandbox_failed_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,...(endpointId?{endpointId}:{})},createdAt:now}
     });
     if(!stored)return "conflict";
@@ -578,7 +586,7 @@ function isActiveRun(run: PersistedSandboxRunState): boolean {
 }
 
 function isTerminalFailureEligibleRun(run: PersistedSandboxRunState, actionRun: SandboxRunState): boolean {
-  return Boolean(actionRun.terminalFailure) && (run.state === "starting" || run.state === "active");
+  return Boolean(actionRun.terminalFailure||actionRun.failureCode==="startup_failed") && (run.state === "starting" || run.state === "active");
 }
 
 function releaseReason(run:PersistedSandboxRunState):import("../../contracts/src/api.js").SandboxReleaseReason{return run.releaseReason??(run.state==="failed"?"failed":"cleanup")}

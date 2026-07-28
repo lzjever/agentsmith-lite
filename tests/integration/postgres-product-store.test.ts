@@ -1387,7 +1387,12 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       await blocker.query("select id from agent_tasks where id=$1 for update",[task.id]);
       const activationOperation=activationStore.activateTaskSandboxRun({
         taskId:task.id,runId:starting.runId,expectedFencingToken:starting.fencingToken,
-        startupClaimToken,actionDeadlineAt,activatedAt:"2026-07-23T00:02:00.000Z",
+        startupClaimToken,actionDeadlineAt,
+        expectedConfigMapName:starting.startupConfigMapName!,
+        expectedConfigHash:starting.startupConfigHash!,
+        expectedPodUid:starting.startupPodUid!,
+        expectedPodIp:starting.startupPodIp!,
+        activatedAt:"2026-07-23T00:02:00.000Z",
         auditEvent:{
           id:"audit_activation_admission_started",projectId:task.projectId,actorId:null,
           subjectUserId:"user_atomic",action:"sandbox.started",status:"accepted",
@@ -1481,13 +1486,17 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal((await store.beginTaskIdempotency(releaseClaim)).kind,"claimed");
     const requested={...first.run,state:"release_requested" as const,releaseReason:"requested" as const,releaseRequestedAt:releaseClaim.now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,fencingToken:first.run.fencingToken+1,updatedAt:releaseClaim.now};
     assert.equal(await store.requestTaskSandboxRelease({
-      runId:first.run.runId,taskId:task.id,expectedFencingToken:first.run.fencingToken,run:requested,
+      runId:first.run.runId,taskId:task.id,expectedFencingToken:first.run.fencingToken,intent:{requestedAt:releaseClaim.now},
       idempotency:{
         actorId:releaseClaim.actorId,projectId:releaseClaim.projectId,operation:releaseClaim.operation,
         key:releaseClaim.key,requestHash:releaseClaim.requestHash,claimToken:releaseClaim.claimToken,
-        responseStatus:200,responseBody:{released:true},updatedAt:releaseClaim.now
+        responseStatus:202,responseBody:{outcome:"accepted_in_progress",keyDisposition:"retain",taskId:task.id,runId:first.run.runId},updatedAt:releaseClaim.now
       }
     }),"applied");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:releaseClaim.actorId,projectId:releaseClaim.projectId,operation:releaseClaim.operation,
+      key:releaseClaim.key,requestHash:releaseClaim.requestHash
+    }),{kind:"in_progress",resourceId:first.run.runId});
     const terminalReceipt=await store.findTaskIdempotency({
       actorId:firstInput.idempotency.actorId,projectId:firstInput.idempotency.projectId,
       operation:firstInput.idempotency.operation,key:firstInput.idempotency.key,
@@ -1498,6 +1507,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
 
     const releasedAt="2026-07-23T00:03:00.000Z";
     const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+    const finalReleaseReceipt={outcome:"completed",keyDisposition:"retire",taskId:task.id,runId:requested.runId};
     assert.equal(await store.completeSandboxRunRelease({
       runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
       settlement:{
@@ -1511,8 +1521,31 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
         subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
         resourceKind:"sandbox",resourceId:requested.taskId,
         detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:"requested"},createdAt:releasedAt
-      }
+      },
+      releaseReceipt:{responseStatus:200,responseBody:finalReleaseReceipt,updatedAt:releasedAt}
     }),"applied");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:releaseClaim.actorId,projectId:releaseClaim.projectId,operation:releaseClaim.operation,
+      key:releaseClaim.key,requestHash:releaseClaim.requestHash
+    }),{kind:"replay",resourceId:requested.runId,responseStatus:200,responseBody:finalReleaseReceipt});
+    const releasedClaim={
+      ...releaseClaim,key:"terminal-owner-release-after-final",
+      requestHash:"terminal-owner-release-after-final-hash",
+      claimToken:"terminal-owner-release-after-final-claim",now:releasedAt
+    };
+    assert.equal((await store.beginTaskIdempotency(releasedClaim)).kind,"claimed");
+    assert.equal(await store.requestTaskSandboxRelease({
+      runId:released.runId,taskId:task.id,expectedFencingToken:released.fencingToken,intent:{requestedAt:releasedAt},
+      idempotency:{
+        actorId:releasedClaim.actorId,projectId:releasedClaim.projectId,operation:releasedClaim.operation,
+        key:releasedClaim.key,requestHash:releasedClaim.requestHash,claimToken:releasedClaim.claimToken,
+        responseStatus:200,responseBody:finalReleaseReceipt,updatedAt:releasedAt
+      }
+    }),"already_requested");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:releasedClaim.actorId,projectId:releasedClaim.projectId,operation:releasedClaim.operation,
+      key:releasedClaim.key,requestHash:releasedClaim.requestHash
+    }),{kind:"replay",resourceId:released.runId,responseStatus:200,responseBody:finalReleaseReceipt});
     assert.equal((await store.beginTerminalStart(
       terminalInput("second",released,"run_terminal_release_second")
     )).kind,"claimed");
@@ -1552,7 +1585,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
         [claim.actorId,claim.projectId,claim.operation,claim.key]
       );
       const operation=releaseStore.requestTaskSandboxRelease({
-        runId:runA.runId,taskId:task.id,expectedFencingToken:runA.fencingToken,run:runA,
+        runId:runA.runId,taskId:task.id,expectedFencingToken:runA.fencingToken,intent:{requestedAt:at},
         idempotency:{
           actorId:claim.actorId,projectId:claim.projectId,operation:claim.operation,key:claim.key,
           requestHash:claim.requestHash,claimToken:claim.claimToken,responseStatus:200,
@@ -2370,7 +2403,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
          namespace,image,pvc_name,project_sub_path,file_library_root_sub_path,botified_port,
          resource_names,service_key_secret_ref,directories,resource_limits,resource_snapshot,
          model_ca,timeline_cursor,terminal_failure,failure_code,failure_cause,fencing_token,
-         resume_unfinished,startup_ready_at,startup_action_deadline_at,startup_claim_token,
+         startup_ready_at,startup_action_deadline_at,startup_claim_token,
          startup_lease_expires_at,cleanup_claimed_at,cleanup_attempts,last_cleanup_at,last_cleanup_error,
          release_reason,started_at,release_requested_at,failed_at,released_at,created_at,updated_at
        )
@@ -2378,7 +2411,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
               namespace,image,pvc_name,project_sub_path,file_library_root_sub_path,botified_port,
               resource_names,service_key_secret_ref,directories,resource_limits,resource_snapshot,
               model_ca,timeline_cursor,terminal_failure,null,null,1,
-              false,startup_ready_at,null,null,null,null,0,null,null,
+              startup_ready_at,null,null,null,null,0,null,null,
               'requested',started_at,updated_at,null,updated_at,created_at,updated_at
          from sandbox_runs
         where run_id=$1`,
@@ -2453,7 +2486,7 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
   function taskArtifact(id:string,taskId:string,createdAt:string,mediaType:string):PersistedTaskArtifact{return{id,taskId,fileId:`file_${id}`,name:id,bytes:1,mediaType,previewText:null,createdAt};}
   function message(id:string,taskId:string):PersistedTaskMessage{return{id,taskId,actorId:"user_atomic",content:id,deliveryKey:`delivery_${id}`,requestHash:`request_${id}`,claimToken:null,receipt:null,timelineCursor:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,attemptCount:0,nextRetryAt:null,safeError:null,createdAt:at,updatedAt:at,deletedAt:null};}
   function alertRule(id:string,projectId:string):ProjectAlertRule{return{id,projectId,name:id,alertType:"sandbox_failure",metric:"failure_count",condition:"greater_than_or_equal",threshold:1,windowSeconds:3600,scope:{kind:"project"},enabled:false,createdAt:at,updatedAt:at};}
-  function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,startupReadyAt:state==="released"?at:null,startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
+  function run(task:PersistedAgentTask,runId:string,state:"starting"|"released"):PersistedSandboxRunState{return{workspaceId:task.workspaceId,projectId:task.projectId,taskId:task.id,runId,namespace:"agentsmith",state,image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${task.workspaceId}/projects/${task.projectId}`,fileLibraryRootSubPath:`libraries/${task.fileLibraryId}/home`,fileLibraryId:task.fileLibraryId!,startedByUserId:"user_atomic",startedAt:null,startupReadyAt:state==="released"?at:null,startupConfigMapName:`config-${runId}`,startupConfigHash:"sha256:fixture",startupPodUid:`pod-uid-${runId}`,startupPodIp:"10.42.0.17",startupActionDeadlineAt:null,botifiedPort:3099,resourceNames:{pod:`pod-${runId}`,service:`service-${runId}`,configMap:`config-${runId}`,secret:`secret-${runId}`,serviceAccount:`account-${runId}`,networkPolicy:`policy-${runId}`},serviceKeySecretRef:{name:`secret-${runId}`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:state==="released"?"requested":null,releaseRequestedAt:state==="released"?at:null,failedAt:null,releasedAt:state==="released"?at:null,createdAt:at,updatedAt:at};}
   function usageOverviewReadInput(measuredAt:string){const periodStart="2026-06-24T00:00:00.000Z",periodEnd="2026-07-24T00:00:00.000Z";return{projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",selectedEndpointId:null,periodStart,periodEnd,measuredAt}}
 
   async function seedProjectDeletionBusinessData(){

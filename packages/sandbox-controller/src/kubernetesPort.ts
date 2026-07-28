@@ -33,10 +33,17 @@ export interface SandboxKubernetesMutationPort {
   deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch">;
 }
 
-export type PodReadiness = "ready" | "pending" | "failed" | "not_found" | "fence_mismatch";
+export type PodReadiness =
+  | {state:"ready"|"pending"|"failed";podUid:string;podIp?:string}
+  | "not_found" | "fence_mismatch";
+
+export type ConfigMapRead =
+  | {data:Record<string,string>}
+  | "not_found" | "fence_mismatch";
 
 export interface SandboxKubernetesReadinessPort {
   getPodReadiness(namespace: string, name: string, expectedLabels: Record<string, string>, signal?:AbortSignal): Promise<PodReadiness>;
+  getConfigMapData(namespace:string,name:string,expectedLabels:Record<string,string>,signal?:AbortSignal):Promise<ConfigMapRead>;
 }
 
 const FIELD_MANAGER = "agentsmith-lite-sandbox";
@@ -188,16 +195,37 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       return "fence_mismatch";
     }
 
+    const uid=typeof pod.metadata.uid==="string"?pod.metadata.uid:"";
+    if(!uid)return"fence_mismatch";
     const status = asRecord(pod.status);
-    if (status.phase === "Failed") {
-      return "failed";
-    }
     const conditions = Array.isArray(status.conditions) ? status.conditions : [];
     const ready = conditions.some((condition) => {
       const record = asRecord(condition);
       return record.type === "Ready" && record.status === "True";
     });
-    return ready ? "ready" : "pending";
+    return{
+      state:status.phase==="Failed"?"failed":ready?"ready":"pending",
+      podUid:uid,
+      ...(typeof status.podIP==="string"&&status.podIP?{podIp:status.podIP}:{})
+    };
+  }
+
+  async getConfigMapData(namespace:string,name:string,expectedLabels:Record<string,string>,signal?:AbortSignal):Promise<ConfigMapRead>{
+    const response=await this.transport.request({
+      method:"GET",
+      path:resourcePath({kind:"ConfigMap",namespace,name}),
+      headers:{}
+    },signal);
+    if(response.statusCode===404)return"not_found";
+    if(!isSuccess(response.statusCode)){
+      throw kubernetesHttpError(`Kubernetes get ConfigMap ${name} failed with HTTP ${response.statusCode}`,response);
+    }
+    const resource=asResource(response.body);
+    if(!hasLabels(resource,expectedLabels))return"fence_mismatch";
+    const data=asRecord(resource.data);
+    const entries=Object.entries(data);
+    if(entries.some(([,value])=>typeof value!=="string"))return"fence_mismatch";
+    return{data:Object.fromEntries(entries) as Record<string,string>};
   }
 }
 

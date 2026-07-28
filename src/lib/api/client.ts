@@ -22,6 +22,13 @@ export type ProjectAuditQuery = Omit<ApiProjectAuditQuery, "subjectUserId"> & {
 export type ProjectSandboxRunHistoryPage = ApiProjectSandboxRunHistoryPage;
 export type ProjectUsageOverview = ApiProjectUsageOverview;
 
+export function restoredTaskReleaseTargetDisposition(
+  canonicalRunId:string|null,
+  targetRunId:string
+):"replay"|"retire"{
+  return canonicalRunId===targetRunId?"replay":"retire";
+}
+
 export class ApiError extends Error {
   readonly code: string | undefined;
   readonly retryable: boolean | undefined;
@@ -484,11 +491,13 @@ function parseTaskTerminalStartOutcome(value:unknown):TaskTerminalStartReceipt|n
 
 function parseTaskSandboxReleaseOutcome(value:unknown):TaskSandboxReleaseReceipt|null{
   if(isRejectedTaskCommandOutcome(value))return value as unknown as TaskSandboxReleaseReceipt;
-  return isRecord(value)&&value.outcome==="completed"&&value.keyDisposition==="retire"&&
-    typeof value.taskId==="string"&&typeof value.runId==="string"&&isTaskPresentation(value.presentation)&&
-    value.presentation.task.id===value.taskId&&value.presentation.sandboxState.runId===value.runId
-    ?value as unknown as TaskSandboxReleaseReceipt
-    :null;
+  if(!isRecord(value)||typeof value.taskId!=="string"||!value.taskId||typeof value.runId!=="string"||!value.runId)return null;
+  const keys=Object.keys(value).sort().join(",");
+  if(value.outcome==="accepted_in_progress"&&value.keyDisposition==="retain"&&keys==="keyDisposition,outcome,runId,taskId"){
+    return value as unknown as TaskSandboxReleaseReceipt;
+  }
+  return value.outcome==="completed"&&value.keyDisposition==="retire"&&keys==="keyDisposition,outcome,runId,taskId"
+    ?value as unknown as TaskSandboxReleaseReceipt:null;
 }
 
 function parseTaskTurnAbortOutcome(value:unknown):TaskTurnAbortReceipt|null{
@@ -802,7 +811,11 @@ export const apiClient = {
     `/tasks/${encodeURIComponent(taskId)}/sandbox/release`,
     idempotencyKey,
     input,
-    parseTaskSandboxReleaseOutcome
+    parseTaskSandboxReleaseOutcome,
+    undefined,
+    (outcome)=>outcome.outcome==="rejected_before_acceptance"||(
+      outcome.taskId===taskId&&outcome.runId===input.expectedRunId
+    )
   ),
   stopTaskWork:(taskId:string,input:TaskBackgroundWorkStopRequest,idempotencyKey:string):Promise<TaskBackgroundWorkStopClientOutcome>=>taskCommand(
     `/tasks/${encodeURIComponent(taskId)}/work/${encodeURIComponent(input.interactionId)}/stop`,

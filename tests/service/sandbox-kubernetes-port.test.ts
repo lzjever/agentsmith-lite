@@ -250,9 +250,21 @@ describe("sandbox Kubernetes port", () => {
   });
 
   it("maps pod readiness and enforces identity labels", async () => {
-    assert.equal(await readiness(podStatus({ phase: "Running", ready: true })), "ready");
-    assert.equal(await readiness(podStatus({ phase: "Running", ready: false })), "pending");
-    assert.equal(await readiness(podStatus({ phase: "Failed", ready: false })), "failed");
+    assert.deepEqual(await readiness(
+      podStatus({ phase: "Running", ready: true, podIp:"10.42.0.17" }),
+      podIdentity()
+    ), {
+      state:"ready",
+      podUid:"pod-uid-1",
+      podIp:"10.42.0.17"
+    });
+    assert.deepEqual(await readiness(podStatus({ phase: "Running", ready: false }),podIdentity()), {
+      state:"pending",podUid:"pod-uid-1"
+    });
+    assert.deepEqual(await readiness(podStatus({ phase: "Failed", ready: false }),podIdentity()), {
+      state:"failed",podUid:"pod-uid-1"
+    });
+    assert.equal(await readiness(podStatus({phase:"Running",ready:true})),"fence_mismatch");
 
     const notFound = new SandboxKubernetesPort({ transport: recordingTransport(() => ({ statusCode: 404 })) });
     assert.equal(await notFound.getPodReadiness("agentsmith", "missing", identityLabels), "not_found");
@@ -264,6 +276,55 @@ describe("sandbox Kubernetes port", () => {
       }))
     });
     assert.equal(await mismatched.getPodReadiness("agentsmith", "asl-task-t1", identityLabels), "fence_mismatch");
+  });
+
+  it("reads exact ConfigMap bytes only under the expected identity labels", async () => {
+    const transport = recordingTransport(() => ({
+      statusCode: 200,
+      body: {
+        ...resource("ConfigMap", "asl-task-t1-config-4f2acbb10d"),
+        data: {
+          "runtime.json": "{\"model\":\"test\"}"
+        }
+      }
+    }));
+    const port = new SandboxKubernetesPort({ transport });
+
+    assert.deepEqual(
+      await port.getConfigMapData(
+        "agentsmith",
+        "asl-task-t1-config-4f2acbb10d",
+        identityLabels
+      ),
+      {
+        data: {
+          "runtime.json": "{\"model\":\"test\"}"
+        }
+      }
+    );
+
+    const mismatched = new SandboxKubernetesPort({
+      transport: recordingTransport(() => ({
+        statusCode: 200,
+        body: {
+          ...resource("ConfigMap", "asl-task-t1-config-4f2acbb10d", {
+            ...identityLabels,
+            "agentsmith-lite/run-id": "other"
+          }),
+          data: {
+            "runtime.json": "{\"model\":\"test\"}"
+          }
+        }
+      }))
+    });
+    assert.equal(
+      await mismatched.getConfigMapData(
+        "agentsmith",
+        "asl-task-t1-config-4f2acbb10d",
+        identityLabels
+      ),
+      "fence_mismatch"
+    );
   });
 
   it("maps reconcile actions to Kubernetes mutations and ignores adopt/store actions", async () => {
@@ -390,21 +451,33 @@ function resource(
   };
 }
 
-function podStatus(input: { phase: string; ready: boolean }): Record<string, unknown> {
+function podStatus(input: { phase: string; ready: boolean; podIp?:string }): Record<string, unknown> {
   return {
     phase: input.phase,
-    conditions: [{ type: "Ready", status: input.ready ? "True" : "False" }]
+    conditions: [{ type: "Ready", status: input.ready ? "True" : "False" }],
+    ...(input.podIp?{podIP:input.podIp}:{})
   };
 }
 
-async function readiness(status: Record<string, unknown>): Promise<string> {
+async function readiness(
+  status: Record<string, unknown>,
+  metadata:Record<string,unknown>={}
+) {
   const port = new SandboxKubernetesPort({
     transport: recordingTransport(() => ({
       statusCode: 200,
-      body: { ...resource("Pod", "asl-task-t1"), status }
+      body: {
+        ...resource("Pod", "asl-task-t1"),
+        metadata:{...resource("Pod", "asl-task-t1").metadata,...metadata},
+        status
+      }
     }))
   });
   return port.getPodReadiness("agentsmith", "asl-task-t1", identityLabels);
+}
+
+function podIdentity():Record<string,unknown>{
+  return{uid:"pod-uid-1"};
 }
 
 function mutationPort(overrides: {

@@ -760,7 +760,8 @@ export interface TaskSandboxReleaseRequest {
 }
 
 export type TaskSandboxReleaseReceipt =
-  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string;presentation:TaskPresentation}
+  | {outcome:"accepted_in_progress";keyDisposition:"retain";taskId:string;runId:string}
+  | {outcome:"completed";keyDisposition:"retire";taskId:string;runId:string}
   | RejectedCommandOutcome;
 
 export interface TaskTurnAbortRequest {

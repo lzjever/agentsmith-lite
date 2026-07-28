@@ -103,6 +103,139 @@ describe("sandbox Run store", () => {
     }))?.startupReadyAt,runTimestamp(1));
   });
 
+  it("persists immutable config identity and the first real Pod identity",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run={
+      ...sandboxRun({startupReadyAt:runTimestamp(0)}),
+      startupConfigMapName:null,
+      startupConfigHash:null,
+      startupPodUid:null,
+      startupPodIp:null
+    };
+    await createTaskWithRun(store,run);
+    const initialized=await store.initializeTaskSandboxStartupConfig({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      configMapName:"task-1-config-4f2a",configHash:"sha256:4f2a",initializedAt:runTimestamp(1)
+    });
+    assert.equal(initialized?.startupConfigMapName,"task-1-config-4f2a");
+    assert.equal(initialized?.resourceNames.configMap,"task-1-config-4f2a");
+    assert.equal(await store.initializeTaskSandboxStartupConfig({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      configMapName:"task-1-config-other",configHash:"sha256:other",initializedAt:runTimestamp(2)
+    }),null);
+    assert.equal(await store.initializeTaskSandboxStartupConfig({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken+1,
+      configMapName:"task-1-config-4f2a",configHash:"sha256:4f2a",initializedAt:runTimestamp(2)
+    }),null);
+
+    const firstPod=await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-1",podIp:null,observedAt:runTimestamp(2)
+    });
+    assert.equal(firstPod?.startupPodUid,"pod-uid-1");
+    assert.equal(firstPod?.startupPodIp,null);
+    const readyPod=await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-1",podIp:"10.42.0.17",observedAt:runTimestamp(3)
+    });
+    assert.equal(readyPod?.startupPodUid,"pod-uid-1");
+    assert.equal(readyPod?.startupPodIp,"10.42.0.17");
+    assert.equal(await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-2",podIp:"10.42.0.18",observedAt:runTimestamp(4)
+    }),null);
+    assert.equal(await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-1",podIp:"10.42.0.18",observedAt:runTimestamp(4)
+    }),null);
+    assert.equal(await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken+1,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-1",podIp:"10.42.0.17",observedAt:runTimestamp(4)
+    }),null);
+  });
+
+  it("builds Release from the locked current Run without overwriting concurrently recorded startup identity",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const stale=sandboxRun({
+      startupConfigMapName:null,startupConfigHash:null,startupPodUid:null,startupPodIp:null,
+      resourceNames:{...sandboxRun().resourceNames,configMap:"task-1-config"}
+    });
+    await createTaskWithRun(store,stale);
+    const initialized=await store.initializeTaskSandboxStartupConfig({
+      taskId:stale.taskId,runId:stale.runId,expectedFencingToken:stale.fencingToken,
+      configMapName:"task-1-config-deadbeef",configHash:"sha256:deadbeef",initializedAt:runTimestamp(1)
+    });
+    assert.ok(initialized);
+    const identified=await store.recordTaskSandboxStartupPod({
+      taskId:stale.taskId,runId:stale.runId,expectedFencingToken:stale.fencingToken,
+      expectedConfigMapName:"task-1-config-deadbeef",expectedConfigHash:"sha256:deadbeef",
+      podUid:"pod-uid-concurrent",podIp:"10.42.0.23",observedAt:runTimestamp(2)
+    });
+    assert.ok(identified);
+
+    const release=await beginRelease(store,"release-after-identity",stale);
+    assert.equal(await store.requestTaskSandboxRelease(release),"applied");
+    const requested=await store.sandboxRuns.get(stale.runId);assert.ok(requested);
+    assert.equal(requested.startupConfigMapName,"task-1-config-deadbeef");
+    assert.equal(requested.startupConfigHash,"sha256:deadbeef");
+    assert.equal(requested.resourceNames.configMap,"task-1-config-deadbeef");
+    assert.equal(requested.startupPodUid,"pod-uid-concurrent");
+    assert.equal(requested.startupPodIp,"10.42.0.23");
+  });
+
+  it("keeps Release in progress until final resource absence completes its typed receipt",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({state:"active",startedAt:runTimestamp(0)});
+    await createTaskWithRun(store,run);
+    const requestedInput=await beginRelease(store,"release-final-receipt",run);
+    assert.equal(await store.requestTaskSandboxRelease(requestedInput),"applied");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:requestedInput.idempotency.actorId,
+      projectId:requestedInput.idempotency.projectId,
+      operation:"release-sandbox",
+      key:requestedInput.idempotency.key,
+      requestHash:requestedInput.idempotency.requestHash
+    }),{kind:"in_progress",resourceId:run.runId});
+
+    const requested=await store.sandboxRuns.get(run.runId);assert.ok(requested);
+    const releasedAt=runTimestamp(3);
+    const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};
+    const finalReceipt={outcome:"completed",keyDisposition:"retire",taskId:run.taskId,runId:run.runId};
+    assert.equal(await store.completeSandboxRunRelease({
+      runId:requested.runId,expectedFencingToken:requested.fencingToken,run:released,
+      settlement:{
+        runId:requested.runId,workspaceId:requested.workspaceId,projectId:requested.projectId,
+        taskId:requested.taskId,fileLibraryId:requested.fileLibraryId,startedByUserId:requested.startedByUserId,
+        startedAt:requested.startedAt,releasedAt,
+        durationSeconds:(Date.parse(releasedAt)-Date.parse(requested.startedAt!))/1000,
+        resources:requested.resourceSnapshot,
+        releaseReason:requested.releaseReason!
+      },
+      auditEvent:{
+        id:"audit_release_final_receipt",projectId:requested.projectId,actorId:null,
+        subjectUserId:requested.startedByUserId,action:"sandbox.released",status:"accepted",
+        resourceKind:"sandbox",resourceId:requested.taskId,
+        detail:{taskId:requested.taskId,runId:requested.runId,releaseReason:requested.releaseReason!},
+        createdAt:releasedAt
+      },
+      releaseReceipt:{responseStatus:200,responseBody:finalReceipt,updatedAt:releasedAt}
+    } as Parameters<typeof store.completeSandboxRunRelease>[0]&{
+      releaseReceipt:{responseStatus:number;responseBody:unknown;updatedAt:string};
+    }),"applied");
+    assert.deepEqual(await store.findTaskIdempotency({
+      actorId:requestedInput.idempotency.actorId,
+      projectId:requestedInput.idempotency.projectId,
+      operation:"release-sandbox",
+      key:requestedInput.idempotency.key,
+      requestHash:requestedInput.idempotency.requestHash
+    }),{kind:"replay",resourceId:run.runId,responseStatus:200,responseBody:finalReceipt});
+  });
+
   it("keeps the resource identity used by fenced release immutable", async () => {
     const store=createLocalInMemoryProductStore();
     const run=sandboxRun();
@@ -195,9 +328,15 @@ describe("sandbox Run store", () => {
       claimToken:"takeover",claimedAt:runTimestamp(6),leaseExpiresAt:runTimestamp(8)
     }),{kind:"in_progress",runId:run.runId});
 
-    const activated=await store.activateTaskSandboxRun({
+    const missingEvidence=await store.activateTaskSandboxRun({
       taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
       startupClaimToken,actionDeadlineAt:readinessDeadline,activatedAt:runTimestamp(4),
+      auditEvent:{id:"audit_started",projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:runTimestamp(4)}
+    } as Parameters<typeof store.activateTaskSandboxRun>[0]);
+    assert.equal(missingEvidence.kind,"conflict");
+    const activated=await store.activateTaskSandboxRun({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      startupClaimToken,actionDeadlineAt:readinessDeadline,...activationEvidence(run),activatedAt:runTimestamp(4),
       auditEvent:{id:"audit_started",projectId:run.projectId,actorId:null,subjectUserId:run.startedByUserId,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,detail:{taskId:run.taskId,runId:run.runId},createdAt:runTimestamp(4)}
     });
     assert.equal(activated.kind,"activated");
@@ -508,7 +647,7 @@ describe("sandbox Run store", () => {
     })).kind,"claimed");
     const activeDeadline=runTimestamp(4);
     assert.ok(await activeStore.beginSandboxStartupAction({taskId:activeRun.taskId,runId:activeRun.runId,expectedFencingToken:activeRun.fencingToken,claimToken:startupClaimToken,actionDeadlineAt:activeDeadline,startedAt:runTimestamp(1)}));
-    assert.equal((await activeStore.activateTaskSandboxRun({taskId:activeRun.taskId,runId:activeRun.runId,expectedFencingToken:activeRun.fencingToken,startupClaimToken,actionDeadlineAt:activeDeadline,activatedAt:runTimestamp(2),auditEvent:{id:"audit_terminal_bound_active",projectId:activeRun.projectId,actorId:null,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:activeRun.taskId,detail:{taskId:activeRun.taskId,runId:activeRun.runId},createdAt:runTimestamp(2)}})).kind,"activated");
+    assert.equal((await activeStore.activateTaskSandboxRun({taskId:activeRun.taskId,runId:activeRun.runId,expectedFencingToken:activeRun.fencingToken,startupClaimToken,actionDeadlineAt:activeDeadline,...activationEvidence(activeRun),activatedAt:runTimestamp(2),auditEvent:{id:"audit_terminal_bound_active",projectId:activeRun.projectId,actorId:null,action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:activeRun.taskId,detail:{taskId:activeRun.taskId,runId:activeRun.runId},createdAt:runTimestamp(2)}})).kind,"activated");
     const activeConvergence=await activeTerminalStore.beginTerminalStart({...activeInput,idempotency:{...activeInput.idempotency,claimToken:"active-parallel",now:runTimestamp(2),leaseExpiresAt:runTimestamp(5)}});
     assert.equal(activeConvergence.kind,"replay");
     if(activeConvergence.kind==="replay")assert.equal(activeConvergence.responseStatus,200);
@@ -575,7 +714,7 @@ describe("sandbox Run store", () => {
     }));
     assert.equal((await store.activateTaskSandboxRun({
       taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
-      startupClaimToken,actionDeadlineAt:deadline,activatedAt:runTimestamp(2),
+      startupClaimToken,actionDeadlineAt:deadline,...activationEvidence(run),activatedAt:runTimestamp(2),
       auditEvent:{
         id:"audit_terminal_owner_active",projectId:run.projectId,actorId:null,
         action:"sandbox.started",status:"accepted",resourceKind:"sandbox",resourceId:task.id,
@@ -835,7 +974,7 @@ describe("sandbox Run store", () => {
     Object.defineProperty(auditEvent,"subjectUserId",{enumerable:true,get(){throw new Error("injected audit failure")}});
     await assert.rejects(store.activateTaskSandboxRun({
       taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
-      actionDeadlineAt:deadline,activatedAt:runTimestamp(2),
+      actionDeadlineAt:deadline,...activationEvidence(run),activatedAt:runTimestamp(2),
       auditEvent
     }));
     assert.equal((await store.sandboxRuns.get(run.runId))?.state,"starting");
@@ -1270,7 +1409,7 @@ async function beginRelease(store:ReturnType<typeof createLocalInMemoryProductSt
   const now=runTimestamp(2),claimToken=`claim_${key}`,requestHash=`hash_${key}`;
   const ownership={actorId:current.startedByUserId,projectId:current.projectId,operation:"release-sandbox" as const,key,requestHash,resourceId:current.runId,claimToken,now,leaseExpiresAt:runTimestamp(4)};
   assert.equal((await store.beginTaskIdempotency(ownership)).kind,"claimed");
-  return{runId:current.runId,taskId:current.taskId,expectedFencingToken:current.fencingToken,run:{...current,state:"release_requested" as const,releaseReason:current.releaseReason??"requested",releaseRequestedAt:current.releaseRequestedAt??now,startupClaimToken:null,startupLeaseExpiresAt:null,cleanupClaimedAt:null,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:now},idempotency:{actorId:ownership.actorId,projectId:ownership.projectId,operation:ownership.operation,key,requestHash,claimToken,responseStatus:200,responseBody:{ok:true},updatedAt:now}};
+  return{runId:current.runId,taskId:current.taskId,expectedFencingToken:current.fencingToken,intent:{requestedAt:now},idempotency:{actorId:ownership.actorId,projectId:ownership.projectId,operation:ownership.operation,key,requestHash,claimToken,responseStatus:200,responseBody:{ok:true},updatedAt:now}};
 }
 
 function sandboxRun(overrides: Partial<PersistedSandboxRunState> = {}): PersistedSandboxRunState {
@@ -1279,8 +1418,11 @@ function sandboxRun(overrides: Partial<PersistedSandboxRunState> = {}): Persiste
     namespace:"agentsmith",state:"starting",image:"agentsmith-lite/botified-runner:test",
     pvcName:"agentsmith-lite-files",projectSubPath:"workspaces/workspace_1/projects/project_1",
     fileLibraryRootSubPath:"libraries/library_1/home",fileLibraryId:"library_1",
-    startedByUserId:"user_1",startedAt:null,startupReadyAt:null,startupActionDeadlineAt:null,botifiedPort:3099,
-    resourceNames:{pod:"task-1",service:"task-1",configMap:"task-1-config",secret:"task-1-secret",serviceAccount:"task-1",networkPolicy:"task-1"},
+    startedByUserId:"user_1",startedAt:null,startupReadyAt:null,
+    startupConfigMapName:"task-1-config-fixture",startupConfigHash:"sha256:fixture",
+    startupPodUid:"pod-uid-fixture",startupPodIp:"10.42.0.17",
+    startupActionDeadlineAt:null,botifiedPort:3099,
+    resourceNames:{pod:"task-1",service:"task-1",configMap:"task-1-config-fixture",secret:"task-1-secret",serviceAccount:"task-1",networkPolicy:"task-1"},
     serviceKeySecretRef:{name:"task-1-secret",key:"BOTIFIED_SERVICE_KEY"},
     directories:{libraryHome:"/workspace/task/home",botified:"/workspace/task/botified"},
     resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},
@@ -1288,6 +1430,15 @@ function sandboxRun(overrides: Partial<PersistedSandboxRunState> = {}): Persiste
     failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,
     releaseReason:null,releaseRequestedAt:null,failedAt:null,releasedAt:null,
     createdAt:runTimestamp(0),updatedAt:runTimestamp(0),...overrides
+  };
+}
+
+function activationEvidence(run:PersistedSandboxRunState){
+  return{
+    expectedConfigMapName:run.startupConfigMapName!,
+    expectedConfigHash:run.startupConfigHash!,
+    expectedPodUid:run.startupPodUid!,
+    expectedPodIp:run.startupPodIp!
   };
 }
 
