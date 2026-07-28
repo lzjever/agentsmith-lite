@@ -24,6 +24,20 @@ state, and timestamps. It must not store real Botified service keys or model
 API keys; those values only appear in live Kubernetes Secret apply bodies.
 Task rows do not carry a shadow execution, cleanup, or finalization lifecycle.
 
+The persisted `resourceSnapshot` is the authoritative request/limit allocation
+for the whole Run Pod. API display, capacity decisions, Usage, and safe Audit
+facts use that one snapshot; they do not add container allocations together.
+For each CPU and memory request and limit, new Pods give Botified
+`floor(total * 4 / 5)` and give the Terminal executor the exact remainder.
+Quantities are rendered as integer millicores and integer bytes, so the two
+regular containers sum exactly to the snapshot. The sequential File Library
+init container receives the whole allocation. A Run is rejected when either
+regular container would receive zero of any resource or when one of its
+requests would exceed its matching limit.
+Before deploying this allocation change, Release all existing Runs and wait for
+exact owned-resource absence; the reconciler intentionally never replaces or
+adopts spec drift under the same Run identity.
+
 ## Rendered Resources
 
 Per-run rendering includes:
@@ -31,7 +45,8 @@ Per-run rendering includes:
 - ServiceAccount with token automount disabled.
 - Secret for the per-task Botified/broker key; it is not a provider API key. Public API/DB task JSON keeps only redacted placeholders.
 - ConfigMap for generated Botified config.
-- Pod mounting only the project subPath of the substrate-provided PVC.
+- Pod with process-isolated Botified and Terminal containers mounting only the
+  required paths from the substrate-provided PVC.
 - Service for API-to-runner HTTP.
 - NetworkPolicy allowing API-to-runner traffic.
 

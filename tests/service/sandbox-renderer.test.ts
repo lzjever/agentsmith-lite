@@ -266,6 +266,16 @@ describe("sandbox manifest renderer", () => {
           "-c",
           "chgrp -R 10001 /workspace/file-library && chmod -R g+rwX /workspace/file-library"
         ],
+        resources: {
+          requests: {
+            cpu: "250m",
+            memory: "536870912"
+          },
+          limits: {
+            cpu: "1000m",
+            memory: "1073741824"
+          }
+        },
         securityContext: {
           runAsNonRoot: false,
           runAsUser: 0,
@@ -335,10 +345,14 @@ describe("sandbox manifest renderer", () => {
         command: ["bash", "-c", "</dev/tcp/127.0.0.1/3110"]
       }
     });
-    assert.equal(container.resources.requests.cpu, "250m");
-    assert.equal(container.resources.requests.memory, "512Mi");
-    assert.equal(container.resources.limits.cpu, "1");
-    assert.equal(container.resources.limits.memory, "1Gi");
+    assert.deepEqual(container.resources, {
+      requests: { cpu: "200m", memory: "429496729" },
+      limits: { cpu: "800m", memory: "858993459" }
+    });
+    assert.deepEqual(executor.resources, {
+      requests: { cpu: "50m", memory: "107374183" },
+      limits: { cpu: "200m", memory: "214748365" }
+    });
     assert.equal(container.securityContext.allowPrivilegeEscalation, false);
     assert.notEqual(container.securityContext.privileged, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
@@ -420,6 +434,35 @@ describe("sandbox manifest renderer", () => {
     assert.ok(!serialized.includes("persistentvolumes"));
     assert.ok(!serialized.includes("hostPath"));
     assert.ok(!serialized.includes('"privileged":true'));
+  });
+
+  it("rejects zero container shares and requests above their matching limits", () => {
+    const input = {
+      namespace: "agentsmith",
+      workspaceId: "w1",
+      projectId: "p1",
+      taskId: "t1",
+      runId: "r1",
+      image: "example/botified-runner@sha256:abc",
+      pvcName: "agentsmith-lite-files",
+      projectSubPath: "workspaces/w1/projects/p1",
+      fileLibraryRootSubPath: "libraries/library_one/home",
+      botifiedPort: 3099,
+      serviceKeySecretName: "botified-t1",
+      cpuRequest: "250m",
+      memoryRequest: "512Mi",
+      cpuLimit: "1",
+      memoryLimit: "1Gi"
+    };
+
+    assert.throws(
+      () => renderSandboxResources({ ...input, cpuRequest:"1m" }),
+      /CPU request must give both sandbox containers a non-zero share/
+    );
+    assert.throws(
+      () => renderSandboxResources({ ...input, memoryRequest:"2Gi", memoryLimit:"1Gi" }),
+      /memory request exceeds its container limit/
+    );
   });
 
   it("always routes model egress only through the in-cluster API broker", () => {
@@ -524,6 +567,10 @@ interface PodResource extends KubernetesResource {
       image: string;
       imagePullPolicy: string;
       command: string[];
+      resources: {
+        requests: { cpu: string; memory: string };
+        limits: { cpu: string; memory: string };
+      };
       securityContext: {
         runAsNonRoot: boolean;
         runAsUser: number;

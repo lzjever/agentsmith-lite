@@ -17,6 +17,59 @@ describe("sandbox reconciler final Run states", () => {
     assert.equal(plan.actions.at(-1)?.type,"store_run_state");
   });
 
+  it("renders new Pods from the authoritative whole-Run resource snapshot", () => {
+    const run=sandboxRun({
+      resourceLimits:{cpuRequest:"9",memoryRequest:"9Gi",cpuLimit:"10",memoryLimit:"10Gi"},
+      resourceSnapshot:{
+        cpuRequestMillis:"251",
+        memoryRequestBytes:"513",
+        cpuLimitMillis:"1001",
+        memoryLimitBytes:"1025"
+      }
+    });
+    const plan=reconcileSandboxRuns({namespace:run.namespace,desiredRuns:[run],observedResources:[],now:new Date(run.updatedAt)});
+    const pod=plan.actions.find((action)=>action.type==="create_resource"&&action.kind==="Pod");
+    assert.ok(pod?.type==="create_resource");
+    const spec=pod.resource.spec as {
+      initContainers:Array<{resources:ContainerResources}>;
+      containers:Array<{name:string;resources:ContainerResources}>;
+    };
+    const botified=spec.containers.find((container)=>container.name==="botified-server");
+    const terminal=spec.containers.find((container)=>container.name==="bash-executor");
+    assert.ok(botified);
+    assert.ok(terminal);
+    assert.deepEqual(spec.initContainers[0]?.resources,{
+      requests:{cpu:"251m",memory:"513"},
+      limits:{cpu:"1001m",memory:"1025"}
+    });
+    assert.deepEqual(sumContainerResources(botified.resources,terminal.resources),{
+      cpuRequestMillis:251n,
+      memoryRequestBytes:513n,
+      cpuLimitMillis:1001n,
+      memoryLimitBytes:1025n
+    });
+
+    const observed=createdResourcesWithUids(run);
+    const existingPod=observed.find((resource)=>resource.kind==="Pod");
+    assert.ok(existingPod);
+    const existingContainers=(existingPod.spec as {containers:Array<{resources:ContainerResources}>}).containers;
+    for(const container of existingContainers){
+      container.resources={
+        requests:{cpu:"251m",memory:"513"},
+        limits:{cpu:"1001m",memory:"1025"}
+      };
+    }
+    const existingPlan=reconcileSandboxRuns({
+      namespace:run.namespace,
+      desiredRuns:[run],
+      observedResources:observed,
+      now:new Date(run.updatedAt)
+    });
+    assert.equal(existingPlan.actions.some((action)=>
+      action.type==="create_resource"&&action.kind==="Pod"
+    ),false);
+  });
+
   it("moves an exact failed Pod to a failed Run with a safe cause and release intent", () => {
     const run=sandboxRun({state:"active",startedAt:timestamp(1)});
     const resources=createdResources(run);
@@ -200,6 +253,25 @@ describe("sandbox reconciler final Run states", () => {
 function createdResources(run:SandboxRunState):KubernetesResource[]{
   const plan=reconcileSandboxRuns({namespace:run.namespace,desiredRuns:[run],observedResources:[],now:new Date(run.updatedAt)});
   return applySandboxReconcileActions({observedResources:[],actions:plan.actions}).observedResources;
+}
+
+interface ContainerResources {
+  requests:{cpu:string;memory:string};
+  limits:{cpu:string;memory:string};
+}
+
+function sumContainerResources(left:ContainerResources,right:ContainerResources){
+  return{
+    cpuRequestMillis:cpuMillis(left.requests.cpu)+cpuMillis(right.requests.cpu),
+    memoryRequestBytes:BigInt(left.requests.memory)+BigInt(right.requests.memory),
+    cpuLimitMillis:cpuMillis(left.limits.cpu)+cpuMillis(right.limits.cpu),
+    memoryLimitBytes:BigInt(left.limits.memory)+BigInt(right.limits.memory)
+  };
+}
+
+function cpuMillis(value:string):bigint{
+  assert.match(value,/^[1-9][0-9]*m$/);
+  return BigInt(value.slice(0,-1));
 }
 
 function createdResourcesWithUids(run:SandboxRunState):KubernetesResource[]{

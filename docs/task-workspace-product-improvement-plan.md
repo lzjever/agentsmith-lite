@@ -728,13 +728,20 @@ Archive is blocked while active and disabled while archived.
 - Capture Pod Ready and confirmed release timestamps and settle each Run once.
 - Move active capacity reservation/enforcement from persistent Tasks to active
   Sandbox Runs.
+- Treat the persisted resource snapshot as the whole Run Pod allocation for
+  display, quota, safe Audit, and Usage. New Pods split every CPU and memory
+  request and limit 80/20 between Botified and Terminal using integer
+  quantities and an exact remainder; the init container may use the whole
+  allocation because it runs before the regular containers.
 - Aggregate current-user and admin-selected-member metrics in existing Usage.
 - Add the minimal lifecycle Audit actions and safe details.
 - Attribute a cold-start Run to the user who triggered it.
 
 Focused checks: runtime excludes scheduling time, includes idle allocation,
 includes the live active interval without a periodic writer, settles once
-across retry/restart, attributes Runs correctly, admin/member authorization,
+across retry/restart, multiplies whole-Pod resource-time once rather than once
+per container, verifies exact regular-container resource sums, attributes Runs
+correctly, enforces non-zero valid shares, preserves admin/member authorization,
 and never exposes secret or content fields.
 
 ### Phase 6: local single-node K8s product pass

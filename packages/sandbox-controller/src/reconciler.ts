@@ -352,10 +352,10 @@ function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResourc
     botifiedPort: run.botifiedPort,
     serviceKeySecretName: run.resourceNames.secret,
     serviceKeySecretKey: run.serviceKeySecretRef.key,
-    cpuRequest: run.resourceLimits.cpuRequest,
-    memoryRequest: run.resourceLimits.memoryRequest,
-    cpuLimit: run.resourceLimits.cpuLimit,
-    memoryLimit: run.resourceLimits.memoryLimit,
+    cpuRequest: `${run.resourceSnapshot.cpuRequestMillis}m`,
+    memoryRequest: run.resourceSnapshot.memoryRequestBytes,
+    cpuLimit: `${run.resourceSnapshot.cpuLimitMillis}m`,
+    memoryLimit: run.resourceSnapshot.memoryLimitBytes,
     resourceNames
   }).resources;
 }

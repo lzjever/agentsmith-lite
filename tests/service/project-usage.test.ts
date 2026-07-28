@@ -24,6 +24,8 @@ describe("project Sandbox Usage",()=>{
     assert.equal("activeCount" in overview.sandbox,false);
     assert.equal(overview.sandbox.launches,1);
     assert.equal(overview.sandbox.totalDurationSeconds,"120");
+    assert.equal(overview.sandbox.cpuRequestSeconds,"30");
+    assert.equal(overview.sandbox.memoryRequestByteSeconds,"64424509440");
     assert.equal(overview.sandbox.liveRuns.length,3);
     assert.deepEqual(new Set(overview.sandbox.liveRuns.map((run)=>run.state)),new Set(["starting","release_requested","failed"]));
     assert.deepEqual(overview.sandbox.liveRuns[0],{
@@ -56,6 +58,8 @@ describe("project Sandbox Usage",()=>{
     assert.equal(overview.sandbox.unreleasedCount,0);
     assert.deepEqual(overview.sandbox.liveRuns,[]);
     assert.equal(overview.sandbox.totalDurationSeconds,"120");
+    assert.equal(overview.sandbox.cpuRequestSeconds,"30");
+    assert.equal(overview.sandbox.memoryRequestByteSeconds,"64424509440");
     const history=await fixture.services.policies.getSandboxRunHistory(fixture.userId,fixture.projectId,{selectedUserId:fixture.runnerId});
     assert.equal(history.items[0]?.runId,fixture.run.runId);
     assert.equal(history.items[0]?.taskTitle,"Task");

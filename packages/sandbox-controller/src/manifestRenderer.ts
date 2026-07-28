@@ -1,4 +1,5 @@
 import type { KubernetesResource, SandboxRenderResult } from "../../contracts/src/api.js";
+import { allocateSandboxPodResources } from "../../domain/src/kubernetesQuantity.js";
 import { APP_KUBERNETES_CONTAINER_PORT } from "./appManifestRenderer.js";
 import { sandboxResourceLabels } from "./labels.js";
 import { kubernetesDnsLabelName, sandboxResourceNamesForTask } from "./resourceNames.js";
@@ -39,6 +40,7 @@ export function sandboxRuntimeConfigMapName(baseName:string,configHash:string):s
 }
 
 export function renderSandboxResources(input: SandboxRenderInput): SandboxRenderResult {
+  const allocation=allocateSandboxPodResources(input);
   const labels = sandboxResourceLabels(input);
   const generatedNames = sandboxResourceNamesForTask(input.taskId);
   const serviceAccountName = kubernetesDnsLabelName(input.resourceNames?.serviceAccount ?? generatedNames.serviceAccount);
@@ -122,6 +124,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               "-c",
               "chgrp -R 10001 /workspace/file-library && chmod -R g+rwX /workspace/file-library"
             ],
+            resources: allocation.whole,
             securityContext: {
               runAsNonRoot: false,
               runAsUser: 0,
@@ -180,16 +183,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 }
               }
             ],
-            resources: {
-              requests: {
-                cpu: input.cpuRequest,
-                memory: input.memoryRequest
-              },
-              limits: {
-                cpu: input.cpuLimit,
-                memory: input.memoryLimit
-              }
-            },
+            resources: allocation.botified,
             securityContext: {
               allowPrivilegeEscalation: false,
               readOnlyRootFilesystem: false,
@@ -239,16 +233,7 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 value: "/workspace/task/home"
               }
             ],
-            resources: {
-              requests: {
-                cpu: input.cpuRequest,
-                memory: input.memoryRequest
-              },
-              limits: {
-                cpu: input.cpuLimit,
-                memory: input.memoryLimit
-              }
-            },
+            resources: allocation.terminal,
             securityContext: {
               runAsUser: 10002,
               runAsGroup: 10001,

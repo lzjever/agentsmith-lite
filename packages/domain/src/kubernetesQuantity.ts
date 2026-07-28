@@ -26,6 +26,36 @@ export function normalizeSandboxResources(input:{cpuRequest:string;memoryRequest
   cpuLimitMillis:parseKubernetesCpuMillis(input.cpuLimit),memoryLimitBytes:parseKubernetesMemoryBytes(input.memoryLimit)
 }}
 
+export interface SandboxContainerResources {
+  requests:{cpu:string;memory:string};
+  limits:{cpu:string;memory:string};
+}
+
+export interface SandboxPodResourceAllocation {
+  whole:SandboxContainerResources;
+  botified:SandboxContainerResources;
+  terminal:SandboxContainerResources;
+}
+
+export function allocateSandboxPodResources(
+  input:{cpuRequest:string;memoryRequest:string;cpuLimit:string;memoryLimit:string}
+):SandboxPodResourceAllocation{
+  const snapshot=normalizeSandboxResources(input);
+  const cpuRequest=splitWholeQuantity(snapshot.cpuRequestMillis,"CPU request");
+  const memoryRequest=splitWholeQuantity(snapshot.memoryRequestBytes,"memory request");
+  const cpuLimit=splitWholeQuantity(snapshot.cpuLimitMillis,"CPU limit");
+  const memoryLimit=splitWholeQuantity(snapshot.memoryLimitBytes,"memory limit");
+  const whole=containerResources(
+    BigInt(snapshot.cpuRequestMillis),BigInt(snapshot.memoryRequestBytes),
+    BigInt(snapshot.cpuLimitMillis),BigInt(snapshot.memoryLimitBytes)
+  );
+  const botified=containerResources(cpuRequest.botified,memoryRequest.botified,cpuLimit.botified,memoryLimit.botified);
+  const terminal=containerResources(cpuRequest.terminal,memoryRequest.terminal,cpuLimit.terminal,memoryLimit.terminal);
+  assertContainerRequestsWithinLimits("Botified",botified);
+  assertContainerRequestsWithinLimits("Terminal",terminal);
+  return{whole,botified,terminal};
+}
+
 export function formatDecimal(value:bigint,scale:number):string{
   if(scale<0||!Number.isSafeInteger(scale))throw new Error("Decimal scale is invalid");
   if(scale===0)return value.toString();
@@ -33,6 +63,35 @@ export function formatDecimal(value:bigint,scale:number):string{
   const fraction=(absolute%power).toString().padStart(scale,"0").replace(/0+$/u,"");
   return `${negative?"-":""}${whole}${fraction?`.${fraction}`:""}`;
 }
+
+function splitWholeQuantity(totalValue:string,label:string):{botified:bigint;terminal:bigint}{
+  const total=BigInt(totalValue),botified=total*4n/5n,terminal=total-botified;
+  if(botified===0n||terminal===0n)throw new Error(`${label} must give both sandbox containers a non-zero share`);
+  return{botified,terminal};
+}
+
+function containerResources(
+  cpuRequestMillis:bigint,
+  memoryRequestBytes:bigint,
+  cpuLimitMillis:bigint,
+  memoryLimitBytes:bigint
+):SandboxContainerResources{
+  return{
+    requests:{cpu:`${cpuRequestMillis}m`,memory:memoryRequestBytes.toString()},
+    limits:{cpu:`${cpuLimitMillis}m`,memory:memoryLimitBytes.toString()}
+  };
+}
+
+function assertContainerRequestsWithinLimits(name:string,resources:SandboxContainerResources):void{
+  if(cpuMillis(resources.requests.cpu)>cpuMillis(resources.limits.cpu)){
+    throw new Error(`${name} CPU request exceeds its container limit`);
+  }
+  if(BigInt(resources.requests.memory)>BigInt(resources.limits.memory)){
+    throw new Error(`${name} memory request exceeds its container limit`);
+  }
+}
+
+function cpuMillis(value:string):bigint{return BigInt(value.slice(0,-1))}
 
 function parseQuantity(input:string,kind:string):Rational{
   const trimmed=input.trim();if(trimmed.length===0||trimmed.length>128)throw invalid(kind);
