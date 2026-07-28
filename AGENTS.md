@@ -9,7 +9,7 @@ This repo owns product code only:
 - Web UI as a thin product API client;
 - OpenAI-compatible endpoint management and calls;
 - File Libraries, durable Task sessions, artifacts, explicit Sandbox release, usage, and light audit;
-- compatible vendored Botified fork, AgentSmith-owned loopback Bash executor, runner image, and runtime config;
+- official `botified-releases` binary consumer pinned by version, asset, and SHA, plus the AgentSmith-owned loopback Bash executor, runner image, and runtime config;
 - sandbox manifest rendering/reconciliation;
 - app image, app offline bundle, and deploy helpers.
 
@@ -57,6 +57,10 @@ exercise, print concise stdout/stderr, and exit non-zero on failure.
 
 ## Product Boundaries
 
+- `.reference/**` is permanently read-only. Never edit it or write to it with `apply_patch`, `cp`, or any other command; never commit, push, pull, fetch, checkout, reset, clean, build, test, install, or generate files there. Query remote releases or APIs for current information without changing a reference worktree.
+- AgentSmith Lite development belongs only in this repo. Do not modify `agentsmith-lite-substrates` unless the user explicitly authorizes it for the current task.
+- Botified is an independent external dependency. Consume only published `botified-releases` binaries pinned by version, asset, and SHA. Never modify, compile, vendor, fork, or patch Botified source, and never require Botified to change its protocol or logic for AgentSmith.
+- If no published Botified release meets a requirement, redesign within AgentSmith-owned boundaries or stop and report the limitation; do not change the dependency.
 - All business logic belongs on the server.
 - The product is English-only. Do not add i18n libraries, translation catalogs, locale-aware routing, locale URL prefixes, or speculative localization abstractions.
 - Web UI only calls product APIs and must not carry agent business logic.
