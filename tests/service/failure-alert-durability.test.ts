@@ -232,13 +232,23 @@ function resourcesForRun(run: PersistedSandboxRunState): KubernetesResource[] {
   return applySandboxReconcileActions({
     observedResources: [],
     actions: reconcileSandboxRuns({ namespace: run.namespace, desiredRuns: [run as SandboxRunState], observedResources: [], now: new Date(run.createdAt) }).actions
-  }).observedResources;
+  }).observedResources.map((resource)=>({
+    ...resource,
+    metadata:{...resource.metadata,uid:`uid-${resource.kind.toLowerCase()}`}
+  }));
 }
 
 class FailureLifecyclePort implements SandboxLifecycleKubernetesPort {
   private resources: KubernetesResource[];
   constructor(resources: KubernetesResource[]) { this.resources = structuredClone(resources); }
   async listManagedResources(): Promise<KubernetesResource[]> { return structuredClone(this.resources); }
+  async inspectResource(ref:KubernetesResourceRef,expectedLabels:Record<string,string>){
+    const resource=this.resources.find((candidate)=>candidate.kind===ref.kind&&candidate.metadata.name===ref.name&&candidate.metadata.namespace===ref.namespace);
+    if(!resource)return"not_found" as const;
+    const uid=typeof resource.metadata.uid==="string"&&resource.metadata.uid.length>0?resource.metadata.uid:null;
+    if(!uid||Object.entries(expectedLabels).some(([key,value])=>resource.metadata.labels[key]!==value)||ref.uid&&uid!==ref.uid)return"fence_mismatch" as const;
+    return{state:"present" as const,resource:structuredClone(resource)};
+  }
   async applyResource(): Promise<"applied"> { return "applied"; }
   async deleteResource(ref: KubernetesResourceRef): Promise<"deleted" | "not_found"> {
     const before = this.resources.length;

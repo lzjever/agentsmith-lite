@@ -1338,7 +1338,8 @@ function liveTaskServiceOptions(store:ReturnType<typeof createLocalInMemoryProdu
         async deleteResource() { return "deleted" as const; },
         async getPodReadiness() { return { state:"ready" as const, podUid:"fixture-pod-uid" }; },
         async getConfigMapData() { return "not_found" as const; },
-        async listManagedResources() { return []; }
+        async listManagedResources() { return []; },
+        async inspectResource() { return "not_found" as const; }
       }
     }
   };

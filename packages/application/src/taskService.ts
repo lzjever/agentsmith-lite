@@ -72,6 +72,7 @@ import {
 import {
   applySandboxReconcileActionsToKubernetes,
   type PodReadiness,
+  type SandboxKubernetesInspectionPort,
   type SandboxKubernetesMutationPort,
   type SandboxKubernetesReadinessPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
@@ -97,7 +98,7 @@ import type { ProjectAccessSnapshot, ProjectPermission } from "./authorizationSe
 import type { ContextService } from "./contextService.js";
 
 export interface TaskLiveSandboxConfig {
-  port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort & SandboxKubernetesInventoryPort;
+  port: SandboxKubernetesMutationPort & SandboxKubernetesReadinessPort & SandboxKubernetesInventoryPort & SandboxKubernetesInspectionPort;
   startupActionTimeoutMs?:number;
   readinessTimeoutMs?: number;
   readinessPollMs?: number;

@@ -283,9 +283,7 @@ function cleanupRunResources(
   timestamp: string
 ): SandboxReconcileAction[] {
   const actions: SandboxReconcileAction[] = [];
-  const observed = observedCoreResourcesForRun(run, observedResources).filter((resource) =>
-    resource.kind === "Pod" || typeof resource.metadata.deletionTimestamp !== "string"
-  );
+  const observed = observedCoreResourcesForRun(run, observedResources);
   if (observed.length === 0) {
     actions.push({
       type: "store_run_state",
@@ -297,7 +295,7 @@ function cleanupRunResources(
 
   for (const kind of DELETE_ORDER) {
     for (const resource of observed) {
-      if (resource.kind !== kind) {
+      if (resource.kind !== kind || typeof resource.metadata.deletionTimestamp === "string") {
         continue;
       }
       actions.push({
@@ -329,6 +327,17 @@ function renderSandboxRunCoreResources(run: SandboxRunState): KubernetesResource
     }
     return resource;
   });
+}
+
+export function sandboxRunCoreResourceRefs(
+  run: SandboxRunState
+): Array<{kind:SandboxCoreResourceKind;namespace:string;name:string;uid?:string}> {
+  return CREATE_ORDER.map((kind)=>({
+    kind,
+    namespace:run.namespace,
+    name:expectedCoreResourceName(run,kind),
+    ...(kind==="Pod"&&run.startupPodUid?{uid:run.startupPodUid}:{})
+  }));
 }
 
 function renderSandboxRunKnownResources(run: SandboxRunState): KubernetesResource[] {

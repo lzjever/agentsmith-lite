@@ -20,6 +20,7 @@ import {
 } from "../../packages/ports/src/botified.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
 import { SandboxLifecycleService } from "../../packages/application/src/sandboxLifecycleService.js";
+import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import type { KubernetesResourceRef } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 import { WebSocket } from "ws";
@@ -1187,7 +1188,8 @@ describe("task interactions API", () => {
                 deleteResource: async () => "deleted" as const,
                 getPodReadiness: async () => "not_found" as const,
                 getConfigMapData:async()=> "not_found" as const,
-                listManagedResources: async () => []
+                listManagedResources: async () => [],
+                async inspectResource(){return"not_found" as const;}
               }
             }
           }),
@@ -1211,7 +1213,8 @@ describe("task interactions API", () => {
         deleteResource: async () => "deleted" as const,
         getPodReadiness: async () => "not_found" as const,
         getConfigMapData:async()=> "not_found" as const,
-        listManagedResources: async () => []
+        listManagedResources: async () => [],
+        async inspectResource(){return"not_found" as const;}
       }
     };
 
@@ -1257,7 +1260,8 @@ describe("task interactions API", () => {
         deleteResource: async () => "deleted" as const,
         getPodReadiness: async () => "not_found" as const,
         getConfigMapData:async()=> "not_found" as const,
-        listManagedResources: async () => []
+        listManagedResources: async () => [],
+        async inspectResource(){return"not_found" as const;}
       }
     };
 
@@ -1289,7 +1293,7 @@ describe("task interactions API", () => {
     const resources:import("../../packages/contracts/src/api.js").KubernetesResource[]=[];
     const store=createLocalInMemoryProductStore();
     try{
-      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(structuredClone(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return structuredClone(resources);}}}});
+      api=await createApiServer({port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:{async applyResource(resource){resources.push(withFixtureUid(resource));return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return structuredClone(resources);},async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}}}});
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const task=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{prompt:"release through API",endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"}})).task;
       assert.equal((await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`)).capabilities.releaseSandbox,true);
@@ -1385,7 +1389,8 @@ describe("task interactions API", () => {
           async deleteResource(){return"deleted" as const;},
           async getPodReadiness(){return"not_found" as const;},
           async getConfigMapData(){return"not_found" as const;},
-          async listManagedResources(){return structuredClone(resources);}
+          async listManagedResources(){return structuredClone(resources);},
+          async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
         }}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
@@ -1495,7 +1500,8 @@ describe("task interactions API", () => {
             const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
             return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
           },
-          async listManagedResources(){return structuredClone(resources);}
+          async listManagedResources(){return structuredClone(resources);},
+          async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
         }}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
@@ -1555,7 +1561,8 @@ describe("task interactions API", () => {
             const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
             return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
           },
-          async listManagedResources(){return structuredClone(resources);}
+          async listManagedResources(){return structuredClone(resources);},
+          async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
         }},
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
@@ -1596,7 +1603,8 @@ describe("task interactions API", () => {
       async deleteResource(){return"not_found" as const;},
       async getPodReadiness(){return"not_found" as const;},
       async getConfigMapData(){return"not_found" as const;},
-      async listManagedResources(){return[];}
+      async listManagedResources(){return[];},
+      async inspectResource(){return"not_found" as const;}
     };
     try{
       api=await createApiServer({
@@ -1662,7 +1670,7 @@ describe("task interactions API", () => {
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,sandboxNamespaceLimit:100,store,
         botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];}}}
+        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];},async inspectResource(){return"not_found" as const;}}}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
@@ -1716,7 +1724,7 @@ describe("task interactions API", () => {
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
         sandboxNamespaceLimit:100,store,botifiedClient:new FakeBotifiedClient([]),botifiedServiceKeyFactory:({taskId})=>taskId,
-        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];}}}
+        liveSandbox:{port:{async applyResource(){return"applied" as const;},async deleteResource(){return"deleted" as const;},async getPodReadiness(){return"not_found" as const;},async getConfigMapData(){return"not_found" as const;},async listManagedResources(){return[];},async inspectResource(){return"not_found" as const;}}}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
       const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
@@ -1809,7 +1817,8 @@ describe("task interactions API", () => {
           const config=liveResources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
           return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
         },
-        async listManagedResources(){return structuredClone(liveResources);}
+        async listManagedResources(){return structuredClone(liveResources);},
+        async inspectResource(ref,labels){return inspectFixtureResource(liveResources,ref,labels);}
       };
       api=await createApiServer({
         port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
@@ -1863,7 +1872,8 @@ describe("task interactions API", () => {
       async deleteResource(){return"deleted" as const;},
       async getPodReadiness(){return"not_found" as const;},
       async getConfigMapData(){return"not_found" as const;},
-      async listManagedResources(){return[];}
+      async listManagedResources(){return[];},
+      async inspectResource(){return"not_found" as const;}
     };
     try{
       api=await createApiServer({
@@ -1937,7 +1947,8 @@ describe("task interactions API", () => {
         const config=liveResources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
-      async listManagedResources(){return structuredClone(liveResources);}
+      async listManagedResources(){return structuredClone(liveResources);},
+      async inspectResource(ref,labels){return inspectFixtureResource(liveResources,ref,labels);}
     };
     try{
       api=await createApiServer({
@@ -2036,7 +2047,8 @@ describe("task interactions API", () => {
         const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
-      async listManagedResources(){return structuredClone(resources);}
+      async listManagedResources(){return structuredClone(resources);},
+      async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
     };
     try{
       api=await createApiServer({
@@ -2110,7 +2122,8 @@ describe("task interactions API", () => {
             const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
             return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
           },
-          async listManagedResources(){return structuredClone(resources);}
+          async listManagedResources(){return structuredClone(resources);},
+          async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
         }}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
@@ -2142,7 +2155,8 @@ describe("task interactions API", () => {
             const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
             return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
           },
-          async listManagedResources(){return structuredClone(resources);}
+          async listManagedResources(){return structuredClone(resources);},
+          async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
         }},
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
@@ -2300,7 +2314,8 @@ describe("task interactions API", () => {
         const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
         return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
       },
-      async listManagedResources(){return structuredClone(resources);}
+      async listManagedResources(){return structuredClone(resources);},
+      async inspectResource(ref,labels){return inspectFixtureResource(resources,ref,labels);}
     }};
     try{
       api=await createApiServer({
@@ -2416,6 +2431,30 @@ async function exactTerminalStartBody(
   const task=await store.findTask(taskId);assert.ok(task);
   const run=task.currentRunId?await store.sandboxRuns.get(task.currentRunId):null;
   return JSON.stringify({expectedRunId:task.currentRunId,expectedSandboxState:run?.state??"released"});
+}
+
+function withFixtureUid(resource:KubernetesResource):KubernetesResource{
+  const copy=structuredClone(resource);
+  copy.metadata.uid??=`fixture-${copy.kind.toLowerCase()}-${copy.metadata.name}`;
+  return copy;
+}
+
+function inspectFixtureResource(
+  resources:KubernetesResource[],
+  ref:KubernetesResourceRef,
+  expectedLabels:Record<string,string>
+){
+  const resource=resources.find((candidate)=>
+    candidate.kind===ref.kind&&candidate.metadata.namespace===ref.namespace&&candidate.metadata.name===ref.name
+  );
+  if(!resource)return"not_found" as const;
+  const uid=typeof resource.metadata.uid==="string"&&resource.metadata.uid.length>0?resource.metadata.uid:null;
+  if(
+    !uid||
+    ref.uid!==undefined&&ref.uid!==uid||
+    Object.entries(expectedLabels).some(([key,value])=>resource.metadata.labels[key]!==value)
+  )return"fence_mismatch" as const;
+  return{state:"present" as const,resource:structuredClone(resource)};
 }
 
 async function exactReleaseBody(

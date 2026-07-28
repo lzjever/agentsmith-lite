@@ -177,6 +177,83 @@ describe("sandbox Kubernetes port", () => {
     assert.deepEqual(mismatched.requests.map((request) => request.method), ["GET"]);
   });
 
+  it("inspects exact lifecycle resources and requires full identity with a UID", async () => {
+    const kinds = ["Secret", "ConfigMap", "ServiceAccount", "NetworkPolicy", "Service", "Pod"] as const;
+    for (const kind of kinds) {
+      const name = `exact-${kind.toLowerCase()}`;
+      const matching = new SandboxKubernetesPort({
+        transport: recordingTransport(() => ({
+          statusCode: 200,
+          body: resource(kind, name, identityLabels, `uid-${kind.toLowerCase()}`)
+        }))
+      });
+      assert.deepEqual(
+        await matching.inspectResource(
+          {
+            kind,
+            namespace: "agentsmith",
+            name,
+            ...(kind === "Pod" ? { uid: "uid-pod" } : {})
+          },
+          identityLabels
+        ),
+        {
+          state: "present",
+          resource: resource(kind, name, identityLabels, `uid-${kind.toLowerCase()}`)
+        }
+      );
+    }
+
+    const absent = new SandboxKubernetesPort({ transport: recordingTransport(() => ({ statusCode: 404 })) });
+    assert.equal(
+      await absent.inspectResource({ kind: "Secret", namespace: "agentsmith", name: "missing" }, identityLabels),
+      "not_found"
+    );
+
+    for (const body of [
+      resource("Secret", "exact-secret", { ...identityLabels, "agentsmith-lite/run-id": "other" }, "uid-secret"),
+      resource("Secret", "exact-secret", identityLabels),
+      resource("Pod", "exact-pod", identityLabels, "replacement-pod-uid")
+    ]) {
+      const port = new SandboxKubernetesPort({
+        transport: recordingTransport(() => ({ statusCode: 200, body }))
+      });
+      assert.equal(
+        await port.inspectResource(
+          {
+            kind: body.kind as "Secret" | "Pod",
+            namespace: "agentsmith",
+            name: body.metadata.name,
+            ...(body.kind === "Pod" ? { uid: "persisted-pod-uid" } : {})
+          },
+          identityLabels
+        ),
+        "fence_mismatch"
+      );
+    }
+  });
+
+  it("fails exact inspection safely on Kubernetes errors and malformed success bodies", async () => {
+    const failed = new SandboxKubernetesPort({
+      transport: recordingTransport(() => ({
+        statusCode: 503,
+        body: { kind: "Status", reason: "Unavailable", message: "Bearer bsk_runtime_secret unavailable" }
+      }))
+    });
+    await assert.rejects(
+      failed.inspectResource({ kind: "Service", namespace: "agentsmith", name: "exact-service" }, identityLabels),
+      /Kubernetes inspect Service\/exact-service failed with HTTP 503/
+    );
+
+    const malformed = new SandboxKubernetesPort({
+      transport: recordingTransport(() => ({ statusCode: 200, body: { metadata: { labels: identityLabels } } }))
+    });
+    await assert.rejects(
+      malformed.inspectResource({ kind: "Service", namespace: "agentsmith", name: "exact-service" }, identityLabels),
+      /invalid Kubernetes resource/
+    );
+  });
+
   it("deletes an observed Service by UID without re-reading the Service endpoint", async () => {
     const transport = recordingTransport((request) => {
       if (request.method === "GET") {

@@ -6,10 +6,13 @@ import type {
 } from "../../ports/src/store.js";
 import {
   type KubernetesResourceRef,
+  type SandboxKubernetesInspectionPort,
   type SandboxKubernetesMutationPort
 } from "../../sandbox-controller/src/kubernetesPort.js";
 import {
   reconcileSandboxRuns,
+  sandboxIdentityLabels,
+  sandboxRunCoreResourceRefs,
   type SandboxCoreResourceKind,
   type SandboxReconcileAction,
   type SandboxRunState
@@ -21,18 +24,15 @@ export interface SandboxKubernetesInventoryPort {
   listManagedResources(namespace: string): Promise<KubernetesResource[]>;
 }
 
-export type SandboxLifecycleKubernetesPort = SandboxKubernetesMutationPort & SandboxKubernetesInventoryPort;
-
-const MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 30;
-const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS = 5;
-const DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS = 100;
+export type SandboxLifecycleKubernetesPort =
+  & SandboxKubernetesMutationPort
+  & SandboxKubernetesInspectionPort
+  & SandboxKubernetesInventoryPort;
 
 export interface SandboxLifecycleServiceConfig {
   namespace: string;
   port?: SandboxLifecycleKubernetesPort;
   now?: () => Date;
-  deleteResourceErrorConfirmAttempts?: number;
-  deleteResourceErrorConfirmDelayMs?: number;
   hasLocalStartupOperation?: (runId:string)=>boolean;
 }
 
@@ -179,7 +179,17 @@ export class SandboxLifecycleService {
       result.actionSummary.push(...cleanupReconcilePlan.actions.map(actionSummary));
     }
     const lifecycleCandidates = cleanupReconcilePlan.actions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
-    const cleanupClaims = await this.claimRunsBeforeDestructiveCleanup(lifecycleCandidates, preparedRuns.allRuns);
+    const inventoryFenceFailures=await this.validateInventoryPodFences(
+      lifecycleCandidates,
+      preparedRuns.allRuns,
+      observed.resources
+    );
+    for(const [runId,failure] of inventoryFenceFailures){
+      blockedRunIds.add(runId);
+      result.errors.push(failure.message);
+    }
+    const fencedLifecycleCandidates=lifecycleCandidates.filter((action)=>!blockedRunIds.has(reconcileActionRunId(action)));
+    const cleanupClaims = await this.claimRunsBeforeDestructiveCleanup(fencedLifecycleCandidates, preparedRuns.allRuns);
     for (const runId of cleanupClaims.rejectedRunIds) blockedRunIds.add(runId);
     const claimedOrOrphanActions = lifecycleCandidates.filter((action) =>
       cleanupClaims.claimedRuns.has(reconcileActionRunId(action)) || cleanupClaims.orphanRunIds.has(reconcileActionRunId(action))
@@ -187,35 +197,47 @@ export class SandboxLifecycleService {
     let cleanupActions = claimedOrOrphanActions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
     cleanupActions = await this.deferNewlyPersistedOrphanActions(cleanupActions, cleanupClaims.orphanRunIds);
     const mutations = await this.applyCleanupActions(this.config.port, cleanupActions);
-    result.errors.push(...mutations.errors);
-    for (const runId of mutations.blockedRunIds) blockedRunIds.add(runId);
-    await this.releaseBlockedCleanupClaims(cleanupClaims.claimedRuns, blockedRunIds, mutations.failures);
-
-    const refreshed = await this.observe(input);
-    result.errors.push(...refreshed.errors);
-    result.observedResourceCounts = resourceCounts(refreshed.resources);
-    if (refreshed.errors.length > 0) {
-      await this.releaseBlockedCleanupClaims(
-        cleanupClaims.claimedRuns,
-        new Set(cleanupClaims.claimedRuns.keys()),
-        new Map([...cleanupClaims.claimedRuns.keys()].map((runId)=>[runId,{target:"Kubernetes inventory",message:"Sandbox cleanup could not verify resource absence"}]))
-      );
-      return result;
+    for(const [runId,failure] of mutations.failures){
+      if(cleanupClaims.orphanRunIds.has(runId))result.errors.push(failure.message);
     }
-    const finalRuns = await this.loadRuns(input);
-    const finalPlan = this.plan(finalRuns.activeRuns, refreshed.resources, finalRuns.allRuns, !input.runId);
-    const finalCleanupPlan = this.cleanupPlan(finalPlan.actions, finalRuns.allRuns);
-    result.cleanupPlan = finalCleanupPlan;
-    result.recentCleanupFailures = finalCleanupPlan.recentFailures;
-    result.actionSummary.push(...finalPlan.actions.map(actionSummary));
-    for (const action of finalPlan.actions) {
-      if (blockedRunIds.has(reconcileActionRunId(action))) {
+    const cleanupFailures=new Map<string,CleanupFailure>();
+    for(const [runId,claimed] of cleanupClaims.claimedRuns){
+      const inspection=await this.inspectRunResources(this.config.port,claimed);
+      if(inspection.failure){
+        blockedRunIds.add(runId);
+        cleanupFailures.set(runId,inspection.failure);
+        result.errors.push(inspection.failure.message);
         continue;
       }
-      if (action.type !== "store_run_state") {
+      const mutationFailure=mutations.failures.get(runId);
+      if(mutationFailure&&!deleteFailureResolved(mutationFailure,inspection.resources)){
+        blockedRunIds.add(runId);
+        cleanupFailures.set(runId,mutationFailure);
+        result.errors.push(mutationFailure.message);
         continue;
       }
-      if (action.reason === "desired_observed") {
+      const current=await this.store.sandboxRuns.get(runId);
+      if(!current||current.fencingToken!==claimed.fencingToken){
+        blockedRunIds.add(runId);
+        cleanupFailures.set(runId,{target:"Sandbox Run",message:`Sandbox run ${runId} fencing token changed during cleanup`});
+        result.errors.push(`Sandbox run ${runId} fencing token changed during cleanup`);
+        continue;
+      }
+      const exactPlan=this.plan(
+        [current as PersistedSandboxRunState & SandboxRunState],
+        inspection.resources,
+        [current],
+        false
+      );
+      result.actionSummary.push(...exactPlan.actions.map(actionSummary));
+      const action=exactPlan.actions.find((candidate)=>
+        candidate.type==="store_run_state"&&
+        (candidate.reason==="cleanup_complete"||candidate.reason==="cleanup_in_progress")
+      );
+      if (!action || action.type !== "store_run_state") {
+        blockedRunIds.add(runId);
+        cleanupFailures.set(runId,{target:"Sandbox reconciliation",message:`Sandbox run ${runId} produced no cleanup state`});
+        result.errors.push(`Sandbox run ${runId} produced no cleanup state`);
         continue;
       }
       if (action.reason === "cleanup_complete") {
@@ -238,28 +260,49 @@ export class SandboxLifecycleService {
               })
             :null;
           if(drained)result.storedRunIds.push(drained.runId);
-          else result.errors.push(`Sandbox run ${action.run.runId} startup deadline changed before drain could complete`);
+          else await this.resolveCleanupCasConflict(
+            current??claimed,
+            {
+              target:"Sandbox startup drain",
+              message:`Sandbox run ${action.run.runId} startup deadline changed before drain could complete`
+            },
+            result
+          );
           continue;
         }
         const transition = await this.completeReleasedRun(action.run);
         if (transition) {
           result.storedRunIds.push(transition.stored.runId);
         } else {
-          result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
+          await this.resolveCleanupCasConflict(
+            current,
+            {
+              target:"Sandbox release settlement",
+              message:`Sandbox run ${action.run.runId} fencing token changed before state could be stored`
+            },
+            result
+          );
         }
         continue;
       }
-      if(startupDrainRunIds.has(action.run.runId)&&action.reason==="cleanup_in_progress")continue;
-      const transition = await this.persistRunTransition(action.run);
+      const transition = await this.clearSuccessfulCleanupClaim(current);
       if (transition) {
         result.storedRunIds.push(transition.stored.runId);
       } else {
-        result.errors.push(`Sandbox run ${action.run.runId} fencing token changed before state could be stored`);
+        await this.resolveCleanupCasConflict(
+          current,
+          {
+            target:"Sandbox cleanup claim",
+            message:`Sandbox run ${action.run.runId} fencing token changed before state could be stored`
+          },
+          result
+        );
       }
     }
+    await this.releaseBlockedCleanupClaims(cleanupClaims.claimedRuns, blockedRunIds, cleanupFailures);
     const afterRuns = await this.loadRuns(input);
     result.runCounts = runCounts(afterRuns.allRuns);
-    const afterPlan = this.plan(afterRuns.activeRuns, refreshed.resources, afterRuns.allRuns, !input.runId);
+    const afterPlan = this.plan(afterRuns.activeRuns, observed.resources, afterRuns.allRuns, !input.runId);
     result.cleanupPlan = this.cleanupPlan(afterPlan.actions, afterRuns.allRuns);
     result.recentCleanupFailures = result.cleanupPlan.recentFailures;
     return result;
@@ -341,10 +384,9 @@ export class SandboxLifecycleService {
   private async applyCleanupActions(
     port: SandboxLifecycleKubernetesPort,
     actions: SandboxReconcileAction[]
-  ): Promise<{ blockedRunIds: Set<string>; errors: string[]; failures:Map<string,{target:string;message:string}> }> {
+  ): Promise<{ failures:Map<string,CleanupFailure> }> {
     const blockedRunIds = new Set<string>();
-    const errors: string[] = [];
-    const failures=new Map<string,{target:string;message:string}>();
+    const failures=new Map<string,CleanupFailure>();
     for (const action of actions) {
       if (action.type === "delete_resource") {
         if (blockedRunIds.has(action.runId)) continue;
@@ -353,7 +395,7 @@ export class SandboxLifecycleService {
           ref = resourceRef(action.resource);
         } catch (error) {
           blockedRunIds.add(action.runId);
-          const message=sanitizeCleanupError(errorMessage(error));errors.push(message);failures.set(action.runId,{target:`${action.kind}/${action.name}`,message});
+          const message=sanitizeCleanupError(errorMessage(error));failures.set(action.runId,{target:`${action.kind}/${action.name}`,message,action});
           continue;
         }
         try {
@@ -362,17 +404,107 @@ export class SandboxLifecycleService {
             continue;
           }
           blockedRunIds.add(action.runId);
-          const message=`Kubernetes delete fence mismatch for ${action.kind}/${action.name}`;errors.push(message);failures.set(action.runId,{target:`${action.kind}/${action.name}`,message});
+          const message=`Kubernetes delete fence mismatch for ${action.kind}/${action.name}`;failures.set(action.runId,{target:`${action.kind}/${action.name}`,message,action});
         } catch (error) {
-          if (await this.deleteTargetGoneOrTerminatingAfterFreshObserves(port, action)) {
-            continue;
-          }
           blockedRunIds.add(action.runId);
-          const message=sanitizeCleanupError(errorMessage(error));errors.push(message);failures.set(action.runId,{target:`${action.kind}/${action.name}`,message});
+          const message=sanitizeCleanupError(errorMessage(error));failures.set(action.runId,{target:`${action.kind}/${action.name}`,message,action});
         }
       }
     }
-    return { blockedRunIds, errors, failures };
+    return { failures };
+  }
+
+  private async inspectRunResources(
+    port:SandboxLifecycleKubernetesPort,
+    run:PersistedSandboxRunState
+  ):Promise<{resources:KubernetesResource[];failure:CleanupFailure|null}>{
+    const resources:KubernetesResource[]=[];
+    let failure:CleanupFailure|null=null;
+    const labels=sandboxIdentityLabels(run);
+    for(const ref of sandboxRunCoreResourceRefs(run)){
+      try{
+        const inspected=await port.inspectResource(ref,labels);
+        if(inspected==="fence_mismatch"){
+          failure??={target:`${ref.kind}/${ref.name}`,message:`Kubernetes inspect fence mismatch for ${ref.kind}/${ref.name}`};
+        }else if(inspected!=="not_found"){
+          resources.push(inspected.resource);
+        }
+      }catch(error){
+        failure??={target:`${ref.kind}/${ref.name}`,message:sanitizeCleanupError(errorMessage(error))};
+      }
+    }
+    return{resources,failure};
+  }
+
+  private async validateInventoryPodFences(
+    actions:SandboxReconcileAction[],
+    runs:PersistedSandboxRunState[],
+    observedResources:KubernetesResource[]
+  ):Promise<Map<string,CleanupFailure>>{
+    const failures=new Map<string,CleanupFailure>();
+    const runsById=new Map(runs.map((run)=>[run.runId,run]));
+    for(const runId of cleanupActionRunIds(actions)){
+      const run=runsById.get(runId);
+      if(!run)continue;
+      const pod=observedResources.find((resource)=>
+        resource.kind==="Pod"&&
+        resource.metadata.namespace===run.namespace&&
+        resource.metadata.name===run.resourceNames.pod
+      );
+      if(!pod)continue;
+      const expectedLabels=sandboxIdentityLabels(run);
+      const uid=typeof pod.metadata.uid==="string"&&pod.metadata.uid.length>0?pod.metadata.uid:null;
+      if(
+        Object.entries(expectedLabels).some(([key,value])=>pod.metadata.labels[key]!==value)||
+        !uid||
+        run.startupPodUid!==null&&run.startupPodUid!==undefined&&uid!==run.startupPodUid
+      ){
+        const failure={
+          target:`Pod/${run.resourceNames.pod}`,
+          message:`Sandbox run ${runId} Pod UID fence mismatch before cleanup`
+        };
+        failures.set(runId,failure);
+        await this.persistUnclaimedCleanupFailure(run,failure);
+      }
+    }
+    return failures;
+  }
+
+  private async persistUnclaimedCleanupFailure(
+    run:PersistedSandboxRunState,
+    failure:CleanupFailure
+  ):Promise<void>{
+    const updatedAt=(this.config.now?.()??new Date()).toISOString();
+    await this.store.sandboxRuns.updateWithFencing(run.runId,run.fencingToken,{
+      ...run,
+      cleanupClaimedAt:null,
+      lastCleanupAt:updatedAt,
+      lastCleanupError:{
+        at:updatedAt,
+        target:failure.target,
+        message:sanitizeCleanupError(failure.message)
+      },
+      fencingToken:run.fencingToken+1,
+      updatedAt
+    });
+  }
+
+  private async resolveCleanupCasConflict(
+    claimed:PersistedSandboxRunState,
+    failure:CleanupFailure,
+    result:SandboxReapResult
+  ):Promise<void>{
+    const current=await this.store.sandboxRuns.get(claimed.runId);
+    if(!current||current.cleanupClaimedAt===null||current.fencingToken!==claimed.fencingToken)return;
+    const claimedRuns=new Map([[current.runId,current]]);
+    const failures=new Map([[current.runId,failure]]);
+    await this.releaseBlockedCleanupClaims(claimedRuns,new Set([current.runId]),failures);
+    const after=await this.store.sandboxRuns.get(current.runId);
+    if(!after||after.cleanupClaimedAt===null||after.fencingToken!==current.fencingToken){
+      result.errors.push(failure.message);
+      return;
+    }
+    result.errors.push(`${failure.message}; cleanup claim could not be cleared`);
   }
 
   private async deferNewlyPersistedOrphanActions(
@@ -423,7 +555,7 @@ export class SandboxLifecycleService {
   private async releaseBlockedCleanupClaims(
     claimedRuns: Map<string, PersistedSandboxRunState>,
     blockedRunIds: Set<string>,
-    failures:Map<string,{target:string;message:string}>
+    failures:Map<string,CleanupFailure>
   ): Promise<void> {
     const updatedAt = (this.config.now?.() ?? new Date()).toISOString();
     for (const runId of blockedRunIds) {
@@ -456,43 +588,16 @@ export class SandboxLifecycleService {
     }
   }
 
-  private async deleteTargetGoneOrTerminatingAfterFreshObserves(
-    port: SandboxLifecycleKubernetesPort,
-    action: Extract<SandboxReconcileAction, { type: "delete_resource" }>
-  ): Promise<boolean> {
-    const attempts = resolveDeleteResourceErrorConfirmAttempts(this.config.deleteResourceErrorConfirmAttempts);
-    const delayMs = resolveDeleteResourceErrorConfirmDelayMs(this.config.deleteResourceErrorConfirmDelayMs);
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      if (attempt > 1) {
-        await sleep(delayMs);
-      }
-      try {
-        const resources = await port.listManagedResources(this.config.namespace);
-        const targetState = deleteTargetStateFromFreshObserve(resources, action);
-        if (targetState === "gone_or_terminating") {
-          return true;
-        }
-        if (targetState === "fence_mismatch") {
-          return false;
-        }
-      } catch {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  private async persistRunTransition(run: SandboxRunState, claimed?: PersistedSandboxRunState): Promise<{
+  private async clearSuccessfulCleanupClaim(current:PersistedSandboxRunState): Promise<{
     previous: PersistedSandboxRunState;
     stored: PersistedSandboxRunState;
   } | null> {
-    const current = claimed ?? await this.store.sandboxRuns.get(run.runId);
-    if (!current) {
-      return null;
-    }
     const now = (this.config.now?.() ?? new Date()).toISOString();
-    const stored = await this.store.sandboxRuns.updateWithFencing(run.runId, current.fencingToken, {
-      ...(run as PersistedSandboxRunState),
+    const stored = await this.store.sandboxRuns.updateWithFencing(current.runId, current.fencingToken, {
+      ...current,
+      cleanupClaimedAt:null,
+      lastCleanupAt:now,
+      lastCleanupError:null,
       fencingToken: current.fencingToken + 1,
       updatedAt: now
     });
@@ -502,7 +607,7 @@ export class SandboxLifecycleService {
   private async completeReleasedRun(run:SandboxRunState):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
     const current=await this.store.sandboxRuns.get(run.runId);if(!current)return null;
     const releasedAt=(this.config.now?.()??new Date()).toISOString();
-    const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
+    const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:releasedAt,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
     const startedAt=current.startedAt;
     const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
     const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
@@ -698,63 +803,26 @@ function filterObservedResourcesForScope(
   return resources.filter((resource) => resource.metadata.labels[SANDBOX_LABEL_KEYS.runId] === scope.runId);
 }
 
-type DeleteTargetFreshObserveState = "gone_or_terminating" | "active" | "fence_mismatch";
-
-function deleteTargetStateFromFreshObserve(
-  resources: KubernetesResource[],
-  action: Extract<SandboxReconcileAction, { type: "delete_resource" }>
-): DeleteTargetFreshObserveState {
-  const namespace = action.resource.metadata.namespace;
-  if (!namespace) {
-    return "fence_mismatch";
-  }
-  const matchingRefs = resources.filter((resource) => isSameDeleteActionRef(resource, action, namespace));
-  if (matchingRefs.length === 0) {
-    return "gone_or_terminating";
-  }
-  const actionUid = deleteActionUid(action);
-  for (const resource of matchingRefs) {
-    if (!hasLabelValues(resource.metadata.labels, action.labels)) {
-      return "fence_mismatch";
-    }
-    if (actionUid && resourceUid(resource) !== actionUid) {
-      return "fence_mismatch";
-    }
-    if (!hasDeletionTimestamp(resource)) {
-      return "active";
-    }
-  }
-  return "gone_or_terminating";
-}
-
-function isSameDeleteActionRef(
-  resource: KubernetesResource,
-  action: Extract<SandboxReconcileAction, { type: "delete_resource" }>,
-  namespace: string
-): boolean {
-  return (
-    resource.kind === action.kind &&
-    resource.metadata.name === action.name &&
-    resource.metadata.namespace === namespace
-  );
-}
-
-function hasLabelValues(actual: Record<string, string>, expected: Record<string, string>): boolean {
-  return Object.entries(expected).every(([key, value]) => actual[key] === value);
-}
-
 function hasDeletionTimestamp(resource: KubernetesResource): boolean {
   const value = resource.metadata.deletionTimestamp;
   return typeof value === "string" && value.length > 0;
 }
 
-function deleteActionUid(action: Extract<SandboxReconcileAction, { type: "delete_resource" }>): string | null {
-  return resourceUid(action.resource);
-}
+type CleanupFailure={
+  target:string;
+  message:string;
+  action?:Extract<SandboxReconcileAction,{type:"delete_resource"}>;
+};
 
-function resourceUid(resource: KubernetesResource): string | null {
-  const value = resource.metadata.uid;
-  return typeof value === "string" && value.length > 0 ? value : null;
+function deleteFailureResolved(failure:CleanupFailure,resources:KubernetesResource[]):boolean{
+  const action=failure.action;
+  if(!action)return false;
+  const matching=resources.find((resource)=>
+    resource.kind===action.kind&&
+    resource.metadata.namespace===action.resource.metadata.namespace&&
+    resource.metadata.name===action.name
+  );
+  return !matching||hasDeletionTimestamp(matching);
 }
 
 function actionSummary(action: SandboxReconcileAction): SandboxLifecycleActionSummary {
@@ -797,27 +865,4 @@ function resourceRef(resource: KubernetesResource): KubernetesResourceRef {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown sandbox lifecycle error";
-}
-
-function resolveDeleteResourceErrorConfirmAttempts(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) {
-    return DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS;
-  }
-  return Math.min(MAX_DELETE_RESOURCE_ERROR_CONFIRM_ATTEMPTS, Math.max(1, Math.floor(value)));
-}
-
-function resolveDeleteResourceErrorConfirmDelayMs(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) {
-    return DEFAULT_DELETE_RESOURCE_ERROR_CONFIRM_DELAY_MS;
-  }
-  return Math.max(0, Math.floor(value));
-}
-
-async function sleep(delayMs: number): Promise<void> {
-  if (delayMs <= 0) {
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, delayMs);
-  });
 }

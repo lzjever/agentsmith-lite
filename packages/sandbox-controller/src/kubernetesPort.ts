@@ -33,6 +33,18 @@ export interface SandboxKubernetesMutationPort {
   deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch">;
 }
 
+export type SandboxResourceInspection =
+  | {state:"present";resource:KubernetesResource}
+  | "not_found"
+  | "fence_mismatch";
+
+export interface SandboxKubernetesInspectionPort {
+  inspectResource(
+    ref:KubernetesResourceRef,
+    expectedLabels:Record<string,string>
+  ):Promise<SandboxResourceInspection>;
+}
+
 export type PodReadiness =
   | {state:"ready"|"pending"|"failed";podUid:string;podIp?:string}
   | "not_found" | "fence_mismatch";
@@ -68,7 +80,7 @@ const LIST_ORDER: readonly SandboxCoreResourceKind[] = [
   "Pod"
 ];
 
-export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
+export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, SandboxKubernetesInspectionPort, SandboxKubernetesReadinessPort {
   private readonly transport: KubernetesTransport;
 
   constructor(options: { transport?: KubernetesTransport } = {}) {
@@ -149,6 +161,25 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
 
     const uid = typeof resource.metadata.uid === "string" ? resource.metadata.uid : null;
     return this.deleteResourceByRef(ref, uid);
+  }
+
+  async inspectResource(
+    ref:KubernetesResourceRef,
+    expectedLabels:Record<string,string>
+  ):Promise<SandboxResourceInspection>{
+    const response=await this.transport.request({
+      method:"GET",
+      path:resourcePath(ref),
+      headers:{}
+    });
+    if(response.statusCode===404)return"not_found";
+    if(!isSuccess(response.statusCode)){
+      throw kubernetesHttpError(`Kubernetes inspect ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`,response);
+    }
+    const resource=parseExactResource(response.body,ref);
+    const uid=resourceUid(resource);
+    if(!hasLabels(resource,expectedLabels)||!uid||ref.uid!==undefined&&uid!==ref.uid)return"fence_mismatch";
+    return{state:"present",resource};
   }
 
   private async deleteResourceByRef(ref: KubernetesResourceRef, uid: string | null): Promise<"deleted" | "not_found" | "fence_mismatch"> {
@@ -412,6 +443,23 @@ function asResource(body: unknown, defaults?: Pick<KubernetesResource, "apiVersi
       labels: isStringRecord(metadata.labels) ? metadata.labels : {}
     }
   };
+}
+
+function parseExactResource(body:unknown,ref:KubernetesResourceRef):KubernetesResource{
+  const record=asRecord(body);
+  const metadata=asRecord(record.metadata);
+  if(
+    record.kind!==ref.kind||
+    metadata.name!==ref.name||
+    metadata.namespace!==ref.namespace||
+    !isStringRecord(metadata.labels)
+  )throw new Error(`Kubernetes inspect ${ref.kind}/${ref.name} returned an invalid Kubernetes resource`);
+  return asResource(record);
+}
+
+function resourceUid(resource:KubernetesResource):string|null{
+  const uid=resource.metadata.uid;
+  return typeof uid==="string"&&uid.length>0?uid:null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -17,7 +17,7 @@ import type {
   BotifiedUploadFileInput,
   BotifiedUploadFileResult
 } from "../../packages/ports/src/botified.js";
-import type { KubernetesResourceRef, PodReadiness, SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
+import type { KubernetesResourceRef, PodReadiness, SandboxKubernetesInspectionPort, SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 
 describe("Botified Chat Completions broker", () => {
   let baseUrl = "";
@@ -406,12 +406,12 @@ class AcceptingBotifiedClient implements BotifiedRuntimeHttpClient {
   }
 }
 
-class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort {
+class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernetesReadinessPort, SandboxKubernetesInspectionPort {
   private resources: KubernetesResource[] = [];
 
   async listManagedResources() { return structuredClone(this.resources); }
   async applyResource(resource: KubernetesResource) {
-    if (resource.kind === "Pod" && !resource.metadata.uid) {
+    if (!resource.metadata.uid) {
       resource = structuredClone(resource);
       resource.metadata.uid = `uid-${resource.metadata.name}`;
     }
@@ -423,6 +423,17 @@ class ReadySandboxPort implements SandboxKubernetesMutationPort, SandboxKubernet
     const before = this.resources.length;
     this.resources = this.resources.filter((item) => item.kind !== ref.kind || item.metadata.name !== ref.name);
     return before === this.resources.length ? "not_found" as const : "deleted" as const;
+  }
+  async inspectResource(ref:KubernetesResourceRef,expectedLabels:Record<string,string>){
+    const resource=this.resources.find((candidate)=>
+      candidate.kind===ref.kind&&candidate.metadata.namespace===ref.namespace&&candidate.metadata.name===ref.name
+    );
+    if(!resource)return"not_found" as const;
+    const uid=typeof resource.metadata.uid==="string"&&resource.metadata.uid.length>0?resource.metadata.uid:null;
+    if(!uid||ref.uid!==undefined&&ref.uid!==uid||Object.entries(expectedLabels).some(([key,value])=>resource.metadata.labels[key]!==value)){
+      return"fence_mismatch" as const;
+    }
+    return{state:"present" as const,resource:structuredClone(resource)};
   }
   async getPodReadiness(_namespace: string, name: string): Promise<PodReadiness> {
     const pod = this.resources.find((resource) => resource.kind === "Pod" && resource.metadata.name === name);
