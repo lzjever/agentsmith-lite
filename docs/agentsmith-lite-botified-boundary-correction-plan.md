@@ -2,102 +2,190 @@
 
 ## 1. Purpose and stop point
 
-This is a forward implementation plan for AgentSmith Lite. It is not a request
-to reset history, revert whole commits, restore old files, or discard unrelated
-work from the dirty tree.
+This is the forward implementation plan for correcting the AgentSmith Lite and
+Botified boundary. It is not a request to reset history, revert whole commits,
+restore old files, or discard unrelated work from the dirty tree.
 
-The exact starting point is:
+The starting point is:
 
-- product repository HEAD `9f1fff1`;
-- an uncommitted two-Pod startup-generation change across 17 tracked files,
-  plus untracked migration
-  `infra/db/migrations/079_sandbox_startup_generation.sql`;
+- product repository HEAD `014096b`;
+- an uncommitted single-Pod startup-identity and Release-convergence change
+  across tracked files, plus untracked migration
+  `infra/db/migrations/079_sandbox_startup_identity.sql`;
 - a runner still built from `third_party/botified`, whose pin declares upstream
   `v0.4.37` plus AgentSmith-specific source changes;
-- AgentSmith protocol code from `5c94227`, `8422d81`, and `9f1fff1` coupled to
-  behavior that shipped historically in Botified `v0.4.41`;
-- canonical docs split between the vendored `v0.4.37` fork, historical
-  `v0.4.41` contracts, and the uncommitted false-to-true two-Pod design.
+- AgentSmith protocol code coupled to withdrawn Botified `v0.4.41` behavior;
+- runtime config code that still renders unsupported fields and reuses one
+  credential for two trust directions.
 
-Botified `v0.4.41` is immutable historical material. It is not the target
-runtime for this correction. AgentSmith must wait for the Botified team to
-publish a corrective release that retracts the AgentSmith-driven additions.
-Only after publication may AgentSmith select the exact corrective:
+The fixed Botified runtime input is:
 
-- version;
-- Linux x86_64 asset name;
-- SHA-256.
+```text
+version: v0.4.44
+asset: botified-core-linux-x86_64-musl.tar.gz
+sha256: 1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0
+```
 
-Those three values become one immutable runner input. Until they are known and
-verified, packaging preparation may proceed but runtime activation must not.
-AgentSmith does not request another Botified API change and does not build a
-temporary compatibility facade.
+Packaging verifies the asset SHA-256 before extraction and fails immediately
+on mismatch. There is no runtime selection process, compatibility fallback,
+vendored source build, or request for an AgentSmith-specific Botified change.
+
+### Execution boundary
+
+- Implement only in the `agentsmith-lite` repository.
+- `.reference/**` is permanently read-only: do not write, run Git commands,
+  build, test, install, or generate files there.
+- Do not modify `agentsmith-lite-substrates` unless the user explicitly
+  authorizes it for the current task.
 
 ## 2. Correct product boundary
 
 ### Task and Run
 
 - **Task** is the durable user object and stable Botified session identity.
-  Every Run for a Task renders the same `runtime.session=taskId`.
+  Every Run for a Task renders `runtime.session` as that Task ID.
 - **Run** is one allocation of compute. It owns one immutable runtime ConfigMap
   and one `restartPolicy: Never` Pod from `starting` to `active`, then
   `release_requested`, `failed`, or `released`.
 - A Run never changes its runtime config, advances a startup generation, or
-  replaces its Pod. If its Pod exits, disappears, or changes identity, that Run
-  cannot activate or resume. It is failed/released; later work creates a new
-  Run for the Task's same stable session identity.
-- The selected corrective Botified release defines session-open behavior.
-  AgentSmith renders only that release's documented config. It does not require
-  `resume_unfinished`, process-open observations, deployment generations, or an
-  open epoch.
+  replaces its Pod. If its Pod exits, disappears, or changes identity, the Run
+  cannot activate or resume. Later work creates a new Run.
+- Existing test sessions are disposable. After the runtime correction, use a
+  fresh session rather than migration, dual-read, or compatibility replay.
 
-### Ownership
+### AgentSmith ownership
 
 AgentSmith owns:
 
-- Task/Run product state and stable Task-to-session naming;
+- Task and Run product state, authorization, and stable Task-to-session naming;
 - Run reservation, one startup continuation owner, claim lease/recovery, and
   atomic activation;
 - immutable Run config identity and exact app-owned Kubernetes resources;
 - structured Pod readiness, real Pod UID/IP, UID-fenced deletion, and final
   identity reread;
-- Release convergence, unknown startup-action recovery, cleanup claim release,
-  usage settlement, and audit events;
+- Release convergence, cleanup claim release, usage settlement, and product
+  audit;
 - public stale-action fences such as `expectedRunId`;
-- stale Web read/SSE guards;
-- the AgentSmith `bash-executor` Terminal sidecar and exact-Run WebSocket
-  admission.
+- the internal LLM broker, provider selection, provider credentials, quota
+  reservation, usage settlement, and LLM audit;
+- the AgentSmith Terminal sidecar and exact-Run WebSocket admission.
+
+### Botified ownership
 
 Botified owns:
 
 - session open/replay and all journal/checkpoint formats;
 - ordinary message admission;
 - current runtime state and no-body session-wide Abort;
-- timeline and file APIs exposed by the selected corrective release;
-- its own local model Bash implementation.
+- timeline and file APIs published by `v0.4.44`;
+- its local model Bash implementation.
 
 AgentSmith is a thin authenticated client of those published APIs. It does not
 own Botified delivery authority, durable downstream control receipts,
 background Stop, session compatibility, or internal process state.
 
-## 3. Selected API behavior
+## 3. Fixed Botified v0.4.44 contract
 
-The implementation must be derived from the corrective release source and
-published artifact, not copied from the `v0.4.41` contract.
+### Runtime config
+
+AgentSmith renders one OpenAI-compatible provider:
+
+```yaml
+version: 1
+
+providers:
+  - name: agentsmith
+    api_compat: standard
+    base_url: http://agentsmith-lite-api.${KUBE_NAMESPACE}.svc.cluster.local/api/internal/tasks/${TASK_ID}/runs/${RUN_ID}/v1
+    use_env_proxy: false
+    model: ${ENDPOINT_MODEL}
+    api_key_env: AGENTSMITH_LLM_BROKER_KEY
+    request_timeout_secs: 120
+    priority: 100
+    capabilities: [text, tool_calls]
+
+tools:
+  enabled: [bash]
+
+service:
+  host: 0.0.0.0
+  port: 17777
+  service_key_env: BOTIFIED_SERVICE_KEY
+  max_queue_messages: 32
+  max_queue_bytes: 33554432
+
+runtime:
+  cwd: /workspace/task/home
+  data_dir: /workspace/task/.botified
+  session: ${TASK_ID}
+
+subagents:
+  enabled: false
+
+registry:
+  enabled: false
+
+task_presets:
+  presets: {}
+  start_on_boot: []
+
+skills:
+  default_discovery: true
+
+context_files:
+  enabled: true
+```
+
+The server generates `base_url`; neither the Web nor the user supplies it.
+`TASK_ID` and `RUN_ID` are individually percent-encoded when inserted into the
+URL. The current real broker route is:
+
+```text
+POST /api/internal/tasks/:taskId/runs/:runId/v1/chat/completions
+```
+
+Botified appends `chat/completions` to the configured `/v1` base. The exact
+generated base is therefore:
+
+```text
+http://agentsmith-lite-api.${KUBE_NAMESPACE}.svc.cluster.local/api/internal/tasks/<encoded-taskId>/runs/<encoded-runId>/v1
+```
+
+`v0.4.44` accepts an absolute HTTP or HTTPS provider URL. HTTP is selected
+explicitly by the `http://` scheme; there is no `allow_insecure_http` field.
+`use_env_proxy` is always `false`, so Botified ignores ambient proxy variables.
+Redirects remain disabled by Botified.
+
+Do not render any of these withdrawn fields:
+
+- `allow_insecure_http`;
+- `resume_unfinished`;
+- `bash_executor_addr`;
+- delivery receipt or legacy-journal settings;
+- exact Abort or background Stop settings.
 
 ### Messages
 
-- Send an ordinary message using the corrective release's normal request and
-  response.
-- Remove AgentSmith delivery keys, request hashes, `CanonicalLegacy`,
-  payload-digest checks, receipt replay/query, and local delivery authority.
-- On an ambiguous transport result, return a retryable product error.
-  Conversation convergence comes from the selected release's timeline/state;
-  AgentSmith does not claim exactly-once admission beyond that release.
+`POST /v1/messages` ordinary success is HTTP `200`. AgentSmith accepts exactly
+these normal admission kinds:
+
+- `input_accepted`;
+- `input_queued`;
+- `input_duplicate`.
+
+The response also contains `input_id`, `message_id`, `timeline_cursor`, content
+summary, `queue_length`, and `state`. Slash-command responses have a distinct
+shape and are not AgentSmith control receipts.
+
+Remove AgentSmith delivery keys, request hashes, `CanonicalLegacy`,
+payload-digest checks, receipt replay/query, and local delivery authority.
+After an ambiguous transport result, return a retryable product error and
+converge from Botified timeline/state. Do not claim cross-service exactly-once
+admission.
 
 ### Abort
 
-The final AgentSmith public contract is:
+The AgentSmith public contract remains:
 
 ```http
 POST /api/v1/tasks/:taskId/turn/abort
@@ -106,116 +194,147 @@ Content-Type: application/json
 {"expectedRunId":"<run-id>"}
 ```
 
-- The body has exactly `expectedRunId`. It has no `turnId`.
-- `Idempotency-Key` is neither required nor consumed for this route.
-- Resolve and authorize the Task, then compare `expectedRunId` with its current
-  Run solely as an AgentSmith stale UI fence.
-- A missing/different current Run returns HTTP `409` with
-  `code=task_run_target_conflict`.
-- A matching Run whose state is not `active` returns HTTP `409` with
-  `code=task_run_not_active`.
+- `expectedRunId` is only an AgentSmith stale-UI fence.
+- A missing or different current Run returns
+  `409 task_run_target_conflict`.
+- A matching Run that is not active returns `409 task_run_not_active`.
 - A matching active Run receives one authenticated, no-body
   `POST /v1/abort`.
-- Downstream success returns HTTP `200` with exactly:
+- Downstream success is HTTP `200` `{ok,queue_length,state}`. AgentSmith maps it
+  to its small product response.
+- An unreachable or ambiguous downstream result returns retryable
+  `503 botified_abort_unavailable`.
+- AgentSmith stores no downstream command key, target, pending receipt, result,
+  replay instruction, or exact-turn identity.
+- The Web refreshes state and timeline after the call. A later user click is
+  the only retry.
 
-```json
-{"outcome":"completed","taskId":"<task-id>","runId":"<run-id>"}
-```
+Botified has no `/v1/tasks/stop`. Remove AgentSmith's Stop route, capability,
+client method, UI action, persistence, and tests. Do not emulate Stop through
+Abort, Bash, or timeline inference.
 
-- Unreachable Botified or an ambiguous response returns HTTP `503` with the
-  normal retryable error envelope and
-  `code=botified_abort_unavailable`.
-- Do not persist a Botified command key, downstream target, pending Abort
-  receipt, request result, or restart recovery record. Do not automatically
-  replay an ambiguous Abort.
-- Remove `turnId`, `result`, `keyDisposition`, `accepted_in_progress`, and
-  rejected-command receipt variants from the Abort request/response path.
-- After one call, the Web refreshes canonical state and timeline. The user may
-  press Abort again if the Run still appears active; Botified's no-body
-  session-wide Abort is itself idempotent.
+### Bash and sessions
 
-### Background Stop
+- Model Bash is Botified's local `bash -lc` implementation.
+- The AgentSmith Terminal remains a separate sidecar and is not a Botified
+  Terminal route.
+- Configured credential environment variables must be filtered from Bash child
+  processes.
+- The corrected runtime starts with fresh test sessions. There is no migration
+  or dual-read of sessions written by withdrawn AgentSmith-specific records.
 
-- Remove AgentSmith's background Stop API, public capability, UI action,
-  downstream persistence, and Botified `/v1/tasks/stop` client method.
-- Do not emulate Stop through Abort, Bash process control, timeline inference,
-  or a compatibility route.
-- Stop may return only in a later product change if a then-selected Botified
-  release independently publishes and owns a formal capability. It is not part
-  of this correction.
+## 4. LLM broker and credential boundary
 
-### Provider broker transport
+### One direct transport path
 
-The corrective Botified release has no `allow_insecure_http`. Use one
-cross-repository TLS path:
-
-- Service name remains `agentsmith-lite-api`;
-- app namespace is the installed `KUBE_NAMESPACE`;
-- broker DNS is
-  `agentsmith-lite-api.${KUBE_NAMESPACE}.svc.cluster.local`;
-- broker HTTPS port is `3443`;
-- this is an additional listener and port on the existing AgentSmith API
-  Deployment and Service, not a new service or deployment.
-
-The local substrates installer signs a dedicated broker server certificate
-during install. Its SAN contains only the fixed broker Service DNS for the
-selected app namespace. It generates/reuses a local CA, validates the
-certificate before output, and emits this app overlay contract:
+The only provider path is:
 
 ```text
-app.env:
-  AGENTSMITH_LITE_BROKER_HOST
-  AGENTSMITH_LITE_BROKER_PORT=3443
-
-app.secrets.env:
-  AGENTSMITH_LITE_BROKER_TLS_CERT_PEM_B64
-  AGENTSMITH_LITE_BROKER_TLS_KEY_PEM_B64
-  AGENTSMITH_LITE_BROKER_TLS_CA_PEM_B64
+Botified in the Run Pod
+  -> HTTP ClusterIP Service default port 80
+  -> AgentSmith internal exact-Task/exact-Run broker route
+  -> selected OpenAI-compatible provider
 ```
 
-PEM values are base64 encoded so the env files remain one-record-per-line.
-Reinstall reuses valid material for the same namespace/DNS and rotates it when
-identity changes. The cloud path does not generate a CA: the administrator
-provides certificate, key, and CA through the same three base64 variables and
-the same host/port contract. Substrates validation rejects a missing value,
-malformed base64/PEM, mismatched cert/key, untrusted chain, expired/not-yet-valid
-certificate, or SAN that does not equal the derived Service DNS.
+There is no provider-forwarder, loopback provider port, private CA, dedicated
+broker listener, or second transport path.
 
-AgentSmith app deployment decodes the material into one app-owned Kubernetes
-Secret. The API container mounts certificate and key and starts an independent
-HTTPS listener on `3443`. That listener registers only the authenticated broker
-route; it has no public product API, health, OIDC, Web, Terminal, or static
-routes. The existing `agentsmith-lite-api` Service adds a named
-`broker-https` port targeting `3443`; public Ingress does not expose it.
+The existing AgentSmith API server continues to own:
 
-Each Run Pod projects only `ca.crt` from the app-owned Secret. It never mounts
-the broker server certificate or private key. Botified `base_url` is
-`https://agentsmith-lite-api.${KUBE_NAMESPACE}.svc.cluster.local:3443/...`.
-At corrective-release selection, verify and record the one documented
-standard CA-file mechanism supported by that binary. The intended mechanism is
-`SSL_CERT_FILE=/etc/agentsmith-lite/broker-ca/ca.crt`; use it only after an
-artifact-level HTTPS check proves the release honors it. If that release does
-not support `SSL_CERT_FILE`, select its documented equivalent and update this
-single value before activation. If it supports no standard/system CA-file
-mechanism, release selection is blocked. Do not patch Botified, disable
-verification, restore `allow_insecure_http`, or add a second runtime path.
+- `POST /api/internal/tasks/:taskId/runs/:runId/v1/chat/completions`;
+- exact Task/Run authorization and active-Run validation;
+- endpoint resolution and model enforcement;
+- provider credential retrieval;
+- quota reservation before upstream work;
+- usage settlement from the provider response;
+- reservation release or failure settlement when upstream work fails;
+- user/project usage aggregation and administrator audit.
 
-The Run NetworkPolicy permits TCP egress to API pods only on `3443`, plus the
-existing DNS rule. It removes Run-to-API port `3000` egress. Broker
-authentication remains exact-Run scoped, and provider credentials remain only
-inside AgentSmith.
+The broker is the only authority for provider credentials, quota, usage, and
+LLM audit. Botified does not select a provider credential and the Run Pod never
+receives an upstream provider key.
 
-## 4. Startup and Release invariants
+### Two independent bearer credentials
+
+The Run has two separate credentials:
+
+| Credential | Direction | Visible to |
+| --- | --- | --- |
+| `AGENTSMITH_LLM_BROKER_KEY` | Botified to AgentSmith internal broker | Botified provider client and AgentSmith broker verifier |
+| `BOTIFIED_SERVICE_KEY` | AgentSmith to Botified service API | Botified service and AgentSmith Botified client |
+
+They must be distinct for the same Run. Reuse the existing AgentSmith
+per-Run secret handling and avoid a new token service or capability framework.
+Do not add `APP_RUN_TOKEN_SECRET` or a three-capability HMAC design.
+
+The Run Secret injects both values only into the Botified container:
+
+- provider `api_key_env` references `AGENTSMITH_LLM_BROKER_KEY`;
+- service `service_key_env` references `BOTIFIED_SERVICE_KEY`;
+- the Terminal container receives neither;
+- Botified's Bash child environment receives neither;
+- the values are never written to ConfigMap, Task output, timeline, logs,
+  audit detail, or browser responses.
+
+The broker authenticates `AGENTSMITH_LLM_BROKER_KEY` against the exact
+`:taskId/:runId` path before reading or forwarding the request. A key from
+another Run, a released Run, or a Task/Run mismatch fails without contacting
+the provider.
+
+### HTTP limitation
+
+Traffic between the Run Pod and AgentSmith API pods is plaintext HTTP. This is
+a known limitation accepted for the current local/private Kubernetes target.
+Protection comes from:
+
+- a high-entropy exact-Run bearer credential;
+- exact Task/Run authorization at the broker;
+- a Run NetworkPolicy that permits only cluster DNS and API pods on TCP 3000;
+- no upstream provider credential in the Run Pod;
+- no public Ingress route to `/api/internal/**`.
+
+This does not provide transport confidentiality against a compromised cluster
+network, node, CNI, or privileged workload. If a future deployment requires
+mTLS, treat it as a separate product requirement and replace this path in one
+coordinated change. Do not add a dormant TLS path, fallback, private-CA
+contract, or dual-mode configuration now.
+
+### Kubernetes network boundary
+
+The Run NetworkPolicy allows egress only to:
+
+- cluster DNS on the required UDP/TCP DNS ports;
+- pods labeled as the AgentSmith API component in the Run namespace on TCP
+  `3000`, the API Pod target port behind Service port `80`.
+
+It does not allow general internet egress, arbitrary namespace egress, ambient
+proxy egress, or direct provider access. `use_env_proxy:false` reinforces the
+same path at the Botified client.
+
+The public Ingress must not match or forward `/api/internal/**`. The internal
+route remains reachable only through the ClusterIP Service. Manifest tests
+must inspect effective Ingress paths rather than infer isolation from route
+naming.
+
+## 5. Startup and Release invariants
 
 ### Single-Pod startup
 
 Each Run has one immutable config identity:
 
-- derive the identity from the exact serialized runtime config bytes;
+- derive the identity from exact serialized runtime config bytes;
 - use a content-addressed immutable ConfigMap name scoped by `runId`;
 - persist the expected ConfigMap name and content hash before Kubernetes apply;
-- mount that exact ConfigMap in the Pod and make the startup command read only
-  that mount path.
+- mount that ConfigMap and read only that path at startup.
+
+One Run renders one Pod containing:
+
+- the published Botified `v0.4.44` binary;
+- the AgentSmith Terminal sidecar.
+
+Both containers share the intended JuiceFS workspace and remain process
+isolated. There is no provider-forwarder container and no false-to-true Pod
+transition.
 
 Kubernetes readiness is structured:
 
@@ -226,48 +345,39 @@ type PodReadiness =
   | "fence_mismatch";
 ```
 
-Do not retain string `"ready"`, fabricated local/legacy UIDs, config generation,
-startup phase, or runtime generation annotations.
+Do not retain string `"ready"`, fabricated UIDs, startup generations, startup
+phases, runtime generations, or Pod replacement.
 
-The first observed real Pod UID is persisted against the Run. Every later
-readiness poll and the final pre-activation reread must match it. If the Pod
-disappears, a Pod with the same name but another UID is a replacement and is
-never adopted for that Run. `restartPolicy: Never` prevents process restart
-inside the selected Pod; controller reconciliation must also refuse Pod
-recreation for a Run that already recorded a UID.
+The first observed real Pod UID is persisted. Every later readiness poll and
+the final pre-activation reread must match it. A missing Pod or same-name Pod
+with another UID is never adopted or recreated for that Run.
 
 Activation requires:
 
 1. the Task still points to the exact Run;
 2. startup claim and fencing token still match;
-3. ConfigMap name and actual data bytes still match the persisted content hash;
-4. the exact recorded Pod UID is Ready and has a usable real Pod IP;
-5. authenticated health and state calls to that exact Pod succeed;
-6. state `session_id` matches the Task ID;
-7. a final Pod and ConfigMap reread still matches before atomic activation.
+3. ConfigMap name and data bytes match the persisted hash;
+4. the exact recorded Pod UID is Ready with a usable real Pod IP;
+5. authenticated Botified health and state calls to that Pod succeed;
+6. Botified state `session_id` matches the Task ID;
+7. a final Pod and ConfigMap reread still matches;
+8. atomic activation succeeds after all fences remain valid.
 
-Call the Pod IP directly for startup verification. Do not route startup proof
-through a Service that could select another Pod. Success proves only that the
-exact owned Pod serves the selected release for the expected session; it does
-not claim a Botified process-open epoch.
+### Startup ownership
 
-### Startup owner and unknown actions
-
-Retain the existing logic that is independent of two-Pod generation:
+Retain the existing generation-independent behavior:
 
 - one durable startup reservation and one process-local continuation per Run;
 - startup claim token, lease expiry, takeover after expiry, and exact fencing;
 - begin/complete/recover records around Kubernetes apply and readiness calls;
-- hard deadlines and `AbortSignal` cancellation;
-- unknown apply/readiness outcomes remain `starting` until exact reconciliation
-  resolves ownership;
-- release of a stale/expired startup claim so another coordinator can continue;
-- Release cancellation of the process-local startup operation;
-- no activation after Release advances the Run fence;
-- atomic Run activation plus Terminal-start receipt completion where applicable.
+- bounded deadlines and cancellation;
+- unknown apply/readiness outcomes remain `starting` until reconciliation;
+- stale claim release so another coordinator can continue;
+- Release cancellation of process-local startup;
+- no activation after Release advances the Run fence.
 
-Remove only generation-specific phase transitions, false/true config changes,
-Pod deletion/replacement, and generation evidence.
+Remove generation-specific phase transitions, false/true config changes, Pod
+deletion/replacement, and generation-only tests.
 
 ### Release convergence
 
@@ -275,333 +385,279 @@ Retain and finish:
 
 - public `expectedRunId` stale fence;
 - durable `accepted_in_progress` Release reservation;
-- process-local startup cancellation after the Release fence commits;
+- startup cancellation after the Release fence commits;
 - exact app-owned resource enumeration and UID/label-fenced deletion;
 - unknown deletion recovery and cleanup claim release;
-- completion only after all exact Run resources are confirmed absent;
-- one usage settlement, final `released` state, and stable completed response;
-- no cleanup of resources not owned by the exact Run.
+- completion only after all exact Run resources are absent;
+- one sandbox-duration and usage settlement;
+- final `released` state and stable completed response;
+- no cleanup of resources outside the exact Run.
 
-Release does not depend on Botified Abort/Stop success.
-
-## 5. Simplified local cutover
-
-AgentSmith Lite has not been released and all existing sessions are test data.
-There is no production migration or compatibility requirement.
-
-Perform one coordinated local cutover:
-
-1. publish and verify the Botified corrective release;
-2. select and record its version, asset, and SHA-256 in AgentSmith packaging;
-3. stop local new-work admission;
-4. unconditionally request Release for every existing unreleased Run and
-   reconcile until its app-owned resources are absent;
-5. stop the local AgentSmith deployment;
-6. resolve the local migration-079 branch in Phase 0 and, when it was applied,
-   reset/recreate the disposable local app database;
-7. delete all local Botified test session data;
-8. deploy the coordinated app, Web client, runner image, runtime config, and
-   broker TLS configuration;
-9. create a new Task/session and resume admission only after the focused local
-   core path succeeds.
-
-Do not migrate, dual-read, replay, preserve, or classify old test sessions. Do
-not create a drain report, evidence bundle, compatibility ledger, cutover
-certificate, or other ceremony.
+Release is unconditional after user confirmation and does not depend on
+Botified Abort or Stop success.
 
 ## 6. Implementation phases
 
-### Phase 0: Remove the uncommitted two-Pod branch
+### Phase 0: Finish the single-Pod identity and Release work
 
-From the current dirty tree, preserve unrelated hunks and:
+Review the current dirty tree as one unfinished implementation, preserving
+unrelated hunks and completing:
 
-- remove startup generation/phase fields and store methods;
-- remove false-to-true config transitions and Pod replacement;
-- remove fabricated readiness identities;
-- retain immutable config name/hash, first real Pod UID, optional Pod IP,
-  structured readiness, final identity reread, and no-recreation guard;
-- retain independent Release receipts, unknown-action recovery, startup claim
-  release, and their focused tests.
+- immutable ConfigMap name and exact serialized config hash;
+- first real Pod UID/IP persistence and structured readiness;
+- final ConfigMap/Pod identity reread before activation;
+- refusal to recreate or adopt a replacement Pod for the same Run;
+- one startup owner, unknown-action recovery, and stale claim release;
+- one Pod containing only Botified and Terminal, with direct AgentSmith
+  API-to-Terminal transport;
+- exact-Pod health/state verification and atomic activation;
+- Release fencing, exact owned-resource deletion, absence convergence, and one
+  usage settlement;
+- migration `079_sandbox_startup_identity.sql` for only the ConfigMap and Pod
+  identity columns and constraints.
 
-Before deleting `infra/db/migrations/079_sandbox_startup_generation.sql`, query
-the target local app database:
+Remove any remaining false-to-true config transition, Pod replacement,
+fabricated readiness identity, startup generation/phase, or unsupported
+`resume_unfinished` behavior encountered in this work. Do not delete migration
+`079`; it is part of the single-Pod identity design. If it has already been
+applied locally, do not edit it.
 
-```sql
-select id, checksum, applied_at
-from agentsmith_migrations
-where id = '079_sandbox_startup_generation';
-```
+Implement and test this lifecycle once in Phase 0. Later phases consume it and
+must not introduce a second startup, identity, recovery, or Release path.
 
-- If no row exists, delete the untracked `079` file. No migration is needed.
-- If a row exists, never edit the applied file. Because this project is
-  unreleased and local app data is disposable, first Release all Runs and stop
-  the app, then reset the local AgentSmith app database and rebuild it from the
-  committed migration set after deleting `079`. This is the preferred path.
-- Only if the specific database contains data that cannot be discarded may the
-  team retain the applied `079` unchanged and add the next numbered forward
-  migration to remove its generation/phase columns, constraints, and indexes.
-  That exception does not introduce a production migration framework.
+### Phase 1: Pin the published Botified runtime
 
-### Phase 1: Add broker TLS
+- pin exactly `v0.4.44`,
+  `botified-core-linux-x86_64-musl.tar.gz`, and SHA-256
+  `1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0`;
+- install the verified published binary in
+  `infra/docker/Dockerfile.botified-runner`;
+- delete `third_party/botified/**`, `PINNED_SOURCE.json`, vendored Cargo build
+  logic, and vendored-source bundle metadata;
+- retain the runner image digest lock and offline image archive;
+- package only AgentSmith-owned Terminal support beside the release binary;
+- keep one runner path with no older Botified fallback.
 
-Substrates repository:
+### Phase 2: Make the internal broker the only provider path
 
-- extend `scripts/lib/config.sh` to derive the fixed Service DNS, generate/reuse
-  local broker TLS, and write the five `app.env`/`app.secrets.env` values in
-  both self-hosted and existing-cloud modes;
-- extend `schemas/substrates-config.v1.schema.json` for cloud-admin TLS inputs
-  and validate the emitted app overlay directly in the shared config writer;
-  do not place app-only TLS values in `substrate.env` or
-  `substrate.secrets.env`;
-- extend `config/substrates.self-hosted.example.yaml` only with inputs needed
-  for deterministic local generation, and
-  `config/substrates.existing-cloud.example.yaml` with the same-format
-  administrator-provided TLS inputs;
-- update `scripts/install-online.sh` and `scripts/install-offline.sh` through
-  their shared config/install functions, without creating a second install
-  path;
-- add focused assertions to
-  `scripts/test-self-hosted-rendered-env-contract.sh` and
-  `scripts/test-config-kubeconfig-path-contract.sh`; add one existing-cloud
-  contract case for externally supplied material;
-- update `docs/env-schema.md` and `docs/existing-cloud.md` as the canonical
-  operator contract.
+- keep the current internal broker route on API port `3000`;
+- expose the ClusterIP Service on default HTTP port `80` with
+  `targetPort: 3000`; omit the port from the generated URL;
+- generate the provider base URL server-side with the exact namespace, encoded
+  Task ID, and encoded Run ID;
+- render `api_compat: standard`, the exact HTTP base URL,
+  `api_key_env: AGENTSMITH_LLM_BROKER_KEY`, and
+  `use_env_proxy: false`;
+- remove unsupported Botified config fields;
+- split the broker bearer and Botified service bearer;
+- inject both only into Botified and filter both from Bash;
+- keep endpoint credentials exclusively in the AgentSmith API;
+- enforce exact active Task/Run broker authorization before body forwarding;
+- keep quota reservation, usage settlement, and LLM audit in the central
+  broker;
+- restrict Run egress to DNS and API pods on TCP `3000`;
+- ensure public Ingress cannot route `/api/internal/**`;
+- delete any forwarder, loopback `3120`, `3443`, broker TLS, private-CA,
+  extra listener, or extra capability work if found.
 
-AgentSmith repository:
-
-- add broker TLS parsing to `packages/api-entry-node/src/runtimeConfig.ts` and
-  listener ownership to `packages/api-entry-node/src/server.ts`/`main.ts`;
-- update `packages/sandbox-controller/src/appManifestRenderer.ts` to render the
-  TLS Secret, API mount, container port `3443`, and `broker-https` Service port;
-- update `packages/sandbox-controller/src/manifestRenderer.ts` so each Run
-  mounts only `ca.crt`, sets the verified CA-file environment variable, and
-  permits broker egress only to API pods on TCP `3443`;
-- update `packages/botified-runtime/src/config.ts` to render the HTTPS Service
-  DNS base URL without `allow_insecure_http`;
-- retain exact-Run broker authentication and provider-credential isolation;
-- cover listener route isolation in
-  `tests/api/botified-chat-broker.test.ts`, app Secret/port rendering in
-  `tests/deploy/app-manifest-secrets.test.ts`, and Run CA/NetworkPolicy rendering
-  in `tests/service/sandbox-renderer.test.ts`.
-
-This phase must be complete before selecting the corrective runner for live
-Runs.
-
-### Phase 2: Select and package the corrective Botified release
-
-After the release exists:
-
-- pin exact version, Linux x86_64 asset, and SHA-256;
-- change `infra/docker/Dockerfile.botified-runner` to install the verified
-  published binary;
-- continue building only AgentSmith's `packages/bash-executor`;
-- delete `third_party/botified/**` and `PINNED_SOURCE.json`;
-- remove `vendored_source` bundle metadata and vendored Cargo-layout tests;
-- retain the runner image digest lock and offline image archive contract;
-- keep `botified-runner-entrypoint.sh` as the launcher for official Botified and
-  the AgentSmith Terminal sidecar.
-
-There is no fallback runner and no activation of `v0.4.41`.
+No substrates change belongs to this phase.
 
 ### Phase 3: Correct the AgentSmith protocol
 
-After Phase 2 fixes the exact published wire contract, make one coherent
-API/application/Web change:
+Using the fixed `v0.4.44` wire contract:
 
-- simplify Botified message types to the selected corrective release;
-- implement the exact Abort route/body/status/error contract in Section 3;
-- remove all Stop surfaces;
-- remove delivery and downstream-control persistence;
-- keep `expectedRunId` only where it prevents stale product actions;
-- remove Web mutation recovery that exists solely for delivery/Abort/Stop
-  downstream state;
-- make the Web perform one Abort call, refresh state/timeline, and leave a new
-  user click as the only retry.
+- simplify message types to the three ordinary response kinds;
+- remove delivery and legacy receipt persistence;
+- implement one no-body downstream Abort with `expectedRunId` only at the
+  AgentSmith boundary;
+- remove every Stop surface;
+- remove Web mutation recovery that exists only for withdrawn downstream
+  receipts;
+- keep timeline/state convergence and stale Web response guards.
 
 Migration `078_exact_task_controls.sql` may already be applied and must not be
-edited. Add the next forward migration to remove only its exact Abort/Stop
-state:
+edited. Use one later forward migration only if required to remove exact
+Abort/Stop columns or indexes from a non-disposable database. Disposable local
+data should be reset instead. Do not create a replacement command ledger.
 
-- drop `task_idempotency_exact_control_pending_idx`;
-- drop `task_idempotency_exact_control_envelope_check`;
-- terminalize or delete pending `abort-turn` and `work-stop` test rows without
-  downstream replay;
-- drop `expected_run_id`, `interaction_id`, `downstream_command_key`, and
-  `downstream_target_id` only after confirming no retained Terminal, Release,
-  message, or unrelated idempotency path uses them.
+### Phase 4: Local cutover and canonical docs
 
-Do not create a replacement command ledger.
+- stop local new-work admission;
+- Release existing Runs and reconcile until owned resources are absent;
+- stop the local AgentSmith deployment;
+- apply the single-Pod identity migration, resolve withdrawn exact-control
+  schema through the smallest valid forward change, and delete old Botified
+  test sessions;
+- deploy the coordinated API, Web, runner, runtime config, secrets, and
+  NetworkPolicy;
+- create a fresh Task/session and exercise the focused core path;
+- update canonical runtime, architecture, API, and sandbox docs to this one
+  direct broker path;
+- delete superseded forwarder/TLS/exact-control planning material rather than
+  retaining historical alternatives.
 
-### Phase 4: Finish the one-Pod lifecycle
+There is no production session migration or dual-read requirement.
 
-- render one immutable ConfigMap and one Pod per Run;
-- persist config identity and first real Pod UID;
-- activate only after exact-Pod health/state and final identity reread;
-- fail/release instead of recreating a missing Pod;
-- preserve startup ownership/recovery and Release convergence;
-- preserve direct AgentSmith API-to-Terminal-sidecar transport.
+## 7. Change matrix
 
-### Phase 5: Coordinate cutover and canonical docs
-
-- execute the local cutover in Section 5;
-- rewrite `docs/botified-runtime.md`, `docs/architecture.md`,
-  `docs/api-contract.md`, and `docs/sandbox-controller.md` around the selected
-  corrective release and one-Pod Run lifecycle;
-- remove `v0.4.41` exact API assumptions and false-to-true startup material from
-  `docs/async-state-consistency-product-improvement-plan.md`;
-- delete that superseded process plan if no current product work remains.
-
-## 7. Commit and file matrix
-
-| Origin / area | Delete or change | Preserve |
+| Area | Remove or change | Preserve |
 | --- | --- | --- |
-| Uncommitted 17-file startup diff and `079` | Generation, phases, false/true transition, Pod replacement, fabricated IDs; query `agentsmith_migrations` before deleting `079` | Config identity, real UID/IP readiness, no-recreation fence, startup/Release unknown-action recovery |
-| `5c94227` | `CanonicalLegacy`, delivery receipt union, payload hash validation, `allow_insecure_http`, `v0.4.41` response assumptions | Generic HTTP error handling, timeline/state client behavior not tied to removed fields |
-| `8422d81` | Durable Abort/Stop bindings, downstream command keys/targets, pending recovery, Stop API/UI, exact-turn Abort plumbing | `expectedRunId` stale fences, Release convergence, Terminal startup ownership, unrelated command outcome/UI monotonicity |
-| `9f1fff1` | Legacy turn/delivery receipt preservation expectation added by its focused test | Existing non-legacy command convergence coverage |
-| Migration `078` | Exact-control columns, constraint, partial index, pending test rows through a forward migration | All Terminal-start, Release, message, and unrelated idempotency records |
-| `third_party/botified/**`, `PINNED_SOURCE.json` | Entire vendored Botified source and Lite delta | Nothing; Botified is a published external product |
-| Runner Dockerfile/build/bundle metadata | Botified Cargo build and vendored-source metadata | AgentSmith `bash-executor`, runner digest lock, offline runner archive |
-| Substrates config/install/env output | Add local signing and cloud-supplied broker cert/key/CA in one app overlay contract | Existing four-file env/secrets output, namespace derivation, online/offline shared path |
-| API runtime config/server/app manifest | Add isolated HTTPS broker listener and existing Service port `3443`; never expose it through Ingress | Existing API Deployment/Service and exact-Run broker authorization |
-| `packages/botified-runtime/src/config.ts` | `resume_unfinished`, `allow_insecure_http`, unsupported `v0.4.41` fields | Stable Task session, HTTPS broker URL, documented corrective-release config |
-| Sandbox renderer/Kubernetes port/reconciler | Generation annotations, string readiness, Pod replacement/adoption after UID, broker egress to API port `3000` | Immutable config identity, real UID/IP, CA-only mount, API broker port `3443`, labels, UID fences, `restartPolicy: Never` |
-| Startup store/task service | Generation phases and two-open transitions | Claim/lease, begin/complete/recover unknown action, claim release, atomic activation |
-| Release service/store/reconciler | Nothing solely because Botified controls are removed | Accepted-to-completed convergence, exact deletion, absence proof, settlement |
-| Web Task/Terminal state | Stop action and downstream-control recovery | stale read/SSE guards, `expectedRunId`, exact-Run Terminal intent disposal |
-| `packages/bash-executor`, Terminal WebSocket and NetworkPolicy | Any Botified Terminal route assumption | AgentSmith-owned sidecar handshake and exact-Run authorization |
+| Uncommitted startup diff and `079` | Any remaining generation, phase, false/true transition, Pod replacement, fabricated ID, or `resume_unfinished` behavior | Config identity migration, real UID/IP readiness, no-recreation fence, startup and Release recovery |
+| Botified protocol code | `CanonicalLegacy`, delivery receipts, exact Abort targets, Stop, unsupported runtime fields | Ordinary message, state, timeline, health, no-body Abort |
+| Botified dependency | Vendored source, source compilation, old pin metadata | Fixed `v0.4.44` asset and SHA |
+| Provider transport | Forwarder, `127.0.0.1:3120`, port `3443`, TLS listener, private CA, TLS scripts/secrets | Existing internal broker through Service port `80` to API Pod target port `3000` |
+| Credentials | Shared broker/service key, three-capability scheme, `APP_RUN_TOKEN_SECRET` | Independent broker and Botified service bearer values |
+| Runtime config | `allow_insecure_http`, `resume_unfinished`, `bash_executor_addr` | Task session, direct HTTP broker URL, `use_env_proxy:false`, local Bash |
+| Broker | Any provider logic in Botified or Run Pod | Credential, quota reservation, usage settlement, audit, model enforcement |
+| Run Pod | Provider-forwarder and its resources/mounts | Botified plus Terminal, JuiceFS workspace, disjoint processes |
+| NetworkPolicy | General egress, direct provider egress, proxy egress, `3120`/`3443` design | DNS and exact API-pod TCP `3000` egress |
+| Ingress | Any route that exposes `/api/internal/**` | Public product API and Web paths |
+| Release | Nothing | Exact resource deletion, absence convergence, one settlement |
+| Substrates | Nothing | Existing repository and emitted contract unchanged |
 
-The three AgentSmith commits are shared-hunk commits, not whole-file rollback
-units. Inspect each commit parent, commit, current `HEAD`, and current dirty hunk.
-Never restore a whole file from an old commit. Later team work and unrelated
-behavior in the same functions must survive.
+Shared-hunk commits are not whole-file rollback units. Inspect the parent,
+commit, current HEAD, and dirty hunk. Preserve unrelated later work.
 
 ## 8. Focused TDD acceptance
 
-Write the smallest failing behavior test before each production change and run
-only the selected checks serially.
+Write the smallest failing behavior test before each production change. Run
+only selected checks serially. The Startup and Release checks below belong to
+Phase 0 and are not repeated by later phases.
 
-### Boundary and packaging
+### Published dependency
 
-- no selected runner version exists until a corrective release is published;
-- wrong corrective asset SHA fails packaging immediately;
-- runner build neither copies nor compiles `third_party/botified`;
-- no config or client contains `allow_insecure_http`,
-  `resume_unfinished`, `canonical_legacy`, or `/v1/tasks/stop`;
-- `v0.4.41` appears only as historical/non-target context.
+- runner input is exactly `v0.4.44`,
+  `botified-core-linux-x86_64-musl.tar.gz`, and
+  `1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0`;
+- wrong asset or SHA fails before extraction;
+- runner neither copies nor compiles Botified source;
+- no vendored Botified source or fallback runtime remains.
 
-### Broker TLS
+### Runtime and broker
 
-- self-hosted install derives
-  `agentsmith-lite-api.${KUBE_NAMESPACE}.svc.cluster.local`, emits valid
-  cert/key/CA material, and reuses it for an unchanged identity;
-- existing-cloud accepts administrator material in the same output variables
-  and rejects incomplete or mismatched input;
-- Botified reaches the broker at its HTTPS Service DNS name;
-- the mounted CA validates chain and hostname;
-- an untrusted CA, wrong hostname, expired certificate, or plaintext URL fails;
-- the API listener on `3443` serves only the broker route, the existing Service
-  exposes it as `broker-https`, and public Ingress does not;
-- the Run Pod mount contains only `ca.crt`, and NetworkPolicy permits API pod
-  egress only on TCP `3443`, not `3000`;
-- the selected corrective artifact honors the one recorded CA-file mechanism,
-  expected to be `SSL_CERT_FILE`; otherwise selection is blocked;
-- broker authentication still rejects a wrong Run/service credential;
-- provider credentials remain only in AgentSmith.
+- generated `base_url` is exactly
+  `http://agentsmith-lite-api.<namespace>.svc.cluster.local/api/internal/tasks/<encoded-taskId>/runs/<encoded-runId>/v1`;
+- the ClusterIP Service maps `port: 80` to API Pod `targetPort: 3000`;
+- Botified calls the resulting
+  `/api/internal/tasks/:taskId/runs/:runId/v1/chat/completions` route;
+- generated config contains `use_env_proxy: false`,
+  `api_key_env: AGENTSMITH_LLM_BROKER_KEY`, and
+  `service_key_env: BOTIFIED_SERVICE_KEY`;
+- generated config contains no withdrawn fields;
+- broker and service credentials are distinct;
+- wrong key, wrong Task, wrong Run, released Run, and mismatched Task/Run fail
+  before provider invocation;
+- provider key never appears in the Run Secret, ConfigMap, Pod environment,
+  timeline, logs, audit detail, or response;
+- Terminal and Bash receive neither AgentSmith/Botified bearer;
+- quota is reserved before provider work and settled once from returned usage;
+- failed upstream work releases or settles its reservation once;
+- LLM usage and audit remain attributable to user, project, Task, and Run.
+
+### Network boundary
+
+- Run NetworkPolicy egress is only cluster DNS and labeled API pods on TCP
+  `3000`;
+- no general TCP `443`, arbitrary namespace, direct provider, or proxy egress
+  remains;
+- public Ingress paths do not expose `/api/internal/**`;
+- no forwarder container/package, port `3120`, port `3443`, broker TLS Secret,
+  private CA mount, TLS generation script, or TLS environment contract remains.
 
 ### Startup and Release
 
 - one Run renders one immutable ConfigMap and one `restartPolicy: Never` Pod;
-- readiness returns only structured state with real UID and optional IP;
-- first UID is persisted and a same-name replacement UID cannot activate;
-- missing Pod is not recreated for the same Run;
-- config data hash mismatch, session mismatch, or final identity mismatch cannot
-  activate;
-- unknown apply/readiness keeps the Run recoverable under its claim lease;
-- an expired/stale claim is released and startup can continue once;
-- Release during unknown startup fences activation and converges only after
-  exact owned resources are absent;
-- usage settles once and unrelated Kubernetes resources remain untouched.
+- the Pod has Botified and Terminal containers only;
+- readiness returns structured state with real UID and optional IP;
+- the first UID is persisted and a replacement UID cannot activate;
+- a missing Pod is not recreated for the same Run;
+- config hash, session, or final identity mismatch cannot activate;
+- unknown startup operations remain recoverable under one claim lease;
+- Release fences activation and completes only after exact resources are absent;
+- sandbox runtime and usage settle once;
+- unrelated Kubernetes resources remain untouched.
 
-### Messages, Abort, and Stop removal
+### Messages, Abort, and Stop
 
-- normal message send parses only the selected corrective release response;
-- no delivery receipt authority or legacy replay record is persisted;
-- Abort accepts exactly `{expectedRunId}` and neither requires nor consumes
-  `Idempotency-Key`;
-- stale `expectedRunId` returns `409 task_run_target_conflict` before any
-  Botified call;
-- a matching non-active Run returns `409 task_run_not_active` before any
-  Botified call;
-- valid Abort sends exactly one no-body request to the exact Run, never reads a
-  turn ID, and returns exactly HTTP `200`
-  `{outcome:"completed",taskId,runId}`;
-- unreachable/ambiguous Botified returns HTTP `503`
-  `botified_abort_unavailable` with `retryable=true`;
-- AgentSmith restart does not replay an ambiguous Abort, and no Abort receipt,
-  result, key disposition, or accepted-in-progress state is stored;
-- Web refreshes state/timeline after the call and permits only a fresh
-  user-initiated Abort retry;
-- Stop route, capability, client method, UI action, and persistence are absent.
+- ordinary messages accept
+  `input_accepted|input_queued|input_duplicate`;
+- no delivery receipt authority or legacy replay is persisted;
+- stale `expectedRunId` fails before a Botified call;
+- valid Abort sends exactly one no-body request;
+- an ambiguous Abort is not replayed automatically;
+- Stop route, client, UI, persistence, and capability are absent;
+- local Bash and fresh-session behavior match `v0.4.44`.
 
-### Terminal and Web
+### Focused local path
 
-- Terminal connects Web to AgentSmith API to the exact Run's sidecar without a
-  Botified Terminal route;
-- Run change, capability loss, Task change, or non-active lifecycle disposes
-  old Terminal intent;
-- older reads and command responses cannot regress the current Task/Run view.
+One fresh Task/session can:
 
-### Local cutover
+1. start one Run Pod;
+2. send a message through Botified;
+3. reach the AgentSmith broker over the exact HTTP route;
+4. consume quota and settle returned usage;
+5. write, list, and download an artifact;
+6. open the AgentSmith Terminal;
+7. Abort current agent work;
+8. Release the sandbox and settle runtime once;
+9. create a later fresh Run without reusing withdrawn session data.
 
-- admission is stopped before releasing existing Runs;
-- all existing Run resources are absent before test session data is deleted;
-- migration lookup uses
-  `agentsmith_migrations.id='079_sandbox_startup_generation'`;
-- absent `079` is deleted directly; applied disposable-local `079` causes an
-  app DB reset/rebuild from committed migrations; an applied non-disposable
-  database uses only a later forward migration and never edits `079`;
-- app, client, runner, config, and TLS deploy as one coordinated version set;
-- one fresh Task/session can send work, write/list/download an artifact, open
-  Terminal, Release, and create a later fresh Run.
+End-to-end and visual checks remain manually selected checks, not release
+gates.
 
-There is no fixed `v0.4.41` route, request/response, status-code, delivery,
-exact-control, or session compatibility acceptance test.
+## 9. Cutover and rollback
 
-## 9. Rollback boundaries
+AgentSmith Lite is unreleased and current sessions are test data. Perform one
+local coordinated cutover:
 
-- Before corrective-runner activation, keep the current local environment
-  stopped or on its existing coordinated image set; do not partially select the
-  new client/config.
-- After activation, rollback the app/client/runner/config/TLS set together.
-  Never mix the corrected AgentSmith client with `v0.4.41`.
-- After the forward migration removing `078` state, do not deploy code that
-  requires those columns without a deliberate new forward migration.
-- Never change image, config, Pod, or UID under an existing `runId`; release it
-  and create a new Run.
-- Release cleanup, exact ownership labels, and UID fences remain invariant.
+1. stop new Run admission;
+2. Release existing Runs and wait for exact owned-resource absence;
+3. stop the app;
+4. apply `079` single-Pod identity state and remove withdrawn `078`
+   exact-control state through the smallest valid local schema change;
+5. delete old Botified test session data;
+6. deploy the API, Web, fixed runner, runtime config, credentials, and
+   NetworkPolicy together;
+7. create a fresh Task/session and run the focused local path.
+
+Before activation, keep the old local set stopped rather than mixing versions.
+After activation, roll back API, Web, runner, config, credentials, and policy
+together. Never:
+
+- mix the corrected client with `v0.4.41`;
+- restore vendored Botified;
+- restore the forwarder/TLS path;
+- change image, config, Pod, or UID under an existing Run;
+- reuse withdrawn test sessions.
+
+Release ownership labels, UID fences, and cleanup convergence remain invariant
+under rollback.
 
 ## 10. Handoff
 
 The correction is complete when:
 
-- AgentSmith pins one published corrective Botified version/asset/SHA and does
-  not select `v0.4.41`;
-- no vendored Botified source, generation/phase, Pod replacement,
-  `CanonicalLegacy`, delivery authority, exact-turn Abort, downstream control
-  ledger, Stop surface, `resume_unfinished`, or `allow_insecure_http` remains;
-- Abort is exact-Run-fenced in AgentSmith and bodyless downstream;
-- substrates and cloud inputs emit one broker cert/key/CA overlay contract;
-  the existing API Deployment/Service owns an isolated `3443` listener/port,
-  Runs mount only its CA, and broker traffic uses the selected release's
-  verified standard CA-file mechanism;
-- startup persists immutable config identity and one real Pod UID, refuses
-  replacement, and retains unknown-action/claim recovery;
-- Release convergence, Kubernetes ownership, stale UI guards, and AgentSmith
-  Terminal sidecar behavior remain intact;
-- existing local Runs and test sessions were discarded through the simple
-  coordinated cutover;
-- canonical code, tests, packaging, and product docs describe one boundary.
+- AgentSmith pins the exact `v0.4.44` asset and SHA above;
+- Botified is consumed only as a published release binary;
+- one server-generated direct HTTP path connects Botified to the existing
+  internal broker through Service port `80` to API Pod target port `3000`;
+- `use_env_proxy:false` and NetworkPolicy prevent alternate provider paths;
+- public Ingress does not expose the internal broker route;
+- the central broker remains the only credential, quota, usage, and LLM audit
+  authority;
+- upstream provider credentials never enter the Run Pod;
+- `AGENTSMITH_LLM_BROKER_KEY` and `BOTIFIED_SERVICE_KEY` are independent and
+  confined to the Botified container and their AgentSmith verifiers;
+- Terminal and Bash receive neither credential;
+- no provider-forwarder, `3120`, `3443`, broker TLS/private CA,
+  `APP_RUN_TOKEN_SECRET`, or three-capability design remains;
+- no vendored Botified source, two-Pod generation, Pod replacement,
+  `CanonicalLegacy`, delivery authority, exact-turn Abort, Stop,
+  `resume_unfinished`, `bash_executor_addr`, or `allow_insecure_http` remains;
+- one Run owns one immutable ConfigMap and one Pod with Botified and Terminal;
+- Release convergence, Kubernetes ownership, stale Web guards, usage
+  settlement, and Terminal behavior remain intact;
+- a fresh local Task completes the focused path using the fixed release.
 
 No governance report, compatibility ledger, evidence bundle, proof wrapper,
 generated handoff record, or default release gate is part of this work.
