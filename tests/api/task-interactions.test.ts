@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import net from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
@@ -21,7 +22,7 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import { SandboxLifecycleService } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResourceRef } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 
 const validProductionSessionSecret = "production-session-secret-32-chars";
 const createApiServer = (options: ApiServerOptions) => createRawApiServer({
@@ -34,7 +35,8 @@ const createApiServer = (options: ApiServerOptions) => createRawApiServer({
 
 describe("task interactions API", () => {
   let api: RunningApiServer | undefined;
-  let terminalUpstream: WebSocketServer | undefined;
+  let terminalUpstream: net.Server | undefined;
+  const terminalUpstreamSockets=new Set<net.Socket>();
   let dataRoot = "";
 
   beforeEach(async () => {
@@ -43,9 +45,10 @@ describe("task interactions API", () => {
 
   afterEach(async () => {
     if (terminalUpstream) {
-      for (const client of terminalUpstream.clients) client.terminate();
+      for (const client of terminalUpstreamSockets) client.destroy();
       await new Promise<void>((resolve) => terminalUpstream!.close(() => resolve()));
       terminalUpstream = undefined;
+      terminalUpstreamSockets.clear();
     }
     await api?.close();
     api = undefined;
@@ -816,28 +819,85 @@ describe("task interactions API", () => {
   });
 
   it("rejects a second interactive terminal and releases occupancy after an abnormal close", async () => {
-    terminalUpstream = new WebSocketServer({ port:0 });
-    await once(terminalUpstream, "listening");
-    const upstreamAddress = terminalUpstream.address();
-    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    let resolveRevocationCancel!:()=>void;
+    const revocationCancel=new Promise<void>((resolve)=>{resolveRevocationCancel=resolve;});
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      let input="";
+      socket.on("data",(data)=>{
+        input+=data.toString("utf8");
+        if(input.includes('{"op":"open"}\n'))socket.write('{"op":"ready"}\n');
+        if(input.includes('{"op":"cancel"}\n')){
+          resolveRevocationCancel();
+          socket.end();
+        }
+      });
+    });
 
     const store = createLocalInMemoryProductStore();
     const botified = new FakeBotifiedClient([]);
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, terminalAccessRecheckMs:20, store });
+    api = await createApiServer({ port:0, dataRoot, publicBaseUrl:"http://agentsmith.test", builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:botified, botifiedServiceKeyFactory:({taskId})=>taskId, terminalHostForRun:()=>"127.0.0.1", terminalAccessRecheckMs:20, store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal occupancy", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
+    await makeTaskRunActive(store, task, "http://botified.internal");
     const terminalRunId=(await store.findTask(task.id))?.currentRunId;
     assert.ok(terminalRunId);
+    const persistedTerminalRun=await store.sandboxRuns.get(terminalRunId);
+    assert.ok(persistedTerminalRun);
     const terminalUrl = `${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(terminalRunId)}`;
+    const project=await store.findProject(task.projectId);
+    assert.ok(project);
+    const directServices=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      botifiedBaseUrlForTask:()=>`http://botified-override.invalid:3099`,
+      terminalHostForRun:({runId,namespace,serviceName})=>{
+        assert.deepEqual({runId,namespace,serviceName},{
+          runId:terminalRunId,
+          namespace:persistedTerminalRun.namespace,
+          serviceName:persistedTerminalRun.resourceNames.service
+        });
+        return "127.0.0.1";
+      },
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    const terminalBotifiedStateReads=botified.readStateCalls.length;
+    const directFirst=await directServices.tasks.openTaskTerminal(project.ownerUserId,task.id,terminalRunId);
+    assert.deepEqual(
+      {runId:directFirst.runId,host:directFirst.host,port:directFirst.port,fields:Object.keys(directFirst).sort()},
+      {runId:terminalRunId,host:"127.0.0.1",port:3110,fields:["host","occupancyToken","port","runId"]}
+    );
+    directServices.tasks.closeTaskTerminal(task.id,directFirst.occupancyToken);
+    const directReplacement=await directServices.tasks.openTaskTerminal(project.ownerUserId,task.id,terminalRunId);
+    directServices.tasks.closeTaskTerminal(task.id,directFirst.occupancyToken);
+    await assert.rejects(
+      directServices.tasks.openTaskTerminal(project.ownerUserId,task.id,terminalRunId),
+      /Task terminal is already open/
+    );
+    directServices.tasks.closeTaskTerminal(task.id,directReplacement.occupancyToken);
+    assert.equal(botified.readStateCalls.length,terminalBotifiedStateReads);
+    const exactServices=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      botifiedBaseUrlForTask:()=>`http://botified-override.invalid:3099`,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    const exactTarget=await exactServices.tasks.openTaskTerminal(project.ownerUserId,task.id,terminalRunId);
+    const exactRun=await store.sandboxRuns.get(terminalRunId);
+    assert.ok(exactRun);
+    assert.equal(exactTarget.host,`${exactRun.resourceNames.service}.${exactRun.namespace}.svc.cluster.local`);
+    assert.equal(exactTarget.port,3110);
+    exactServices.tasks.closeTaskTerminal(task.id,exactTarget.occupancyToken);
+    assert.equal(botified.readStateCalls.length,terminalBotifiedStateReads);
 
     assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
-    const first = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
+    assert.equal(await rejectedWebSocketStatus(terminalUrl,auth.cookie),403);
+    const terminalHeaders={cookie:auth.cookie,origin:"http://agentsmith.test"};
+    const first = new WebSocket(terminalUrl, { headers:terminalHeaders });
     await once(first, "open");
     assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, true);
 
-    const secondStatus = await rejectedWebSocketStatus(terminalUrl, auth.cookie);
+    const secondStatus = await rejectedWebSocketStatus(terminalUrl, auth.cookie,"http://agentsmith.test");
     assert.equal(secondStatus, 403);
     assert.equal(first.readyState, WebSocket.OPEN);
 
@@ -846,23 +906,245 @@ describe("task interactions API", () => {
     const [code, reason] = await within(revoked, 500, "Terminal stayed open after workspace access changed");
     assert.equal(code, 1008);
     assert.equal(String(reason), "Task terminal access changed");
+    await within(revocationCancel,500,"Terminal revocation did not cancel the executor session");
     assert.equal((await auth.requestJson("GET", `/api/v1/tasks/${task.id}/interactions`)).presentation.capabilities.openTerminal, false);
 
     await store.setWorkspaceLifecycleStatus(auth.workspaceId, "active", new Date().toISOString());
     await waitForTerminalCapability(auth, task.id, true);
 
-    const replacement = new WebSocket(terminalUrl, { headers:{ cookie:auth.cookie } });
+    const replacement = new WebSocket(terminalUrl, { headers:terminalHeaders });
     await once(replacement, "open");
     const replacementClosed = once(replacement, "close");
     replacement.close();
     await replacementClosed;
   });
 
+  it("bounds executor TCP connect and ready deadlines", async () => {
+    {
+    const upstreams:DeferredDestroySocket[]=[];
+    const store=createLocalInMemoryProductStore();
+    api=await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>"executor.invalid",
+      terminalSocketFactory:()=>{
+        const socket=new DeferredDestroySocket();
+        upstreams.push(socket);
+        return socket;
+      },
+      terminalTcpConnectTimeoutMs:20,
+      terminalExecutorReadyTimeoutMs:100,
+      store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"terminal connect deadline",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Connect deadline files"}
+    });
+    const task=await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const terminalUrl=`${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`;
+    const client=new WebSocket(terminalUrl,{headers:{cookie:auth.cookie}});
+    const messages:string[]=[];
+    client.on("message",(data)=>messages.push(String(data)));
+    const closed=once(client,"close");
+    await within(once(client,"open"),500,"Terminal browser did not open for connect deadline");
+
+    const [code,reason]=await within(closed,500,"Terminal TCP connect deadline did not close the browser");
+    assert.equal(code,1011);
+    assert.equal(String(reason),"Task terminal connection timed out");
+    assert.deepEqual(messages,[JSON.stringify({op:"error",message:"Task terminal upstream connection timed out"})]);
+    assert.equal(upstreams.length,1);
+    assert.equal(upstreams[0]!.destroyed,true);
+    assert.equal(await rejectedWebSocketStatus(terminalUrl,auth.cookie),403);
+
+    const upstreamClosed=once(upstreams[0]!,"close");
+    upstreams[0]!.completeDestroy();
+    await within(upstreamClosed,500,"Timed-out upstream did not finish closing");
+    const replacement=new WebSocket(terminalUrl,{headers:{cookie:auth.cookie}});
+    await within(once(replacement,"open"),500,"Replacement was not admitted after timed-out upstream closed");
+    assert.equal(upstreams.length,2);
+    const replacementClosed=once(replacement,"close");
+    replacement.close();
+    await within(replacementClosed,500,"Replacement browser did not close");
+    const replacementUpstreamClosed=once(upstreams[1]!,"close");
+    upstreams[1]!.completeDestroy();
+    await within(replacementUpstreamClosed,500,"Replacement upstream did not finish closing");
+    await api.close();
+    api=undefined;
+    }
+
+    {
+    let resolveOpenFrame!:(frame:string)=>void;
+    const openFrame=new Promise<string>((resolve)=>{resolveOpenFrame=resolve;});
+    terminalUpstream=await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      socket.once("data",(data)=>resolveOpenFrame(data.toString("utf8")));
+    });
+    const store=createLocalInMemoryProductStore();
+    api=await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>"127.0.0.1",
+      terminalTcpConnectTimeoutMs:100,
+      terminalExecutorReadyTimeoutMs:20,
+      store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"terminal ready deadline",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Ready deadline files"}
+    });
+    const task=await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const client=new WebSocket(
+      `${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`,
+      {headers:{cookie:auth.cookie}}
+    );
+    const messages:string[]=[];
+    client.on("message",(data)=>messages.push(String(data)));
+    const closed=once(client,"close");
+    await once(client,"open");
+
+    assert.equal(await within(openFrame,500,"Executor did not receive the open frame"),'{"op":"open"}\n');
+    const [code,reason]=await within(closed,500,"Executor ready deadline did not close the browser");
+    assert.equal(code,1011);
+    assert.equal(String(reason),"Task terminal executor was not ready");
+    assert.deepEqual(messages,[JSON.stringify({op:"error",message:"Task terminal executor ready timed out"})]);
+    await within(
+      Promise.all([...terminalUpstreamSockets].map((socket)=>once(socket,"close"))),
+      500,
+      "Executor TCP connection stayed open after its ready deadline"
+    );
+    }
+  });
+
+  it("destroys a pre-connect upstream without queued cancel and fences replacement until close", async () => {
+    const upstreams:DeferredDestroySocket[]=[];
+    const store=createLocalInMemoryProductStore();
+    api=await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>"executor.invalid",
+      terminalSocketFactory:()=>{
+        const socket=new DeferredDestroySocket();
+        upstreams.push(socket);
+        return socket;
+      },
+      terminalTcpConnectTimeoutMs:500,
+      terminalExecutorReadyTimeoutMs:500,
+      store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"terminal stale connect",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Stale connect files"}
+    });
+    const task=await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const terminalUrl=`${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`;
+    const client=new WebSocket(terminalUrl,{headers:{cookie:auth.cookie}});
+    await within(once(client,"open"),500,"Terminal browser did not open before pre-connect close");
+    assert.equal(upstreams.length,1);
+    const browserClosed=once(client,"close");
+    client.close();
+    await within(browserClosed,500,"Terminal browser did not close before upstream connect");
+
+    assert.equal(upstreams[0]!.destroyed,true);
+    assert.deepEqual(upstreams[0]!.writes,[]);
+    assert.equal(await rejectedWebSocketStatus(terminalUrl,auth.cookie),403);
+    const upstreamClosed=once(upstreams[0]!,"close");
+    upstreams[0]!.completeDestroy();
+    await within(upstreamClosed,500,"Pre-connect upstream did not finish closing");
+
+    const replacement=new WebSocket(terminalUrl,{headers:{cookie:auth.cookie}});
+    await within(once(replacement,"open"),500,"Replacement was not admitted after pre-connect upstream closed");
+    assert.equal(upstreams.length,2);
+    const replacementClosed=once(replacement,"close");
+    replacement.close();
+    await within(replacementClosed,500,"Replacement browser did not close");
+    const replacementUpstreamClosed=once(upstreams[1]!,"close");
+    upstreams[1]!.completeDestroy();
+    await within(replacementUpstreamClosed,500,"Replacement upstream did not finish closing");
+  });
+
+  it("rejects exact terminal Run ownership mismatch before deriving its host", async () => {
+    const store=createLocalInMemoryProductStore();
+    const bootstrap=await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      store
+    });
+    api=bootstrap;
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"terminal exact ownership",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Exact ownership files"}
+    });
+    const task=await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+    const getRun=store.sandboxRuns.get.bind(store.sandboxRuns);
+    store.sandboxRuns.get=async(candidateRunId)=>{
+      const run=await getRun(candidateRunId);
+      return run?{...run,workspaceId:"workspace_mismatched"}:null;
+    };
+    let hostDerived=false;
+    const services=createApplicationServices({
+      store,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>{
+        hostDerived=true;
+        return "127.0.0.1";
+      },
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+
+    await assert.rejects(
+      services.tasks.openTaskTerminal(task.createdByUserId!,task.id,runId),
+      /Task Sandbox Run changed/
+    );
+    assert.equal(hostDerived,false);
+  });
+
   it("closes a terminal connection when the canonical Task changes to another active Run", async () => {
-    terminalUpstream = new WebSocketServer({ port:0 });
-    await once(terminalUpstream, "listening");
-    const upstreamAddress = terminalUpstream.address();
-    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      socket.once("data",()=>socket.write('{"op":"ready"}\n'));
+    });
 
     const store = createLocalInMemoryProductStore();
     api = await createApiServer({
@@ -872,6 +1154,7 @@ describe("task interactions API", () => {
       sandboxNamespaceLimit:100,
       botifiedClient:new FakeBotifiedClient([]),
       botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>"127.0.0.1",
       terminalAccessRecheckMs:200,
       store
     });
@@ -883,7 +1166,7 @@ describe("task interactions API", () => {
     });
     const task = await store.findTask(created.task.id as string);
     assert.ok(task);
-    const upstreamBaseUrl=`http://127.0.0.1:${upstreamAddress.port}`;
+    const upstreamBaseUrl="http://botified.internal";
     await makeTaskRunActive(store, task, upstreamBaseUrl);
     const runA=(await store.findTask(task.id))?.currentRunId;
     assert.ok(runA);
@@ -932,78 +1215,107 @@ describe("task interactions API", () => {
     assert.equal((await store.sandboxRuns.list()).some((run)=>run.taskId===task.id),false);
   });
 
-  it("forwards terminal input sent while the Botified socket is connecting", async () => {
-    terminalUpstream = new WebSocketServer({ port:0 });
-    await once(terminalUpstream, "listening");
-    const upstreamAddress = terminalUpstream.address();
-    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
-    const received = new Promise<string>((resolve) => {
-      terminalUpstream!.once("connection", (socket) => socket.once("message", (data) => resolve(String(data))));
+  it("opens the exact Run executor over TCP and forwards only normalized terminal NDJSON", async () => {
+    let resolveFrames!:(frames:string[])=>void;
+    const received=new Promise<string[]>((resolve)=>{resolveFrames=resolve;});
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      let buffered="";
+      const receivedFrames:string[]=[];
+      let responseStarted=false;
+      socket.on("data",(data)=>{
+        buffered+=data.toString("utf8");
+        const frames=buffered.split("\n");
+        buffered=frames.pop()??"";
+        receivedFrames.push(...frames);
+        if(!responseStarted&&receivedFrames[0]===JSON.stringify({op:"open"})){
+          responseStarted=true;
+          socket.write('{"op":');
+        }
+        if(receivedFrames.length>=2){
+          socket.write('"ready"}\n');
+          resolveFrames(receivedFrames);
+        }
+      });
     });
 
     const store = createLocalInMemoryProductStore();
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, terminalHostForRun:()=>"127.0.0.1", store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal input", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const runId=(await store.findTask(task.id))?.currentRunId;
     assert.ok(runId);
     const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`, { headers:{ cookie:auth.cookie } });
     await once(client, "open");
-    const frame = JSON.stringify({ op:"stdin", data:"ZWNobyByZWFkeQo=" });
+    const readyOrClose=Promise.race([
+      once(client,"message").then((event)=>({kind:"message" as const,event})),
+      once(client,"close").then((event)=>({kind:"close" as const,event}))
+    ]);
+    const frame = JSON.stringify({ data:"ZWNobyByZWFkeQo=", op:"stdin" });
     client.send(frame);
-    const forwarded = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Terminal frame was dropped before upstream connected")), 1_000);
-      void received.then((value) => { clearTimeout(timeout); resolve(value); }, reject);
-    });
-    assert.equal(forwarded, frame);
+    assert.deepEqual(await within(received,1_000,"Terminal frames were not forwarded"),[
+      JSON.stringify({op:"open"}),
+      JSON.stringify({op:"stdin",data:"ZWNobyByZWFkeQo="})
+    ]);
+    const ready=await within(readyOrClose,1_000,"Incremental Terminal ready frame was not forwarded");
+    assert.deepEqual(ready.kind==="message"
+      ?{kind:ready.kind,frame:String(ready.event[0])}
+      :{kind:ready.kind,code:ready.event[0],reason:String(ready.event[1])},
+      {kind:"message",frame:JSON.stringify({op:"ready"})}
+    );
     const closed = once(client, "close");
     client.close();
-    await closed;
+    await within(closed,1_000,"Terminal client did not close");
   });
 
-  it("closes a terminal connection when client input exceeds the upstream buffer", async () => {
-    terminalUpstream = new WebSocketServer({ port:0 });
-    await once(terminalUpstream, "listening");
-    const upstreamAddress = terminalUpstream.address();
-    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
-    const upstreamConnected = new Promise<void>((resolve) => terminalUpstream!.once("connection", () => resolve()));
+  it("rejects binary terminal browser frames and cancels the executor TCP session", async () => {
+    let resolveCancelled!:()=>void;
+    const cancelled=new Promise<void>((resolve)=>{resolveCancelled=resolve;});
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      let input="";
+      socket.on("data",(data)=>{
+        input+=data.toString("utf8");
+        if(input.includes('{"op":"open"}\n'))socket.write('{"op":"ready"}\n');
+        if(input.includes('{"op":"cancel"}\n'))resolveCancelled();
+      });
+    });
 
     const store = createLocalInMemoryProductStore();
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, terminalHostForRun:()=>"127.0.0.1", store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal oversized input", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const runId=(await store.findTask(task.id))?.currentRunId;
     assert.ok(runId);
     const client = new WebSocket(`${api.baseUrl.replace(/^http/, "ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`, { headers:{ cookie:auth.cookie } });
+    const readyFramePromise=once(client,"message");
     await once(client, "open");
-    await upstreamConnected;
+    const [readyFrame]=await within(readyFramePromise,1_000,"Terminal executor did not become ready");
+    assert.equal(String(readyFrame),JSON.stringify({op:"ready"}));
     const closeCode = new Promise<number>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Oversized terminal input did not close the proxy connection")), 1_000);
+      const timeout = setTimeout(() => reject(new Error("Binary terminal input did not close the proxy connection")), 1_000);
       client.once("close", (code) => { clearTimeout(timeout); resolve(code); });
     });
-    client.send(Buffer.alloc(65 * 1024));
-    assert.equal(await closeCode, 1009);
+    client.send(Buffer.from("not NDJSON"));
+    assert.equal(await closeCode, 1003);
+    await within(cancelled,1_000,"Terminal cancel was not sent before TCP disconnect");
   });
 
-  it("closes a terminal connection when one upstream output frame exceeds the proxy buffer", async () => {
-    terminalUpstream = new WebSocketServer({ port:0 });
-    await once(terminalUpstream, "listening");
-    const upstreamAddress = terminalUpstream.address();
-    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
-    terminalUpstream.once("connection", (socket) => socket.send(Buffer.alloc(300 * 1024)));
+  it("closes a terminal connection when one executor NDJSON frame exceeds the proxy buffer", async () => {
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      socket.once("data",()=>socket.write(`{"op":"output","data":"${"A".repeat(300*1024)}"}\n`));
+    });
 
     const store = createLocalInMemoryProductStore();
-    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, store });
+    api = await createApiServer({ port:0, dataRoot, builtinAdminPassword:"admin-password", sandboxNamespaceLimit:100, botifiedClient:new FakeBotifiedClient([]), botifiedServiceKeyFactory:({taskId})=>taskId, terminalHostForRun:()=>"127.0.0.1", store });
     const auth = await createProjectWithEndpoint(api.baseUrl);
     const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, { prompt:"terminal output", endpointId:auth.endpointId,fileLibrary:{mode:"create_new",name:"Task files"} });
     const task = await store.findTask(created.task.id as string); assert.ok(task);
-    await makeTaskRunActive(store, task, `http://127.0.0.1:${upstreamAddress.port}`);
+    await makeTaskRunActive(store, task, "http://botified.internal");
 
     const runId=(await store.findTask(task.id))?.currentRunId;
     assert.ok(runId);
@@ -1014,6 +1326,49 @@ describe("task interactions API", () => {
     });
     await once(client, "open");
     assert.equal(await closeCode, 1009);
+  });
+
+  it("rejects invalid UTF-8 in executor NDJSON output", async () => {
+    terminalUpstream = await listenTerminalTcpServer(terminalUpstreamSockets,(socket)=>{
+      socket.once("data",()=>socket.write(Buffer.concat([
+        Buffer.from('{"op":"error","message":"'),
+        Buffer.from([0xc3,0x28]),
+        Buffer.from('"}\n')
+      ])));
+    });
+
+    const store = createLocalInMemoryProductStore();
+    api = await createApiServer({
+      port:0,
+      dataRoot,
+      builtinAdminPassword:"admin-password",
+      sandboxNamespaceLimit:100,
+      botifiedClient:new FakeBotifiedClient([]),
+      botifiedServiceKeyFactory:({taskId})=>taskId,
+      terminalHostForRun:()=>"127.0.0.1",
+      store
+    });
+    const auth = await createProjectWithEndpoint(api.baseUrl);
+    const created = await auth.requestJson("POST", `/api/v1/projects/${auth.projectId}/tasks`, {
+      prompt:"terminal invalid UTF-8",
+      endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Task files"}
+    });
+    const task = await store.findTask(created.task.id as string);
+    assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    const runId=(await store.findTask(task.id))?.currentRunId;
+    assert.ok(runId);
+
+    const client = new WebSocket(
+      `${api.baseUrl.replace(/^http/,"ws")}/api/v1/tasks/${task.id}/terminal/ws?expectedRunId=${encodeURIComponent(runId)}`,
+      {headers:{cookie:auth.cookie}}
+    );
+    const closed=once(client,"close");
+    await once(client,"open");
+    const [code,reason]=await within(closed,1_000,"Invalid UTF-8 output did not close the Terminal");
+    assert.equal(code,1008);
+    assert.equal(String(reason),"Invalid terminal output");
   });
 
   it("retains history while current endpoint, credential, and membership eligibility disable capabilities", async () => {
@@ -2816,9 +3171,23 @@ async function createProjectWithEndpoint(baseUrl: string, password = "admin-pass
   };
 }
 
-async function rejectedWebSocketStatus(url:string,cookie:string):Promise<number>{
+async function listenTerminalTcpServer(
+  sockets:Set<net.Socket>,
+  onConnection:(socket:net.Socket)=>void
+):Promise<net.Server>{
+  const server=net.createServer((socket)=>{
+    sockets.add(socket);
+    socket.once("close",()=>sockets.delete(socket));
+    onConnection(socket);
+  });
+  server.listen({host:"127.0.0.1",port:3110});
+  await once(server,"listening");
+  return server;
+}
+
+async function rejectedWebSocketStatus(url:string,cookie:string,origin?:string):Promise<number>{
   return new Promise<number>((resolve,reject)=>{
-    const socket=new WebSocket(url,{headers:{cookie}});
+    const socket=new WebSocket(url,{headers:{cookie,...(origin?{origin}:{})}});
     socket.once("unexpected-response",(_request,response)=>{const status=response.statusCode;response.resume();status===undefined?reject(new Error("Terminal rejection had no HTTP status")):resolve(status);});
     socket.once("open",()=>{socket.close();reject(new Error("Terminal WebSocket unexpectedly opened"));});
     socket.once("error",()=>undefined);
@@ -2844,6 +3213,30 @@ async function waitForTerminalCapability(auth:Awaited<ReturnType<typeof createPr
     await new Promise<void>((resolve)=>setImmediate(resolve));
   }
   assert.fail(`Terminal capability did not become ${expected}`);
+}
+
+class DeferredDestroySocket extends net.Socket{
+  readonly writes:string[]=[];
+  private finishDestroy:(()=>void)|undefined;
+
+  override write:net.Socket["write"]=((chunk:Uint8Array|string)=>{
+    this.writes.push(Buffer.from(chunk).toString("utf8"));
+    return true;
+  }) as net.Socket["write"];
+
+  override _destroy(error:Error|null,callback:(error?:Error|null)=>void):void{
+    this.finishDestroy=()=>{
+      callback(error);
+      this.emit("close",Boolean(error));
+    };
+  }
+
+  completeDestroy():void{
+    assert.ok(this.finishDestroy,"Socket destroy was not requested");
+    const finish=this.finishDestroy;
+    this.finishDestroy=undefined;
+    finish();
+  }
 }
 
 class FakeBotifiedClient implements BotifiedRuntimeHttpClient {

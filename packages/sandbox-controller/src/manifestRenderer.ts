@@ -226,7 +226,8 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             image: input.image,
             imagePullPolicy: "IfNotPresent",
             workingDir: "/workspace/task/home/workspace",
-            command: ["bash-executor", "--listen", "127.0.0.1:3110"],
+            command: ["bash-executor", "--listen", "0.0.0.0:3110"],
+            ports: [{ name: "terminal", containerPort: 3110 }],
             readinessProbe: {
               exec: {
                 command: ["bash", "-c", "</dev/tcp/127.0.0.1/3110"]
@@ -305,6 +306,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
             name: "http",
             port: input.botifiedPort,
             targetPort: "http"
+          },
+          {
+            name: "terminal",
+            port: 3110,
+            targetPort: "terminal"
           }
         ]
       }
@@ -338,6 +344,10 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
               {
                 protocol: "TCP",
                 port: input.botifiedPort
+              },
+              {
+                protocol: "TCP",
+                port: 3110
               }
             ]
           }

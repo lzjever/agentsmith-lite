@@ -2,48 +2,42 @@ use std::{
     env,
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
-    process::{Child, Command, ExitStatus, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 
-const OUTPUT_CHANNEL_CAPACITY: usize = 16;
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(750);
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const POST_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_FRAME_BYTES: usize = 64 * 1024;
+const MAX_STDIN_BYTES: usize = 64 * 1024;
+const OUTPUT_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Deserialize)]
-struct ExecuteRequest {
+#[serde(deny_unknown_fields)]
+struct OpenRequest {
     op: String,
-    mode: ExecutionMode,
-    command: String,
-    cwd: String,
-    interactive_stdio: bool,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ExecutionMode {
-    Tool,
-    Terminal,
 }
 
 #[derive(Deserialize)]
-struct ControlRequest {
-    op: String,
-    #[serde(default)]
-    data: Option<String>,
-    #[serde(default)]
-    rows: Option<u16>,
-    #[serde(default)]
-    cols: Option<u16>,
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum ControlRequest {
+    Stdin { data: String },
+    Resize { rows: u16, cols: u16 },
+    Cancel,
+}
+
+#[derive(Serialize)]
+struct SimpleEvent {
+    op: &'static str,
 }
 
 #[derive(Serialize)]
@@ -68,6 +62,7 @@ enum Control {
     Stdin(Vec<u8>),
     Resize { rows: u16, cols: u16 },
     Cancel,
+    Invalid,
     Disconnected,
 }
 
@@ -86,11 +81,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let occupied = Arc::new(AtomicBool::new(false));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(|| {
-                    let _ = handle_connection(stream);
+                let occupied = occupied.clone();
+                thread::spawn(move || {
+                    let _ = handle_connection(stream, occupied);
                 });
             }
             Err(error) => eprintln!("bash executor accept failed: {error}"),
@@ -101,138 +98,60 @@ fn main() {
 fn parse_listen(args: impl Iterator<Item = String>) -> Result<SocketAddr, String> {
     let args = args.collect::<Vec<_>>();
     if args.len() != 2 || args[0] != "--listen" {
-        return Err("usage: bash-executor --listen 127.0.0.1:3110".to_owned());
+        return Err("usage: bash-executor --listen 0.0.0.0:3110".to_owned());
     }
-    let addr = args[1]
+    args[1]
         .parse::<SocketAddr>()
-        .map_err(|error| format!("invalid listen address: {error}"))?;
-    if !addr.ip().is_loopback() {
-        return Err("bash executor listen address must be loopback-only".to_owned());
-    }
-    Ok(addr)
+        .map_err(|error| format!("invalid listen address: {error}"))
 }
 
-fn handle_connection(stream: TcpStream) -> io::Result<()> {
+fn handle_connection(stream: TcpStream, occupied: Arc<AtomicBool>) -> io::Result<()> {
     let shutdown = ConnectionShutdown(stream.try_clone()?);
-    let result = handle_connection_inner(stream);
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let first = match read_frame_until(&mut reader, Some(Instant::now() + FIRST_FRAME_TIMEOUT)) {
+        Ok(Some(frame)) => frame,
+        Ok(None) => return Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) =>
+        {
+            write_error(&stream, "terminal open frame timed out")?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            write_error(&stream, "invalid terminal open frame")?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let request = match serde_json::from_slice::<OpenRequest>(&first) {
+        Ok(request) if request.op == "open" => request,
+        _ => {
+            write_error(&stream, "first terminal frame must be open")?;
+            return Ok(());
+        }
+    };
+    let _ = request;
+    if occupied
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        write_error(&stream, "terminal is already open")?;
+        return Ok(());
+    }
+    let _occupancy = OccupancyGuard(occupied);
+    stream.set_read_timeout(None)?;
+    let writer = Arc::new(Mutex::new(stream));
+    let (control_tx, control_rx) = mpsc::channel();
+    thread::spawn(move || read_controls(reader, control_tx));
+    let result = handle_terminal(writer, control_rx);
     drop(shutdown);
     result
 }
 
-fn handle_connection_inner(stream: TcpStream) -> io::Result<()> {
-    let reader_stream = stream.try_clone()?;
-    let writer = Arc::new(Mutex::new(stream));
-    let mut reader = BufReader::new(reader_stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Ok(());
-    }
-    let request: ExecuteRequest = match serde_json::from_str::<ExecuteRequest>(line.trim_end()) {
-        Ok(request) if request.op == "execute" => request,
-        Ok(_) => {
-            write_event(
-                &writer,
-                &ErrorEvent {
-                    op: "error",
-                    message: "first executor frame must be execute",
-                },
-            )?;
-            return Ok(());
-        }
-        Err(_) => {
-            write_event(
-                &writer,
-                &ErrorEvent {
-                    op: "error",
-                    message: "invalid executor request",
-                },
-            )?;
-            return Ok(());
-        }
-    };
-    let (control_tx, control_rx) = mpsc::channel();
-    thread::spawn(move || read_controls(reader, control_tx));
-    match request.mode {
-        ExecutionMode::Tool => handle_tool(request, writer, control_rx),
-        ExecutionMode::Terminal => handle_terminal(request, writer, control_rx),
-    }
-}
-
-fn handle_tool(
-    request: ExecuteRequest,
-    writer: Arc<Mutex<TcpStream>>,
-    control_rx: mpsc::Receiver<Control>,
-) -> io::Result<()> {
-    let mut command = Command::new("bash");
-    command
-        .arg("-lc")
-        .arg(request.command)
-        .current_dir(request.cwd)
-        .stdin(if request.interactive_stdio {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_clear();
-    inherit_safe_environment(&mut command);
-
-    let mut child = ToolChildGuard::spawn(command)?;
-    let mut input = child.child_mut().stdin.take();
-    let stdout = child
-        .child_mut()
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture tool stdout"))?;
-    let stderr = child
-        .child_mut()
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("failed to capture tool stderr"))?;
-    let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
-    spawn_output_reader(stdout, output_tx.clone());
-    spawn_output_reader(stderr, output_tx.clone());
-    drop(output_tx);
-
-    loop {
-        let mut made_progress = false;
-        while let Ok(chunk) = output_rx.try_recv() {
-            made_progress = true;
-            write_output_event(&writer, chunk)?;
-        }
-        match control_rx.try_recv() {
-            Ok(Control::Stdin(bytes)) => {
-                if let Some(input) = input.as_mut() {
-                    input.write_all(&bytes)?;
-                    input.flush()?;
-                }
-            }
-            Ok(Control::Cancel)
-            | Ok(Control::Disconnected)
-            | Ok(Control::Resize { .. })
-            | Err(mpsc::TryRecvError::Disconnected) => child.kill_group(),
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        if let Some(status) = child.try_wait()? {
-            drain_output_after_exit(&writer, &output_rx, &mut child)?;
-            write_event(
-                &writer,
-                &CompletedEvent {
-                    op: "completed",
-                    exit_code: status.code(),
-                },
-            )?;
-            return Ok(());
-        }
-        if !made_progress {
-            thread::sleep(WAIT_POLL_INTERVAL);
-        }
-    }
-}
-
 fn handle_terminal(
-    request: ExecuteRequest,
     writer: Arc<Mutex<TcpStream>>,
     control_rx: mpsc::Receiver<Control>,
 ) -> io::Result<()> {
@@ -256,15 +175,9 @@ fn handle_terminal(
         }
     };
     let mut command = CommandBuilder::new("bash");
-    command.arg("-lc");
-    command.arg(request.command);
-    command.cwd(request.cwd);
+    command.arg("-il");
     command.env_clear();
-    for (key, value) in env::vars_os() {
-        if key == "PATH" || key == "HOME" || key == "TERM" || key == "LANG" || key == "LC_ALL" {
-            command.env(key, value);
-        }
-    }
+    inherit_safe_environment(&mut command);
     command.env(
         "TERM",
         env::var_os("TERM").unwrap_or_else(|| "xterm-256color".into()),
@@ -284,13 +197,14 @@ fn handle_terminal(
     };
     let mut child = PtyChildGuard::new(child);
     drop(pair.slave);
-    let terminal_input = Mutex::new(pair.master.take_writer().map_err(io::Error::other)?);
+    let mut terminal_input = pair.master.take_writer().map_err(io::Error::other)?;
     let (output_tx, output_rx) = mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
     spawn_output_reader(
         pair.master.try_clone_reader().map_err(io::Error::other)?,
         output_tx.clone(),
     );
     drop(output_tx);
+    write_event(&writer, &SimpleEvent { op: "ready" })?;
 
     loop {
         while let Ok(chunk) = output_rx.try_recv() {
@@ -298,11 +212,8 @@ fn handle_terminal(
         }
         match control_rx.try_recv() {
             Ok(Control::Stdin(bytes)) => {
-                let mut input = terminal_input
-                    .lock()
-                    .map_err(|_| io::Error::other("terminal input lock poisoned"))?;
-                input.write_all(&bytes)?;
-                input.flush()?;
+                terminal_input.write_all(&bytes)?;
+                terminal_input.flush()?;
             }
             Ok(Control::Resize { rows, cols }) => {
                 pair.master
@@ -314,14 +225,23 @@ fn handle_terminal(
                     })
                     .map_err(io::Error::other)?;
             }
+            Ok(Control::Invalid) => {
+                child.kill_group();
+                write_event(
+                    &writer,
+                    &ErrorEvent {
+                        op: "error",
+                        message: "invalid terminal control frame",
+                    },
+                )?;
+            }
             Ok(Control::Cancel)
             | Ok(Control::Disconnected)
-            | Err(mpsc::TryRecvError::Disconnected) => {
-                child.kill_group();
-            }
+            | Err(mpsc::TryRecvError::Disconnected) => child.kill_group(),
             Err(mpsc::TryRecvError::Empty) => {}
         }
         if let Some(status) = child.try_wait()? {
+            child.disarm();
             let deadline = Instant::now() + POST_EXIT_DRAIN_TIMEOUT;
             while Instant::now() < deadline {
                 match output_rx.recv_timeout(WAIT_POLL_INTERVAL) {
@@ -343,195 +263,90 @@ fn handle_terminal(
     }
 }
 
-struct ConnectionShutdown(TcpStream);
-
-impl Drop for ConnectionShutdown {
-    fn drop(&mut self) {
-        let _ = self.0.shutdown(Shutdown::Both);
-    }
-}
-
-struct ToolChildGuard {
-    child: Child,
-    process_group_id: u32,
-    armed: bool,
-    kill_sent: bool,
-    #[cfg(test)]
-    kill_attempts: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl ToolChildGuard {
-    fn spawn(mut command: Command) -> io::Result<Self> {
-        #[cfg(unix)]
-        command.process_group(0);
-        let child = command.spawn()?;
-        let process_group_id = child.id();
-        Ok(Self {
-            child,
-            process_group_id,
-            armed: true,
-            kill_sent: false,
-            #[cfg(test)]
-            kill_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        })
-    }
-
-    fn child_mut(&mut self) -> &mut Child {
-        &mut self.child
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
-    }
-
-    fn kill_group(&mut self) {
-        if !self.armed || self.kill_sent {
-            return;
-        }
-        self.kill_sent = true;
-        #[cfg(test)]
-        self.kill_attempts
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        kill_process_group(self.process_group_id);
-        let _ = self.child.kill();
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-
-    fn finish(&mut self) {
-        self.disarm();
-    }
-
-    #[cfg(test)]
-    fn kill_attempts(&self) -> Arc<std::sync::atomic::AtomicUsize> {
-        self.kill_attempts.clone()
-    }
-
-    fn terminate_and_reap(&mut self) {
-        if !self.armed {
-            return;
-        }
-        self.kill_group();
-        let _ = self.child.wait();
-        self.disarm();
-    }
-}
-
-impl Drop for ToolChildGuard {
-    fn drop(&mut self) {
-        self.terminate_and_reap();
-    }
-}
-
-struct PtyChildGuard {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-}
-
-impl PtyChildGuard {
-    fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
-        Self { child }
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
-        self.child.try_wait().map_err(io::Error::other)
-    }
-
-    fn kill_group(&mut self) {
-        kill_child(&mut self.child);
-    }
-}
-
-impl Drop for PtyChildGuard {
-    fn drop(&mut self) {
-        self.kill_group();
-        let _ = self.child.wait();
-    }
-}
-
-fn inherit_safe_environment(command: &mut Command) {
-    for (key, value) in env::vars_os() {
-        if key == "PATH" || key == "HOME" || key == "TERM" || key == "LANG" || key == "LC_ALL" {
-            command.env(key, value);
-        }
-    }
-}
-
-fn write_output_event(writer: &Arc<Mutex<TcpStream>>, chunk: Vec<u8>) -> io::Result<()> {
-    write_event(
-        writer,
-        &OutputEvent {
-            op: "output",
-            data: BASE64.encode(chunk),
-        },
-    )
-}
-
-fn drain_output_after_exit(
-    writer: &Arc<Mutex<TcpStream>>,
-    output_rx: &mpsc::Receiver<Vec<u8>>,
-    child: &mut ToolChildGuard,
-) -> io::Result<()> {
-    let deadline = Instant::now() + POST_EXIT_DRAIN_TIMEOUT;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        match output_rx.recv_timeout(remaining.min(WAIT_POLL_INTERVAL)) {
-            Ok(chunk) => write_output_event(writer, chunk)?,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                child.finish();
-                return Ok(());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    }
-
-    child.kill_group();
-    while let Ok(chunk) = output_rx.recv() {
-        write_output_event(writer, chunk)?;
-    }
-    child.finish();
-    Ok(())
-}
-
 fn read_controls(mut reader: BufReader<TcpStream>, sender: mpsc::Sender<Control>) {
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => {
-                let _ = sender.send(Control::Disconnected);
-                return;
+        let control = match read_frame(&mut reader) {
+            Ok(Some(frame)) => parse_control(&frame),
+            Ok(None) | Err(_) => Control::Disconnected,
+        };
+        let terminal = matches!(control, Control::Disconnected);
+        if sender.send(control).is_err() || terminal {
+            return;
+        }
+    }
+}
+
+fn parse_control(frame: &[u8]) -> Control {
+    match serde_json::from_slice::<ControlRequest>(frame) {
+        Ok(ControlRequest::Stdin { data }) => match BASE64.decode(data) {
+            Ok(bytes) if bytes.len() <= MAX_STDIN_BYTES => Control::Stdin(bytes),
+            _ => Control::Invalid,
+        },
+        Ok(ControlRequest::Resize { rows, cols }) if rows > 0 && cols > 0 => {
+            Control::Resize { rows, cols }
+        }
+        Ok(ControlRequest::Cancel) => Control::Cancel,
+        _ => Control::Invalid,
+    }
+}
+
+fn read_frame(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>> {
+    read_frame_until(reader, None)
+}
+
+fn read_frame_until(
+    reader: &mut BufReader<TcpStream>,
+    deadline: Option<Instant>,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut frame = Vec::new();
+    loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::TimedOut, "terminal frame deadline elapsed")
+                })?;
+            reader.get_ref().set_read_timeout(Some(remaining))?;
+        }
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if frame.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unterminated terminal frame",
+                ))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if frame.len() + take > MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "terminal frame exceeds limit",
+            ));
+        }
+        frame.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            frame.pop();
+            if frame.last() == Some(&b'\r') {
+                frame.pop();
             }
-            Ok(_) => match serde_json::from_str::<ControlRequest>(line.trim_end()) {
-                Ok(request) if request.op == "stdin" => {
-                    match request.data.and_then(|data| BASE64.decode(data).ok()) {
-                        Some(bytes) => {
-                            let _ = sender.send(Control::Stdin(bytes));
-                        }
-                        None => {
-                            let _ = sender.send(Control::Cancel);
-                        }
-                    }
-                }
-                Ok(request) if request.op == "resize" => match (request.rows, request.cols) {
-                    (Some(rows), Some(cols)) if rows > 0 && cols > 0 => {
-                        let _ = sender.send(Control::Resize { rows, cols });
-                    }
-                    _ => {
-                        let _ = sender.send(Control::Cancel);
-                    }
-                },
-                Ok(request) if request.op == "cancel" => {
-                    let _ = sender.send(Control::Cancel);
-                }
-                _ => {
-                    let _ = sender.send(Control::Cancel);
-                }
-            },
+            return Ok(Some(frame));
+        }
+    }
+}
+
+fn inherit_safe_environment(command: &mut CommandBuilder) {
+    for (key, value) in env::vars_os() {
+        let allowed = key == "PATH"
+            || key == "HOME"
+            || key == "LANG"
+            || key.to_string_lossy().starts_with("LC_");
+        if allowed {
+            command.env(key, value);
         }
     }
 }
@@ -552,6 +367,27 @@ fn spawn_output_reader(mut reader: impl Read + Send + 'static, sender: mpsc::Syn
     });
 }
 
+fn write_output_event(writer: &Arc<Mutex<TcpStream>>, chunk: Vec<u8>) -> io::Result<()> {
+    write_event(
+        writer,
+        &OutputEvent {
+            op: "output",
+            data: BASE64.encode(chunk),
+        },
+    )
+}
+
+fn write_error(stream: &TcpStream, message: &str) -> io::Result<()> {
+    let writer = Arc::new(Mutex::new(stream.try_clone()?));
+    write_event(
+        &writer,
+        &ErrorEvent {
+            op: "error",
+            message,
+        },
+    )
+}
+
 fn write_event<T: Serialize>(writer: &Arc<Mutex<TcpStream>>, event: &T) -> io::Result<()> {
     let mut writer = writer
         .lock()
@@ -561,415 +397,465 @@ fn write_event<T: Serialize>(writer: &Arc<Mutex<TcpStream>>, event: &T) -> io::R
     writer.flush()
 }
 
-fn kill_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
-    #[cfg(unix)]
-    if let Some(pid) = child.process_id() {
-        if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } == 0 {
-            return;
+struct ConnectionShutdown(TcpStream);
+
+impl Drop for ConnectionShutdown {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
+struct OccupancyGuard(Arc<AtomicBool>);
+
+impl Drop for OccupancyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct PtyChildGuard {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    kill_sent: bool,
+}
+
+impl PtyChildGuard {
+    fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self {
+            child: Some(child),
+            kill_sent: false,
         }
     }
 
-    let _ = child.kill();
+    fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("PTY child guard must be armed while polling")
+            .try_wait()
+            .map_err(io::Error::other)
+    }
+
+    fn disarm(&mut self) {
+        self.child.take();
+    }
+
+    fn kill_group(&mut self) {
+        if self.kill_sent || self.child.is_none() {
+            return;
+        }
+        self.kill_sent = true;
+        #[cfg(unix)]
+        if let Some(pid) = self.child.as_ref().and_then(|child| child.process_id()) {
+            kill_terminal_process_tree(pid);
+        }
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+    }
 }
 
-fn kill_process_group(process_group_id: u32) {
-    #[cfg(unix)]
+impl Drop for PtyChildGuard {
+    fn drop(&mut self) {
+        self.kill_group();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_terminal_process_tree(root_pid: u32) {
     unsafe {
-        let _ = libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL);
+        let _ = libc::kill(root_pid as libc::pid_t, libc::SIGSTOP);
+    }
+    let mut descendants = linux_descendant_pids(root_pid);
+    for pid in &descendants {
+        unsafe {
+            let _ = libc::kill(*pid as libc::pid_t, libc::SIGSTOP);
+        }
+    }
+    for pid in linux_descendant_pids(root_pid) {
+        if !descendants.contains(&pid) {
+            descendants.push(pid);
+        }
+    }
+    for pid in descendants.into_iter().rev() {
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    unsafe {
+        let _ = libc::kill(-(root_pid as libc::pid_t), libc::SIGKILL);
+        let _ = libc::kill(root_pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let mut parent_by_pid = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let parent = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        if let Some(parent) = parent {
+            parent_by_pid.push((pid, parent));
+        }
+    }
+    let mut descendants = Vec::new();
+    let mut parents = vec![root_pid];
+    while let Some(parent) = parents.pop() {
+        for (pid, candidate_parent) in &parent_by_pid {
+            if *candidate_parent == parent && !descendants.contains(pid) {
+                descendants.push(*pid);
+                parents.push(*pid);
+            }
+        }
+    }
+    descendants
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn kill_terminal_process_tree(root_pid: u32) {
+    unsafe {
+        let _ = libc::kill(-(root_pid as libc::pid_t), libc::SIGKILL);
+        let _ = libc::kill(root_pid as libc::pid_t, libc::SIGKILL);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_output_after_exit, handle_connection, parse_listen, spawn_output_reader,
-        ToolChildGuard, OUTPUT_CHANNEL_CAPACITY, WAIT_POLL_INTERVAL,
+        handle_connection, inherit_safe_environment, parse_listen, PtyChildGuard,
+        FIRST_FRAME_TIMEOUT,
     };
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    use std::fs;
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus};
+    use std::{
+        env, fs,
+        io::{self, BufRead, BufReader, Write},
+        net::{TcpListener, TcpStream},
+        path::Path,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
 
-    fn unique_marker_path() -> std::path::PathBuf {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "agentsmith-bash-executor-{}-{}.marker",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ))
+    fn connection_pair(
+        occupied: Arc<AtomicBool>,
+    ) -> (TcpStream, thread::JoinHandle<io::Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let client = TcpStream::connect(addr).expect("client should connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout should set");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client should connect");
+            handle_connection(stream, occupied)
+        });
+        (client, server)
+    }
+
+    fn read_json(reader: &mut BufReader<TcpStream>) -> serde_json::Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("event should read");
+        assert!(!line.is_empty(), "connection closed before event");
+        serde_json::from_str(line.trim_end()).expect("event should be JSON")
     }
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
-    fn run_post_exit_case(command_text: &str) -> (Vec<u8>, usize, Duration) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let client = TcpStream::connect(addr).expect("client should connect");
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("client read timeout should set");
-        let (server, _) = listener.accept().expect("server should accept");
-        let writer = std::sync::Arc::new(std::sync::Mutex::new(server));
-
-        let mut command = std::process::Command::new("bash");
-        command
-            .arg("-lc")
-            .arg(command_text)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let mut child = ToolChildGuard::spawn(command).expect("tool process should spawn");
-        let kill_attempts = child.kill_attempts();
-        let stdout = child
-            .child_mut()
-            .stdout
-            .take()
-            .expect("stdout should be piped");
-        let stderr = child
-            .child_mut()
-            .stderr
-            .take()
-            .expect("stderr should be piped");
-        let (output_tx, output_rx) = std::sync::mpsc::sync_channel(OUTPUT_CHANNEL_CAPACITY);
-        spawn_output_reader(stdout, output_tx.clone());
-        spawn_output_reader(stderr, output_tx.clone());
-        drop(output_tx);
-
-        while child
-            .try_wait()
-            .expect("leader status should be readable")
-            .is_none()
-        {
-            thread::sleep(WAIT_POLL_INTERVAL);
-        }
-        let drain_started = Instant::now();
-        drain_output_after_exit(&writer, &output_rx, &mut child)
-            .expect("post-exit output should drain");
-        let drain_elapsed = drain_started.elapsed();
-        drop(child);
-        drop(writer);
-
-        let mut output = Vec::new();
-        let mut reader = BufReader::new(client);
-        loop {
-            let mut line = String::new();
-            if reader
-                .read_line(&mut line)
-                .expect("output event should read")
-                == 0
-            {
-                break;
-            }
-            let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
-                .expect("output event should be JSON");
-            if event["op"] == "output" {
-                output.extend(
-                    BASE64
-                        .decode(event["data"].as_str().expect("output data"))
-                        .expect("output should be base64"),
-                );
-            }
-        }
-        (output, kill_attempts.load(Ordering::SeqCst), drain_elapsed)
-    }
-
     #[test]
-    fn accepts_only_loopback_listen_addresses() {
+    fn accepts_manifest_wide_listen_address() {
         assert_eq!(
-            parse_listen(["--listen".to_owned(), "127.0.0.1:3110".to_owned()].into_iter())
-                .expect("loopback address should parse")
+            parse_listen(["--listen".to_owned(), "0.0.0.0:3110".to_owned()].into_iter())
+                .expect("pod-wide address should parse")
                 .to_string(),
-            "127.0.0.1:3110"
-        );
-        assert!(
-            parse_listen(["--listen".to_owned(), "0.0.0.0:3110".to_owned()].into_iter()).is_err()
+            "0.0.0.0:3110"
         );
     }
 
     #[test]
-    fn tool_mode_uses_pipes_and_returns_output_and_completion() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("client should connect");
-            handle_connection(stream).expect("executor connection should succeed");
-        });
-        let mut stream = TcpStream::connect(addr).expect("client should connect");
-        writeln!(stream, r#"{{"op":"execute","mode":"tool","command":"if [ -t 1 ]; then printf tty; else printf pipe; fi","cwd":".","interactive_stdio":false}}"#)
-            .expect("execute request should write");
-        let mut reader = BufReader::new(stream);
-        let mut output = String::new();
-        reader
-            .read_line(&mut output)
-            .expect("output event should read");
-        let mut completed = String::new();
-        reader
-            .read_line(&mut completed)
-            .expect("completion event should read");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(output.trim_end())
-                .expect("output event should be JSON")["data"],
-            "cGlwZQ=="
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(completed.trim_end())
-                .expect("completion event should be JSON")["exit_code"],
-            0
-        );
-        server.join().expect("executor server should finish");
-    }
+    fn readiness_connect_does_not_occupy_the_terminal() {
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (probe, probe_server) = connection_pair(occupied.clone());
+        drop(probe);
+        probe_server
+            .join()
+            .expect("probe handler should join")
+            .expect("probe handler should succeed");
 
-    #[test]
-    fn cancel_terminates_the_entire_tool_process_group() {
-        let marker_path = unique_marker_path();
-        let _ = fs::remove_file(&marker_path);
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("client should connect");
-            handle_connection(stream).expect("executor connection should succeed");
-        });
-        let mut stream = TcpStream::connect(addr).expect("client should connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("read timeout should set");
-        let command = format!("sleep 3; touch {}", shell_quote(&marker_path));
-        let execute = serde_json::json!({
-            "op": "execute",
-            "mode": "tool",
-            "command": command,
-            "cwd": ".",
-            "interactive_stdio": false,
-        });
-        writeln!(stream, "{execute}").expect("execute request should write");
-
-        thread::sleep(Duration::from_millis(100));
-        let mut reader = BufReader::new(stream.try_clone().expect("client stream should clone"));
-        let cancel_started = Instant::now();
-        writeln!(stream, r#"{{"op":"cancel"}}"#).expect("cancel request should write");
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .expect("completion event should read");
-            if line.is_empty() {
-                break;
-            }
-            let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
-                .expect("completion event should be JSON");
-            if event["op"] == "completed" {
-                break;
-            }
-        }
-        assert!(
-            cancel_started.elapsed() < Duration::from_secs(1),
-            "cancel should complete promptly"
-        );
-        server.join().expect("executor server should finish");
-
-        thread::sleep(Duration::from_millis(3200));
-        assert!(
-            !marker_path.exists(),
-            "cancelled descendant must not write its delayed marker"
-        );
-        let _ = fs::remove_file(marker_path);
-    }
-
-    #[test]
-    fn provides_an_interactive_pty_shell() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("client should connect");
-            handle_connection(stream).expect("executor connection should succeed");
-        });
-        let mut stream = TcpStream::connect(addr).expect("client should connect");
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .expect("read timeout should set");
-        writeln!(
-            stream,
-            r#"{{"op":"execute","mode":"terminal","command":"exec bash -il","cwd":".","interactive_stdio":true}}"#
-        )
-        .expect("execute request should write");
-        writeln!(stream, r#"{{"op":"resize","rows":31,"cols":97}}"#)
-            .expect("resize request should write");
-        let input = BASE64.encode("printf PTY_READY; exit\n");
-        writeln!(stream, "{{\"op\":\"stdin\",\"data\":\"{input}\"}}")
-            .expect("stdin request should write");
-
-        let mut reader = BufReader::new(stream);
-        let mut output = Vec::new();
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .expect("terminal event should read");
-            let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
-                .expect("terminal event should be JSON");
-            if event["op"] == "output" {
-                output.extend(
-                    BASE64
-                        .decode(event["data"].as_str().expect("output data"))
-                        .expect("output should be base64"),
-                );
-            }
-            if event["op"] == "completed" {
-                break;
-            }
-        }
-        assert!(String::from_utf8_lossy(&output).contains("PTY_READY"));
-        let mut eof = String::new();
-        assert_eq!(
-            reader
-                .read_line(&mut eof)
-                .expect("terminal connection should close after completion"),
-            0
-        );
-        server.join().expect("server should finish");
-    }
-
-    #[test]
-    fn output_over_sixteen_mib_completes_without_sidecar_termination() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("client should connect");
-            handle_connection(stream).expect("executor connection should succeed");
-        });
-        let mut stream = TcpStream::connect(addr).expect("client should connect");
-        writeln!(stream, r#"{{"op":"execute","mode":"tool","command":"head -c 16777217 /dev/zero","cwd":".","interactive_stdio":false}}"#)
-            .expect("execute request should write");
-        let mut reader = BufReader::new(stream);
-        let mut output_bytes = 0_usize;
-        let completed;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).expect("event should read");
-            let event = serde_json::from_str::<serde_json::Value>(line.trim_end())
-                .expect("event should be JSON");
-            if event["op"] == "output" {
-                output_bytes += BASE64
-                    .decode(event["data"].as_str().expect("output data"))
-                    .expect("output should be base64")
-                    .len();
-            }
-            if event["op"] == "completed" {
-                completed = event;
-                break;
-            }
-        }
-        assert_eq!(output_bytes, 16 * 1024 * 1024 + 1);
-        assert_eq!(completed["exit_code"], 0);
-        server.join().expect("executor server should finish");
-    }
-
-    #[test]
-    fn client_disconnect_kills_and_reaps_the_command_group() {
-        let marker_path = unique_marker_path();
-        let _ = fs::remove_file(&marker_path);
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let addr = listener.local_addr().expect("listener should have address");
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("client should connect");
-            let _ = handle_connection(stream);
-        });
-        let mut stream = TcpStream::connect(addr).expect("client should connect");
-        let command = format!(
-            "(sleep 2; touch {}) & while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done",
-            shell_quote(&marker_path)
-        );
-        writeln!(
-            stream,
-            "{}",
-            serde_json::json!({
-                "op": "execute",
-                "mode": "tool",
-                "command": command,
-                "cwd": ".",
-                "interactive_stdio": false,
-            })
-        )
-        .expect("execute request should write");
-        let mut reader = BufReader::new(stream);
-        let mut first = String::new();
-        reader
-            .read_line(&mut first)
-            .expect("first output event should read");
+        let (mut client, server) = connection_pair(occupied);
+        writeln!(client, r#"{{"op":"open"}}"#).expect("open should write");
+        let mut reader = BufReader::new(client);
+        assert_eq!(read_json(&mut reader), serde_json::json!({"op":"ready"}));
         drop(reader);
+        server.join().expect("handler should join").ok();
+    }
+
+    #[test]
+    fn first_frame_has_a_short_timeout_without_occupying() {
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (client, server) = connection_pair(occupied.clone());
+        let started = Instant::now();
+        let mut reader = BufReader::new(client);
+        assert_eq!(read_json(&mut reader)["op"], "error");
+        assert!(started.elapsed() >= FIRST_FRAME_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(2));
         server
             .join()
-            .expect("executor handler should return after disconnect");
-
-        thread::sleep(Duration::from_millis(2300));
-        assert!(
-            !marker_path.exists(),
-            "disconnected command descendants must be killed"
-        );
-        let _ = fs::remove_file(marker_path);
+            .expect("handler should join")
+            .expect("handler should succeed");
+        assert!(!occupied.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
-    fn dropping_tool_child_guard_kills_and_reaps_the_process_group() {
-        let marker_path = unique_marker_path();
-        let _ = fs::remove_file(&marker_path);
-        let mut command = std::process::Command::new("bash");
-        command
-            .arg("-lc")
-            .arg(format!("sleep 2; touch {}", shell_quote(&marker_path)))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+    fn first_frame_deadline_is_absolute_during_a_slow_drip() {
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (mut client, server) = connection_pair(occupied.clone());
+        let started = Instant::now();
+        let reader_stream = client.try_clone().expect("stream should clone");
+        for _ in 0..3 {
+            client.write_all(b" ").expect("drip byte should write");
+            client.flush().expect("drip byte should flush");
+            thread::sleep(Duration::from_millis(300));
+        }
+        let _ = writeln!(client, r#"{{"op":"open"}}"#);
+        let event = read_json(&mut BufReader::new(reader_stream));
+        assert_eq!(event["op"], "error");
+        assert!(
+            started.elapsed() < FIRST_FRAME_TIMEOUT + Duration::from_millis(500),
+            "slow input extended the absolute first-frame deadline"
+        );
+        server
+            .join()
+            .expect("handler should join")
+            .expect("handler should succeed");
+        assert!(!occupied.load(Ordering::Acquire));
+    }
 
-        let guard = ToolChildGuard::spawn(command).expect("tool process should spawn");
+    #[test]
+    fn valid_open_is_exclusive_and_shell_is_fixed() {
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (mut first, first_server) = connection_pair(occupied.clone());
+        writeln!(first, r#"{{"op":"open"}}"#).expect("open should write");
+        let mut first_reader =
+            BufReader::new(first.try_clone().expect("first stream should clone"));
+        assert_eq!(
+            read_json(&mut first_reader),
+            serde_json::json!({"op":"ready"})
+        );
+
+        let (mut second, second_server) = connection_pair(occupied);
+        writeln!(second, r#"{{"op":"open"}}"#).expect("second open should write");
+        let mut second_reader = BufReader::new(second);
+        assert_eq!(read_json(&mut second_reader)["op"], "error");
+        second_server
+            .join()
+            .expect("second handler should join")
+            .expect("second handler should succeed");
+
+        let input = BASE64.encode("printf FIXED_SHELL_READY; exit\n");
+        writeln!(first, "{{\"op\":\"stdin\",\"data\":\"{input}\"}}").expect("stdin should write");
+        let mut output = Vec::new();
+        loop {
+            let event = read_json(&mut first_reader);
+            if event["op"] == "output" {
+                output.extend(
+                    BASE64
+                        .decode(event["data"].as_str().expect("output data"))
+                        .expect("output should be base64"),
+                );
+            }
+            if event["op"] == "completed" {
+                break;
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("FIXED_SHELL_READY"));
+        first_server
+            .join()
+            .expect("first handler should join")
+            .expect("first handler should succeed");
+    }
+
+    #[test]
+    fn rejects_client_controlled_open_fields_and_invalid_controls() {
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (mut invalid_open, invalid_server) = connection_pair(occupied.clone());
+        writeln!(
+            invalid_open,
+            r#"{{"op":"open","command":"id","cwd":"/","mode":"tool"}}"#
+        )
+        .expect("invalid open should write");
+        let mut invalid_reader = BufReader::new(invalid_open);
+        assert_eq!(read_json(&mut invalid_reader)["op"], "error");
+        invalid_server
+            .join()
+            .expect("invalid handler should join")
+            .expect("invalid handler should succeed");
+
+        let (mut client, server) = connection_pair(occupied);
+        writeln!(client, r#"{{"op":"open"}}"#).expect("open should write");
+        let mut reader = BufReader::new(client.try_clone().expect("stream should clone"));
+        assert_eq!(read_json(&mut reader)["op"], "ready");
+        writeln!(client, r#"{{"op":"resize","rows":0,"cols":80}}"#)
+            .expect("invalid resize should write");
+        assert_eq!(read_json(&mut reader)["op"], "error");
+        drop(client);
+        drop(reader);
+        server.join().expect("handler should join").ok();
+    }
+
+    #[test]
+    fn disconnect_kills_the_terminal_process_group() {
+        let marker = std::env::temp_dir().join(format!(
+            "agentsmith-terminal-disconnect-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (mut client, server) = connection_pair(occupied);
+        writeln!(client, r#"{{"op":"open"}}"#).expect("open should write");
+        let mut reader = BufReader::new(client.try_clone().expect("stream should clone"));
+        assert_eq!(read_json(&mut reader)["op"], "ready");
+        let command = format!(
+            "(sleep 1; touch {}) & while :; do sleep 1; done\n",
+            shell_quote(&marker)
+        );
+        let input = BASE64.encode(command);
+        writeln!(client, "{{\"op\":\"stdin\",\"data\":\"{input}\"}}").expect("stdin should write");
+        thread::sleep(Duration::from_millis(100));
+        drop(reader);
+        drop(client);
+        server.join().expect("handler should join").ok();
+        thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !marker.exists(),
+            "a terminal descendant survived its client disconnect"
+        );
+        let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn cancel_kills_terminal_descendants() {
+        let marker = std::env::temp_dir().join(format!(
+            "agentsmith-terminal-cancel-{}.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let occupied = Arc::new(AtomicBool::new(false));
+        let (mut client, server) = connection_pair(occupied);
+        writeln!(client, r#"{{"op":"open"}}"#).expect("open should write");
+        let mut reader = BufReader::new(client.try_clone().expect("stream should clone"));
+        assert_eq!(read_json(&mut reader)["op"], "ready");
+        let command = format!(
+            "(sleep 1; touch {}) & while :; do sleep 1; done\n",
+            shell_quote(&marker)
+        );
+        let input = BASE64.encode(command);
+        writeln!(client, "{{\"op\":\"stdin\",\"data\":\"{input}\"}}").expect("stdin should write");
+        thread::sleep(Duration::from_millis(100));
+        writeln!(client, r#"{{"op":"cancel"}}"#).expect("cancel should write");
+        while read_json(&mut reader)["op"] != "completed" {}
+        server
+            .join()
+            .expect("handler should join")
+            .expect("handler should succeed");
+        thread::sleep(Duration::from_millis(1100));
+        assert!(
+            !marker.exists(),
+            "a terminal descendant survived an explicit cancel"
+        );
+        let _ = fs::remove_file(marker);
+    }
+
+    #[test]
+    fn safe_environment_filter_excludes_product_secrets() {
+        const SECRET_KEY: &str = "AGENTSMITH_EXECUTOR_FILTER_TEST_SECRET";
+        env::set_var(SECRET_KEY, "must-not-leak");
+        let mut command = CommandBuilder::new("bash");
+        command.env_clear();
+        inherit_safe_environment(&mut command);
+        assert_eq!(command.get_env(SECRET_KEY), None);
+        for key in ["PATH", "HOME", "LANG"] {
+            assert_eq!(command.get_env(key), env::var_os(key).as_deref());
+        }
+        env::remove_var(SECRET_KEY);
+    }
+
+    #[derive(Debug)]
+    struct FakeChild {
+        kills: Arc<AtomicUsize>,
+        waits: Arc<AtomicUsize>,
+    }
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.kills.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeKiller(self.kills.clone()))
+        }
+    }
+
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(Some(ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            self.waits.fetch_add(1, Ordering::AcqRel);
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeKiller(Arc<AtomicUsize>);
+
+    impl ChildKiller for FakeKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn normal_reaped_exit_disarms_child_guard_without_kill_or_wait() {
+        let kills = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let mut guard = PtyChildGuard::new(Box::new(FakeChild {
+            kills: kills.clone(),
+            waits: waits.clone(),
+        }));
+        assert!(guard.try_wait().expect("wait should succeed").is_some());
+        guard.disarm();
         drop(guard);
-        thread::sleep(Duration::from_millis(2300));
-        assert!(
-            !marker_path.exists(),
-            "an early handler return must kill command descendants"
-        );
-        let _ = fs::remove_file(marker_path);
-    }
-
-    #[test]
-    fn normal_tool_exit_disarms_without_killing_the_process_group() {
-        let (output, kill_attempts, _) = run_post_exit_case("printf normal");
-
-        assert_eq!(output, b"normal");
-        assert_eq!(kill_attempts, 0);
-    }
-
-    #[test]
-    fn short_lived_descendant_output_drains_before_group_cleanup() {
-        let (output, kill_attempts, elapsed) = run_post_exit_case("(sleep 0.02; printf late) &");
-
-        assert_eq!(output, b"late");
-        assert_eq!(kill_attempts, 0);
-        assert!(elapsed < Duration::from_millis(200));
-    }
-
-    #[test]
-    fn long_lived_descendant_is_killed_once_after_post_exit_drain_window() {
-        let marker_path = unique_marker_path();
-        let _ = fs::remove_file(&marker_path);
-        let command = format!("(sleep 2; touch {}) &", shell_quote(&marker_path));
-
-        let (_, kill_attempts, elapsed) = run_post_exit_case(&command);
-
-        assert_eq!(kill_attempts, 1);
-        assert!(elapsed >= super::POST_EXIT_DRAIN_TIMEOUT);
-        assert!(elapsed < Duration::from_secs(1));
-        thread::sleep(Duration::from_millis(2200));
-        assert!(
-            !marker_path.exists(),
-            "long-lived descendant must be cleaned up after the drain window"
-        );
-        let _ = fs::remove_file(marker_path);
+        assert_eq!(kills.load(Ordering::Acquire), 0);
+        assert_eq!(waits.load(Ordering::Acquire), 0);
     }
 }

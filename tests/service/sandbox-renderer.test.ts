@@ -294,6 +294,8 @@ describe("sandbox manifest renderer", () => {
     const instructionsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home/workspace/AGENTS.md");
     assert.ok(container);
     assert.ok(executor);
+    assert.deepEqual(executor.ports, [{ name: "terminal", containerPort: 3110 }]);
+    assert.deepEqual(executor.command, ["bash-executor", "--listen", "0.0.0.0:3110"]);
     assert.ok(libraryMount);
     assert.ok(botifiedMount);
     assert.deepEqual(instructionsMount, { name: "botified-instructions", mountPath: "/workspace/task/home/workspace/AGENTS.md", subPath: "AGENTS.md", readOnly: true });
@@ -354,7 +356,10 @@ describe("sandbox manifest renderer", () => {
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
     assert.ok(service, "Service should be rendered");
     assert.deepEqual(service.spec.selector, pod?.metadata.labels);
-    assert.deepEqual(service.spec.ports, [{ name: "http", port: 3099, targetPort: "http" }]);
+    assert.deepEqual(service.spec.ports, [
+      { name: "http", port: 3099, targetPort: "http" },
+      { name: "terminal", port: 3110, targetPort: "terminal" }
+    ]);
     assert.ok(networkPolicy, "NetworkPolicy should be rendered");
     assert.deepEqual(networkPolicy.spec.podSelector, { matchLabels: pod?.metadata.labels });
     assert.deepEqual(networkPolicy.spec.ingress, [
@@ -369,7 +374,10 @@ describe("sandbox manifest renderer", () => {
             }
           }
         ],
-        ports: [{ protocol: "TCP", port: 3099 }]
+        ports: [
+          { protocol: "TCP", port: 3099 },
+          { protocol: "TCP", port: 3110 }
+        ]
       }
     ]);
     const dnsEgress = networkPolicy.spec.egress.find(hasCoreDnsDestination);
@@ -529,6 +537,8 @@ interface PodResource extends KubernetesResource {
     containers: Array<{
       name: string;
       workingDir: string;
+      command?:string[];
+      ports?:Array<{name:string;containerPort:number}>;
       resources: {
         requests: { cpu: string; memory: string };
         limits: { cpu: string; memory: string };

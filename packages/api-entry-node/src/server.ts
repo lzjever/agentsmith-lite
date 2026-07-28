@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { createInMemoryProductStore } from "../../adapters-postgres/src/inMemoryProductStore.js";
 import {
@@ -11,7 +12,7 @@ import {
 } from "../../application/src/factory.js";
 import type { SandboxLifecycleKubernetesPort } from "../../application/src/sandboxLifecycleService.js";
 import type { CredentialCrypto } from "../../application/src/credentialCrypto.js";
-import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig } from "../../application/src/taskService.js";
+import type { BotifiedServiceKeyInput, BotifiedTaskAddressInput, ModelCaReference, TaskLiveSandboxConfig, TaskTerminalHostInput } from "../../application/src/taskService.js";
 import { ProvenTaskCommandRejectionError, SandboxRetryableProductError, TaskCreatePreparationInProgressError } from "../../application/src/taskService.js";
 import { FileLibraryBoundError } from "../../application/src/fileLibraryService.js";
 import { PROJECT_AUDIT_ACTIONS, PROJECT_AUDIT_RESOURCE_KINDS, classifyPreviewMediaType, type ChatMessage, type CreateEndpointInput, type CreateTaskInput, type DiscoverEndpointModelsInput, type ManagedProjectMembershipRole, type ManagedWorkspaceMembershipRole, type ModelEndpoint, type ProjectContextScope, type ProjectMembershipRole, type PublicModelEndpoint, type TaskArtifactListQuery, type TaskListQuery, type UpdateEndpointInput, type WorkspaceMembershipRole } from "../../contracts/src/api.js";
@@ -26,6 +27,9 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 const MAX_PENDING_TERMINAL_INPUT_BYTES = 64 * 1024;
 const MAX_PENDING_TERMINAL_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_TERMINAL_TCP_CONNECT_TIMEOUT_MS = 5_000;
+const DEFAULT_TERMINAL_EXECUTOR_READY_TIMEOUT_MS = 5_000;
+const MAX_TERMINAL_DEADLINE_MS = 30_000;
 const MAX_JSON_BODY_BYTES = 1_048_576;
 
 interface CommonApiServerOptions {
@@ -43,6 +47,7 @@ interface CommonApiServerOptions {
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
+  terminalHostForRun?: (input:TaskTerminalHostInput)=>string;
   providerClient?: OpenAICompatibleClient;
   modelCa?: ModelCaReference;
   liveSandbox?: TaskLiveSandboxConfig;
@@ -53,6 +58,9 @@ interface CommonApiServerOptions {
   taskRetryDelayMs?: number;
   runtimeTickIntervalMs?: number;
   terminalAccessRecheckMs?: number;
+  terminalTcpConnectTimeoutMs?:number;
+  terminalExecutorReadyTimeoutMs?:number;
+  terminalSocketFactory?:(input:{host:string;port:number})=>net.Socket;
   store?: ProductStore;
 }
 
@@ -121,6 +129,7 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
     ...(options.botifiedClient ? { botifiedClient: options.botifiedClient } : {}),
     ...(options.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: options.botifiedServiceKeyFactory } : {}),
     ...(options.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: options.botifiedBaseUrlForTask } : {}),
+    ...(options.terminalHostForRun ? { terminalHostForRun: options.terminalHostForRun } : {}),
     providerClient,
     ...(options.modelCa ? { modelCa: options.modelCa } : {}),
     ...(options.sandboxLifecyclePort ? { sandboxLifecyclePort: options.sandboxLifecyclePort } : {}),
@@ -135,6 +144,14 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
   const services = createApplicationServices(serviceOptions);
   const terminalAccessRecheckMs=options.terminalAccessRecheckMs??1_000;
   if(!Number.isFinite(terminalAccessRecheckMs)||terminalAccessRecheckMs<=0)throw new Error("terminalAccessRecheckMs must be positive");
+  const terminalTcpConnectTimeoutMs=boundedTerminalDeadline(
+    options.terminalTcpConnectTimeoutMs??DEFAULT_TERMINAL_TCP_CONNECT_TIMEOUT_MS,
+    "terminalTcpConnectTimeoutMs"
+  );
+  const terminalExecutorReadyTimeoutMs=boundedTerminalDeadline(
+    options.terminalExecutorReadyTimeoutMs??DEFAULT_TERMINAL_EXECUTOR_READY_TIMEOUT_MS,
+    "terminalExecutorReadyTimeoutMs"
+  );
   const appBasePath = appBasePathFromOptions(options.publicBaseUrl, options.publicBasePath);
 
   const server = http.createServer(async (req, res) => {
@@ -169,13 +186,16 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
   server.on("upgrade",(req,socket,head)=>{
     void (async()=>{
       let terminalTaskId:string|null=null;
-      let terminalAcquired=false;
+      let terminalOccupancyToken:string|null=null;
       try{
         const requestUrl=new URL(req.url??"/","http://localhost");
         const routed=routeUrlForAppBasePath(requestUrl,appBasePath);
         const match=routed?.pathname.match(/^\/api\/v1\/tasks\/([^/]+)\/terminal\/ws$/);
         if(!routed||!match)throw new ProductError("Route not found",404);
-        if(options.publicBaseUrl&&req.headers.origin&&new URL(req.headers.origin).origin!==new URL(options.publicBaseUrl).origin)throw new ProductError("Terminal origin is not allowed",403);
+        if(options.publicBaseUrl&&(
+          typeof req.headers.origin!=="string"||
+          req.headers.origin!==new URL(options.publicBaseUrl).origin
+        ))throw new ProductError("Terminal origin is not allowed",403);
         const sessionCookie=getCookie(req,"asl_session");
         const principal=await services.auth.requireSessionPrincipal(sessionCookie);
         terminalTaskId=decodeURIComponent(match[1]!);
@@ -183,25 +203,73 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
         const expectedRunId=asString(routed.searchParams.get("expectedRunId"));
         if(!expectedRunId)throw new ProductError("Terminal expectedRunId is required",400);
         const target=await services.tasks.openTaskTerminal(principal.user.id,terminalTaskId,expectedRunId);
-        terminalAcquired=true;
+        terminalOccupancyToken=target.occupancyToken;
         terminalSockets.handleUpgrade(req,socket,head,(client)=>{
+          terminalOccupancyToken=null;
           let released=false;
+          let terminating=false;
+          let tcpConnected=false;
+          let executorReady=false;
+          let upstreamCloseStarted=false;
+          let upstreamClosed=false;
           let accessCheckRunning=false;
           let accessTimer:ReturnType<typeof setInterval>|undefined;
-          const release=()=>{if(released)return;released=true;if(accessTimer)clearInterval(accessTimer);services.tasks.closeTaskTerminal(terminalTaskId!);};
-          const upstreamUrl=new URL("/v1/terminal/ws",target.baseUrl.replace(/^http/,"ws"));
-          const upstream=new WebSocket(upstreamUrl,{headers:{authorization:`Bearer ${target.serviceKey}`}});
-          const pendingInput:Array<{data:RawData;isBinary:boolean}>=[];
+          let connectTimer:ReturnType<typeof setTimeout>|undefined;
+          let readyTimer:ReturnType<typeof setTimeout>|undefined;
+          let forceDestroyTimer:ReturnType<typeof setTimeout>|undefined;
+          let upstreamBuffer=Buffer.alloc(0);
+          const pendingInput:string[]=[];
           let pendingInputBytes=0;
-          const clearPendingInput=()=>{pendingInput.length=0;pendingInputBytes=0;};
-          const closeForBufferLimit=(reason:string)=>{
-            clearPendingInput();
-            release();
-            if(client.readyState===WebSocket.OPEN)client.close(1009,reason);
-            upstream.close();
+          const upstream=(options.terminalSocketFactory??((input:{host:string;port:number})=>net.createConnection(input)))({
+            host:target.host,
+            port:target.port
+          });
+          const clearLifecycleTimers=()=>{
+            if(connectTimer)clearTimeout(connectTimer);
+            if(readyTimer)clearTimeout(readyTimer);
+            if(accessTimer)clearInterval(accessTimer);
+            connectTimer=undefined;
+            readyTimer=undefined;
+            accessTimer=undefined;
+          };
+          const release=()=>{
+            if(released)return;
+            released=true;
+            clearLifecycleTimers();
+            if(forceDestroyTimer)clearTimeout(forceDestroyTimer);
+            services.tasks.closeTaskTerminal(terminalTaskId!,target.occupancyToken);
+          };
+          const clearPendingInput=()=>{
+            pendingInput.length=0;
+            pendingInputBytes=0;
+          };
+          const closeUpstream=(sendCancelIfReady:boolean)=>{
+            if(upstreamCloseStarted||upstreamClosed)return;
+            upstreamCloseStarted=true;
+            if(sendCancelIfReady&&executorReady&&tcpConnected&&upstream.writable&&!upstream.destroyed){
+              forceDestroyTimer=setTimeout(()=>upstream.destroy(),1_000);
+              forceDestroyTimer.unref();
+              upstream.end('{"op":"cancel"}\n');
+            }else upstream.destroy();
+          };
+          const terminateUpstream=(sendCancelIfReady:boolean)=>{
+            if(!terminating){
+              terminating=true;
+              clearLifecycleTimers();
+              clearPendingInput();
+            }
+            closeUpstream(sendCancelIfReady);
+          };
+          const closeTerminal=(code:number,reason:string,sendCancel=true)=>{
+            if(client.readyState===WebSocket.OPEN)client.close(code,reason);
+            terminateUpstream(sendCancel);
+          };
+          const failConnection=(message:string,reason="Task terminal connection failed")=>{
+            if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message}));
+            closeTerminal(1011,reason,false);
           };
           const recheckAccess=async()=>{
-            if(released||accessCheckRunning)return;
+            if(terminating||released||accessCheckRunning)return;
             accessCheckRunning=true;
             try{
               const currentPrincipal=await services.auth.requireSessionPrincipal(sessionCookie);
@@ -209,50 +277,126 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
               await services.tasks.validateTaskTerminalAccess(principal.user.id,terminalTaskId!,target.runId);
             }
             catch{
-              clearPendingInput();
-              release();
-              if(client.readyState===WebSocket.OPEN)client.close(1008,"Task terminal access changed");
-              upstream.close();
+              closeTerminal(1008,"Task terminal access changed");
             }finally{accessCheckRunning=false;}
           };
           accessTimer=setInterval(()=>void recheckAccess(),terminalAccessRecheckMs);
-          upstream.on("open",()=>{
+          accessTimer.unref();
+          connectTimer=setTimeout(
+            ()=>failConnection("Task terminal upstream connection timed out","Task terminal connection timed out"),
+            terminalTcpConnectTimeoutMs
+          );
+          connectTimer.unref();
+          upstream.once("connect",()=>{
+            if(terminating){
+              closeUpstream(false);
+              return;
+            }
+            tcpConnected=true;
+            if(connectTimer)clearTimeout(connectTimer);
+            connectTimer=undefined;
+            readyTimer=setTimeout(
+              ()=>failConnection("Task terminal executor ready timed out","Task terminal executor was not ready"),
+              terminalExecutorReadyTimeoutMs
+            );
+            readyTimer.unref();
+            upstream.write('{"op":"open"}\n');
             for(const frame of pendingInput){
-              if(upstream.readyState!==WebSocket.OPEN)break;
-              upstream.send(frame.data,{binary:frame.isBinary});
+              if(terminating||upstream.destroyed)break;
+              upstream.write(frame);
             }
             clearPendingInput();
           });
-          upstream.on("message",(data,isBinary)=>{
-            if(client.readyState!==WebSocket.OPEN)return;
-            if(client.bufferedAmount+rawDataByteLength(data)>MAX_PENDING_TERMINAL_OUTPUT_BYTES){
-              closeForBufferLimit("Terminal output buffer exceeded");
+          upstream.on("data",(chunk)=>{
+            if(terminating||released)return;
+            if(upstreamBuffer.length+chunk.length>MAX_PENDING_TERMINAL_OUTPUT_BYTES){
+              closeTerminal(1009,"Terminal output buffer exceeded");
               return;
             }
-            client.send(data,{binary:isBinary});
+            upstreamBuffer=Buffer.concat([upstreamBuffer,chunk]);
+            while(true){
+              const newline=upstreamBuffer.indexOf(0x0a);
+              if(newline<0)break;
+              const frame=upstreamBuffer.subarray(0,newline);
+              upstreamBuffer=upstreamBuffer.subarray(newline+1);
+              const normalized=normalizeTerminalOutputFrame(frame);
+              if(!normalized){
+                closeTerminal(1008,"Invalid terminal output");
+                return;
+              }
+              if(normalized==='{"op":"ready"}'&&!executorReady){
+                executorReady=true;
+                if(readyTimer)clearTimeout(readyTimer);
+                readyTimer=undefined;
+              }
+              if(client.readyState!==WebSocket.OPEN)continue;
+              if(client.bufferedAmount+Buffer.byteLength(normalized)>MAX_PENDING_TERMINAL_OUTPUT_BYTES){
+                closeTerminal(1009,"Terminal output buffer exceeded");
+                return;
+              }
+              upstream.pause();
+              client.send(normalized,(error)=>{
+                if(error)closeTerminal(1011,"Task terminal connection failed");
+                else if(!terminating&&!released)upstream.resume();
+              });
+            }
           });
           client.on("message",(data,isBinary)=>{
-            const frameBytes=rawDataByteLength(data);
-            if(upstream.readyState===WebSocket.OPEN){
-              if(upstream.bufferedAmount+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){closeForBufferLimit("Terminal input buffer exceeded");return;}
-              upstream.send(data,{binary:isBinary});
+            if(terminating)return;
+            if(isBinary){
+              closeTerminal(1003,"Binary terminal frames are not allowed");
               return;
             }
-            if(upstream.readyState!==WebSocket.CONNECTING)return;
-            if(pendingInputBytes+frameBytes>MAX_PENDING_TERMINAL_INPUT_BYTES){
+            const normalized=normalizeTerminalInputFrame(data);
+            if(!normalized){
+              closeTerminal(1008,"Invalid terminal input");
+              return;
+            }
+            const encoded=`${normalized}\n`;
+            if(!tcpConnected){
+              if(pendingInputBytes+Buffer.byteLength(encoded)>MAX_PENDING_TERMINAL_INPUT_BYTES){
+                if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal input exceeded the connection buffer"}));
+                closeTerminal(1009,"Terminal input buffer exceeded");
+                return;
+              }
+              pendingInput.push(encoded);
+              pendingInputBytes+=Buffer.byteLength(encoded);
+              return;
+            }
+            if(upstream.writableLength+Buffer.byteLength(encoded)>MAX_PENDING_TERMINAL_INPUT_BYTES){
               if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal input exceeded the connection buffer"}));
-              closeForBufferLimit("Terminal input buffer exceeded");
+              closeTerminal(1009,"Terminal input buffer exceeded");
               return;
             }
-            pendingInput.push({data,isBinary});
-            pendingInputBytes+=frameBytes;
+            upstream.write(encoded);
           });
-          upstream.on("close",()=>{clearPendingInput();release();client.close();});
-          client.on("close",()=>{clearPendingInput();release();upstream.close();});
-          client.on("error",()=>{clearPendingInput();release();upstream.close();client.close();});
-          upstream.on("error",()=>{clearPendingInput();release();if(client.readyState===WebSocket.OPEN)client.send(JSON.stringify({op:"error",message:"Task terminal connection failed"}));client.close();});
+          upstream.on("end",()=>{
+            if(upstreamBuffer.length!==0){
+              closeTerminal(1008,"Invalid terminal output",false);
+              return;
+            }
+            if(client.readyState===WebSocket.OPEN)client.close();
+            terminateUpstream(false);
+          });
+          upstream.on("close",()=>{
+            upstreamClosed=true;
+            clearLifecycleTimers();
+            if(forceDestroyTimer)clearTimeout(forceDestroyTimer);
+            release();
+            if(client.readyState===WebSocket.OPEN)client.close();
+          });
+          client.on("close",()=>terminateUpstream(true));
+          client.on("error",()=>{
+            if(client.readyState===WebSocket.OPEN)client.close();
+            terminateUpstream(true);
+          });
+          upstream.on("error",()=>failConnection("Task terminal connection failed"));
         });
-      }catch{if(terminalAcquired&&terminalTaskId)services.tasks.closeTaskTerminal(terminalTaskId);socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");socket.destroy();}
+      }catch{
+        if(terminalOccupancyToken&&terminalTaskId)services.tasks.closeTaskTerminal(terminalTaskId,terminalOccupancyToken);
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+      }
     })();
   });
 
@@ -274,8 +418,67 @@ async function startApiServer(options: ResolvedApiServerOptions): Promise<Runnin
 
 type Services = ReturnType<typeof createApplicationServices>;
 
+function normalizeTerminalInputFrame(data:RawData):string|null{
+  if(rawDataByteLength(data)>MAX_PENDING_TERMINAL_INPUT_BYTES)return null;
+  const bytes=Array.isArray(data)?Buffer.concat(data):Buffer.from(data as ArrayBuffer);
+  let value:unknown;
+  try{value=JSON.parse(bytes.toString("utf8"));}catch{return null;}
+  if(!isPlainRecord(value)||typeof value.op!=="string")return null;
+  if(value.op==="cancel"&&hasExactKeys(value,["op"]))return JSON.stringify({op:"cancel"});
+  if(value.op==="resize"&&hasExactKeys(value,["op","rows","cols"])&&
+    typeof value.rows==="number"&&Number.isInteger(value.rows)&&
+    typeof value.cols==="number"&&Number.isInteger(value.cols)&&
+    value.rows>0&&value.rows<=65_535&&value.cols>0&&value.cols<=65_535
+  )return JSON.stringify({op:"resize",rows:value.rows,cols:value.cols});
+  if(value.op==="stdin"&&hasExactKeys(value,["op","data"])&&typeof value.data==="string"&&
+    isBoundedBase64(value.data,MAX_PENDING_TERMINAL_INPUT_BYTES)
+  )return JSON.stringify({op:"stdin",data:value.data});
+  return null;
+}
+
 function rawDataByteLength(data:RawData):number{
   return Array.isArray(data)?data.reduce((total,part)=>total+part.byteLength,0):data.byteLength;
+}
+
+function normalizeTerminalOutputFrame(data:Buffer):string|null{
+  if(data.byteLength>MAX_PENDING_TERMINAL_OUTPUT_BYTES)return null;
+  let value:unknown;
+  try{value=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(data));}catch{return null;}
+  if(!isPlainRecord(value)||typeof value.op!=="string")return null;
+  if(value.op==="ready"&&hasExactKeys(value,["op"]))return JSON.stringify({op:"ready"});
+  if(value.op==="output"&&hasExactKeys(value,["op","data"])&&typeof value.data==="string"&&
+    isBoundedBase64(value.data,MAX_PENDING_TERMINAL_OUTPUT_BYTES)
+  )return JSON.stringify({op:"output",data:value.data});
+  if(value.op==="completed"&&hasExactKeys(value,["op","exit_code"])&&
+    (value.exit_code===null||(typeof value.exit_code==="number"&&Number.isInteger(value.exit_code)))
+  )return JSON.stringify({op:"completed",exit_code:value.exit_code});
+  if(value.op==="error"&&hasExactKeys(value,["op","message"])&&typeof value.message==="string"&&
+    value.message.length>0&&Buffer.byteLength(value.message)<=4_096
+  )return JSON.stringify({op:"error",message:value.message});
+  return null;
+}
+
+function isPlainRecord(value:unknown):value is Record<string,unknown>{
+  return typeof value==="object"&&value!==null&&!Array.isArray(value)&&
+    (Object.getPrototypeOf(value)===Object.prototype||Object.getPrototypeOf(value)===null);
+}
+
+function hasExactKeys(value:Record<string,unknown>,keys:string[]):boolean{
+  const expected=[...keys].sort(),actual=Object.keys(value).sort();
+  return actual.length===expected.length&&actual.every((key,index)=>key===expected[index]);
+}
+
+function isBoundedBase64(value:string,maxDecodedBytes:number):boolean{
+  if(value.length===0)return true;
+  if(value.length%4!==0||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value))return false;
+  return Buffer.from(value,"base64").byteLength<=maxDecodedBytes;
+}
+
+function boundedTerminalDeadline(value:number,name:string):number{
+  if(!Number.isFinite(value)||value<=0||value>MAX_TERMINAL_DEADLINE_MS){
+    throw new Error(`${name} must be between 1 and ${MAX_TERMINAL_DEADLINE_MS}`);
+  }
+  return value;
 }
 
 interface AuthRouteContext {

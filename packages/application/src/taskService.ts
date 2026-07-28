@@ -122,6 +122,13 @@ export interface BotifiedServiceKeyInput {
   runId: string;
 }
 
+export interface TaskTerminalHostInput {
+  runId:string;
+  taskId:string;
+  namespace:string;
+  serviceName:string;
+}
+
 export interface TaskServiceConfig {
   dataRoot: string;
   namespace: string;
@@ -132,6 +139,7 @@ export interface TaskServiceConfig {
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
   botifiedBrokerBaseUrlForTask?: (input: BotifiedBrokerAddressInput) => string;
+  terminalHostForRun?: (input:TaskTerminalHostInput)=>string;
   liveSandbox?: TaskLiveSandboxConfig;
   sandboxNamespaceLimit?: number;
   credentials?: CredentialService;
@@ -186,8 +194,9 @@ export interface TaskArtifactDownload {
 
 export interface TaskTerminalConnection {
   runId:string;
-  baseUrl: string;
-  serviceKey: string;
+  host:string;
+  port:number;
+  occupancyToken:string;
 }
 
 const BOTIFIED_RUNNER_UID = 10001;
@@ -280,7 +289,7 @@ function isTaskCreateReceiptContention(error:unknown):boolean{
 
 export class TaskService {
   private readonly messageDispatchTaskIds = new Set<string>();
-  private readonly occupiedTerminalTaskIds = new Set<string>();
+  private readonly terminalOccupancyByTaskId = new Map<string,string>();
   private readonly taskTimelineSyncs = new Map<string, Promise<void>>();
   private readonly startupOperationsByRunId = new Map<string, Promise<PersistedAgentTask>>();
   private readonly startupExternalActionsByRunId = new Map<string,Promise<unknown>>();
@@ -796,17 +805,17 @@ export class TaskService {
   }
 
   async openTaskTerminal(userId:string,taskId:string,expectedRunId:string):Promise<TaskTerminalConnection>{
-    const task=await this.requireTaskTerminalAccess(userId,taskId,expectedRunId);
-    if(this.occupiedTerminalTaskIds.has(task.id))throw new ProductError("Task terminal is already open",409);
-    this.occupiedTerminalTaskIds.add(task.id);
-    try{
-      const serviceKey=this.serviceKeyForTask(task);
-      const state=await this.readRuntimeState(task,serviceKey);
-      return{runId:requireCurrentRunId(task),baseUrl:state.baseUrl,serviceKey};
-    }catch(error){
-      this.occupiedTerminalTaskIds.delete(task.id);
-      throw error;
-    }
+    const {task,run}=await this.requireTaskTerminalAccess(userId,taskId,expectedRunId);
+    if(this.terminalOccupancyByTaskId.has(task.id))throw new ProductError("Task terminal is already open",409);
+    const host=this.terminalHostForRun(run);
+    const occupancyToken=newId("terminal_occupancy");
+    this.terminalOccupancyByTaskId.set(task.id,occupancyToken);
+    return{
+      runId:run.runId,
+      host,
+      port:3110,
+      occupancyToken
+    };
   }
 
   async startTaskTerminal(userId:string,taskId:string,request:TaskTerminalStartRequest,idempotencyKey?:string):Promise<TaskTerminalStartReceipt>{
@@ -873,8 +882,10 @@ export class TaskService {
     await this.requireTaskTerminalAccess(userId,taskId,expectedRunId);
   }
 
-  closeTaskTerminal(taskId:string):void{
-    this.occupiedTerminalTaskIds.delete(taskId);
+  closeTaskTerminal(taskId:string,occupancyToken:string):void{
+    if(this.terminalOccupancyByTaskId.get(taskId)===occupancyToken){
+      this.terminalOccupancyByTaskId.delete(taskId);
+    }
   }
 
   async sendTaskMessage(userId: string, taskId: string, content: string, idempotencyKey?: string): Promise<TaskMessageReceipt> {
@@ -1823,13 +1834,12 @@ export class TaskService {
     };
   }
 
-  private async requireTaskTerminalAccess(userId:string,taskId:string,expectedRunId:string):Promise<PersistedAgentTask>{
+  private async requireTaskTerminalAccess(userId:string,taskId:string,expectedRunId:string):Promise<{task:PersistedAgentTask;run:PersistedSandboxRunState}>{
     const task=await this.requireTaskForUser(userId,taskId,"write");
-    const run=await this.activeSandboxRun(task);
-    if(!run||run.state!=="active"||run.runId!==expectedRunId)throw taskRunTargetConflictError();
-    const serviceKey=this.serviceKeyForTask(task);const runtime=await this.readRuntimeState(task,serviceKey);const state=await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
-    if(!botifiedStateAllowsTerminal(state.state))throw new ProductError("Task terminal is available only while Botified is running or idle",409);
-    return task;
+    if(task.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
+    const run=await this.store.sandboxRuns.get(expectedRunId);
+    if(!run||run.state!=="active"||!taskMatchesExactSandboxRun(task,run))throw taskRunTargetConflictError();
+    return{task,run};
   }
 
   private async syncTaskTimeline(task: PersistedAgentTask): Promise<PersistedAgentTask> {
@@ -2081,6 +2091,16 @@ export class TaskService {
       serviceName:run.resourceNames.service
     };
     return (this.config.botifiedBaseUrlForTask??defaultBotifiedBaseUrlForTask)(input);
+  }
+
+  private terminalHostForRun(run:PersistedSandboxRunState):string{
+    const input:TaskTerminalHostInput={
+      runId:run.runId,
+      taskId:run.taskId,
+      namespace:run.namespace,
+      serviceName:run.resourceNames.service
+    };
+    return (this.config.terminalHostForRun??defaultTerminalHostForRun)(input);
   }
 
   private botifiedBrokerBaseUrlForTask(task: PersistedAgentTask): string {
@@ -3514,6 +3534,10 @@ function defaultBotifiedBaseUrlForTask(input: BotifiedTaskAddressInput): string 
   return `http://${input.serviceName??sandboxServiceNameForTask(input.taskId)}.${input.namespace}.svc.cluster.local:${input.port}`;
 }
 
+function defaultTerminalHostForRun(input:TaskTerminalHostInput):string{
+  return `${input.serviceName}.${input.namespace}.svc.cluster.local`;
+}
+
 function defaultBotifiedBrokerBaseUrlForTask(input: BotifiedBrokerAddressInput): string {
   return `http://${APP_KUBERNETES_SERVICE_NAME}.${input.namespace}.svc.cluster.local/api/internal/tasks/${encodeURIComponent(input.taskId)}/runs/${encodeURIComponent(input.runId)}/v1`;
 }
@@ -3735,10 +3759,6 @@ function botifiedTaskTurnState(state:string|undefined):TaskCurrentTurnProjection
     case "aborting": return "aborting";
     default: return "starting";
   }
-}
-
-function botifiedStateAllowsTerminal(state:string|undefined):boolean {
-  return state==="running"||state==="idle";
 }
 
 function runAllowsMessageDelivery(run:PersistedSandboxRunState):boolean{

@@ -11,7 +11,7 @@ import { FileLibraryService } from "./fileLibraryService.js";
 import { MembershipService } from "./membershipService.js";
 import { RuntimeService } from "./runtimeService.js";
 import { SandboxLifecycleService, type SandboxLifecycleKubernetesPort } from "./sandboxLifecycleService.js";
-import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type ModelCaReference, type TaskLiveSandboxConfig } from "./taskService.js";
+import { TaskService, type BotifiedServiceKeyInput, type BotifiedTaskAddressInput, type ModelCaReference, type TaskLiveSandboxConfig, type TaskTerminalHostInput } from "./taskService.js";
 import { WorkspaceService } from "./workspaceService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import { ProfileService } from "./profileService.js";
@@ -40,6 +40,7 @@ export interface CreateApplicationServicesInput {
   botifiedClient?: BotifiedRuntimeHttpClient;
   botifiedServiceKeyFactory?: (input: BotifiedServiceKeyInput) => string | undefined;
   botifiedBaseUrlForTask?: (input: BotifiedTaskAddressInput) => string;
+  terminalHostForRun?: (input:TaskTerminalHostInput)=>string;
   providerClient?: OpenAICompatibleClient;
   credentialCrypto?: CredentialCrypto;
   modelCa?: ModelCaReference;
@@ -102,7 +103,8 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
     contexts,
     ...(input.liveSandbox ? { liveSandbox: input.liveSandbox } : {}),
     ...(input.botifiedServiceKeyFactory ? { botifiedServiceKeyFactory: input.botifiedServiceKeyFactory } : {}),
-    ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {})
+    ...(input.botifiedBaseUrlForTask ? { botifiedBaseUrlForTask: input.botifiedBaseUrlForTask } : {}),
+    ...(input.terminalHostForRun ? { terminalHostForRun: input.terminalHostForRun } : {})
   };
   tasks = new TaskService(
     input.store,
