@@ -188,9 +188,10 @@ release still uses the internal `release_requested` Run state for fencing,
 cleanup, and idempotency, while Audit records only the final
 `sandbox.released` event.
 
-## Task Conversation
+## Task Conversation And Terminal
 
-Task Conversation has eight routes. The removed transcript and raw `/events` routes have no replacement.
+The removed transcript, raw `/events`, and background-work Stop routes have no
+replacement.
 
 | Route | Purpose |
 | --- | --- |
@@ -200,8 +201,9 @@ Task Conversation has eight routes. The removed transcript and raw `/events` rou
 | `PATCH /api/v1/tasks/{taskId}/messages/{messageId}` | Changes an editable queued message with `{ content }`. |
 | `DELETE /api/v1/tasks/{taskId}/messages/{messageId}` | Deletes a deletable queued message. |
 | `POST /api/v1/tasks/{taskId}/turn/abort` | Stops only the current Botified turn. |
-| `POST /api/v1/tasks/{taskId}/work/{interactionId}/stop` | Stops a stoppable typed background-work interaction. |
 | `POST /api/v1/tasks/{taskId}/sandbox/release` | Unconditionally releases the current Sandbox Run after user confirmation. |
+| `POST /api/v1/tasks/{taskId}/terminal/start` | Starts or resumes admission of the Task's Sandbox using `{ expectedRunId, expectedSandboxState }`. |
+| `WS /api/v1/tasks/{taskId}/terminal/ws?expectedRunId={runId}` | Opens the AgentSmith Terminal for one exact active Run. |
 
 Public Task responses expose only durable Task fields, the three state
 projections, and server-calculated capabilities. Rendered Kubernetes resources,
@@ -211,9 +213,24 @@ contract.
 
 An interaction has stable `id`, monotonic `revision`, `position`, `occurredAt`, and `updatedAt`. Its discriminated `kind` is one of `user_message`, `assistant_message`, `tool`, `background_task`, `task_question`, `task_notice`, `task_result`, `subagent_result`, `file`, or `system_error`; each kind carries its typed status and controlled detail fields. Tool and work execution status is separate from delivery status. File items expose an AgentSmith artifact ID only.
 
-The interaction snapshot contains `items`, history and stream cursors, `historyStatus` (`complete` or `gap`), queued messages, runtime reachability, last sync time, and the canonical Task `presentation`. That presentation contains the durable Task fields, state projections, and server-calculated capabilities. Capabilities include `sendMessage`, `editQueuedMessage`, `abortTurn`, `stopWork`, `openTerminal`, `releaseSandbox`, `editTask`, `archiveTask`, and `deleteTask`; clients must use them rather than infer actions from Task or Sandbox state.
+The interaction snapshot contains `items`, history and stream cursors,
+`historyStatus` (`complete` or `gap`), queued messages, runtime reachability,
+last sync time, and the canonical Task `presentation`. That presentation
+contains the durable Task fields, state projections, and server-calculated
+capabilities. Capabilities are `sendMessage`, `editQueuedMessage`, `abortTurn`,
+`openTerminal`, `releaseSandbox`, `editTask`, `archiveTask`, and `deleteTask`;
+clients must use them rather than infer actions from Task or Sandbox state.
 
-Message mutations return a typed receipt: `messageId`, `disposition`, duplicate flag, queued message or interaction when applicable, the canonical Task `presentation`, and a safe error on failure. A message sent while the Sandbox is released atomically starts a new Run for the same Task, Botified session, and File Library before delivery. It never creates a successor Task. Repeated requests with the same idempotency key do not create duplicate messages or Runs.
+Message mutations return a typed receipt: `messageId`, `disposition`, duplicate
+flag, queued message or interaction when applicable, the canonical Task
+`presentation`, and a safe error on failure. A message sent while the Sandbox
+is released atomically starts a new Run for the same Task, Botified session,
+and File Library before delivery. It never creates a successor Task. Repeated
+requests with the same idempotency key do not create duplicate messages or
+Runs. AgentSmith claims an ordinary message once and makes one authenticated
+`POST /v1/messages` call. If the transport result becomes ambiguous after
+dispatch, the message fails with an outcome-unknown error and is not posted
+again; Botified timeline and state remain the convergence source.
 
 The interaction SSE stream has one durable event: `interaction`. It carries a complete interaction item and an opaque cursor in `id`; clients upsert by `id + revision` and return the cursor without parsing it. Transient `state` frames carry only `queuedMessages` and the canonical Task `presentation`; `connection` carries `connectionState`, `runtimeReachability`, `historyStatus`, `lastSyncedAt`, and a safe nullable message; `preview_status` reports optional live-preview availability without changing the interaction connection state. The server emits each transient frame independently whenever its authoritative fields change.
 
@@ -222,8 +239,12 @@ The interaction SSE stream has one durable event: `interaction`. It carries a co
 Task list and detail routes expose the final projections only. `lifecycle` is
 `active | archived`; `currentTurn` is `ready | queued | starting | running |
 aborting`; `sandboxState` is `starting | active | release_requested | failed |
-released` and includes the Run ID plus a safe Run-owned cause while a failed Run
-is failed or awaiting release.
+released` and includes the Run ID. While `release_requested`, its public cause
+is `null` for the first 90 seconds. At or after 90 seconds, only a persistent
+`lastCleanupError` produces the safe `cleanup_failed` automatic-retry warning;
+the warning clears when that stored error clears. `releaseSandbox` remains
+`false` throughout `release_requested`. A failed Run may expose its safe
+Run-owned cause.
 There is no public Task execution status or second SSE Run-state channel.
 
 `GET /api/v1/projects/{projectId}/tasks` returns `{ items, nextCursor, total }`.
@@ -240,4 +261,33 @@ before limiting. The opaque v1 cursor is bound to the Task and normalized
 filters. Artifact list payloads never expose the stored Botified file ID;
 download remains the authorized attachment route for one exact Artifact.
 
-`POST .../turn/abort` stops only the current turn and does not release the Sandbox or stop detached work. `POST .../sandbox/release` fences later delivery to the current Run, unconditionally stops its agent, terminals, and processes, deletes only its app-owned Kubernetes resources, and settles that Run's Usage once. Conversation history and the bound File Library remain available. The next message or Terminal open starts a new Run without resuming work interrupted by the release. Both routes return server-authoritative state or capabilities; neither action is inferred by the Web client.
+`POST .../turn/abort` requires `{ expectedRunId }`, accepts only the exact
+current active Run, and makes one authenticated bodyless `POST /v1/abort`.
+A stale, missing, or non-active target returns
+`409 task_run_target_conflict`; an unreachable or ambiguous Botified result
+returns `503 botified_abort_outcome_unknown`. AgentSmith does not persist,
+replay, or optimistically project Abort. It stops only the current Botified turn
+and does not release the Sandbox or separately control detached processes.
+
+Terminal startup is a replay-protected HTTP command. The client sends its
+observed nullable Run ID and Sandbox state; stale state is rejected instead of
+silently targeting another Run. Once startup returns the active Run identity,
+the browser opens the authenticated WebSocket with that exact `expectedRunId`.
+The API rejects a disallowed Origin, missing write permission, stale or
+non-active Run, or an already occupied Task terminal. It rechecks session and
+Task access while connected.
+
+The WebSocket terminates at the AgentSmith API. The API connects to port `3110`
+on the same exact Run Service and relays bounded UTF-8 JSON frames over a
+bounded NDJSON TCP protocol to the AgentSmith-owned Terminal executor. Binary,
+malformed, oversized, or unterminated frames fail closed. A Task permits one
+active Terminal connection. Botified exposes no Terminal transport and is not
+in this path.
+
+`POST .../sandbox/release` fences later delivery to the current Run,
+unconditionally stops its agent, terminal, and processes, deletes only its
+app-owned Kubernetes resources, and settles that Run's Usage once. Conversation
+history and the bound File Library remain available. The next message or
+Terminal open starts a new Run without resuming work interrupted by the
+release. Runtime commands return server-authoritative state or capabilities;
+the Web client does not infer them.

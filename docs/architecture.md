@@ -14,7 +14,15 @@ Botified history is the canonical input. The server resumes from a safe source c
 
 The runtime config enables Botified LLM text preview. The server relays it as transient `assistant_preview` SSE for the active assistant interaction and does not persist it as final conversation truth. Completed timeline interactions replace the preview. Preview loss affects only the live display, not timeline recovery.
 
-`abortTurn` is a current-turn operation through Botified and leaves the Task, Sandbox, and detached work alive. Releasing a Sandbox is a separate, unconditional operation initiated only after user confirmation. It stops all work in the current Run and deletes that Run's app-owned Kubernetes resources while retaining the Task conversation, Botified session, and bound File Library. The next message or Terminal open creates a new Run for the same Task; completed history is retained and work interrupted by release is not resumed. Stoppable background work remains a typed interaction operation.
+`abortTurn` makes one no-body request to Botified for the exact current active
+Run. It controls only the current Botified turn and leaves the Task and Sandbox
+allocated; AgentSmith has no background-work Stop operation. Releasing a
+Sandbox is a separate, unconditional operation initiated only after user
+confirmation. It stops all work in the current Run and deletes that Run's
+app-owned Kubernetes resources while retaining the Task conversation, Botified
+session, and bound File Library. The next message or Terminal open creates a
+new Run for the same Task; completed history is retained and work interrupted
+by release is not resumed.
 
 Each Sandbox Run records its own ready and released timestamps and is settled once in Usage. Idle allocation time is counted because the Sandbox remains allocated until the user releases it.
 
@@ -26,8 +34,29 @@ Botified state. `sandbox_runs` owns the only compute lifecycle:
 detail and list responses expose only the `lifecycle`, `currentTurn`, and
 `sandboxState` projections plus server-calculated capabilities.
 
+## Sandbox Runtime
+
+One Run owns one `restartPolicy: Never` Pod. Its two regular containers are the
+published Botified runtime and the AgentSmith-owned Terminal executor. They
+mount the same Task File Library PVC paths but do not share a process namespace
+or credentials. Botified handles the agent session, model tools, timeline, and
+files. The Terminal executor handles only an interactive shell.
+
+The browser Terminal connects by WebSocket to the AgentSmith API. After exact
+Task, Run, membership, Origin, and occupancy checks, the API connects through
+the same Run Service to the Terminal executor on TCP `3110` and relays bounded
+NDJSON frames. It never uses a Botified Terminal or Kubernetes exec path. One
+Task may have only one active Terminal connection.
+
 ## Secrets
 
-The server decrypts a project-scoped provider credential only for its OpenAI-compatible request. Botified receives task-scoped access only; the browser never receives provider credentials or Botified service keys. Per-task service keys are derived from server secret and task/run identity, held in memory for service calls, and placed only in the live Kubernetes Secret apply body. Runtime and run-state records contain non-secret metadata only.
+The server decrypts a project-scoped provider credential only for its
+OpenAI-compatible request. AgentSmith derives and holds each Run's separate
+HMAC broker and Botified service credentials transiently inside the AgentSmith
+process. Outside that process, those values appear only in the live Kubernetes
+Secret apply body and the Botified container environment. They are never
+persisted in Run records or exposed to the Terminal, Web client, or Botified
+Bash child processes. The browser also never receives an upstream provider
+credential.
 
 Interaction projection redacts secret-like fields and values, including bearer tokens, service keys, provider keys, and task-known credential values. Raw Botified payloads, internal file URLs and paths, Kubernetes Secrets, session tokens, and provider credentials are not public task-conversation data.
