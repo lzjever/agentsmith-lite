@@ -880,7 +880,8 @@ async function fixture(
         port:{
           async applyResource(){return"applied" as const;},
           async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return"ready" as const;},
+          async getPodReadiness(){return{state:"ready" as const,podUid:"fixture-pod-uid"};},
+          async getConfigMapData(){return"not_found" as const;},
           async listManagedResources(){return[];}
         }
       }
