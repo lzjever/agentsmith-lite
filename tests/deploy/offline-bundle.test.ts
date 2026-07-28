@@ -9,8 +9,16 @@ import { parseAppImagesLock } from "../../packages/sandbox-controller/src/appIma
 
 const appOciImage = createOciImage("app");
 const runnerOciImage = createOciImage("botified-runner");
+const runnerMissingLabelsOciImage = createOciImage("botified-runner", {});
+const runnerMismatchedLabelsOciImage = createOciImage("botified-runner", {
+  "io.agentsmith.botified.version": "v0.4.43",
+  "io.agentsmith.botified.asset": "wrong.tar.gz",
+  "io.agentsmith.botified.sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+});
 const appDigestRef = `agentsmith-lite/app@sha256:${appOciImage.manifestDigest}`;
 const runnerDigestRef = `agentsmith-lite/botified-runner@sha256:${runnerOciImage.manifestDigest}`;
+const runnerMissingLabelsDigestRef = `agentsmith-lite/botified-runner@sha256:${runnerMissingLabelsOciImage.manifestDigest}`;
+const runnerMismatchedLabelsDigestRef = `agentsmith-lite/botified-runner@sha256:${runnerMismatchedLabelsOciImage.manifestDigest}`;
 
 describe("build offline bundle", () => {
   it("exports digest-pinned OCI archives with skopeo and writes bundle metadata", () => {
@@ -55,6 +63,9 @@ describe("build offline bundle", () => {
     assert.equal(checksumEntries["images.lock"], sha256File(path.join(outputDir, "images.lock")));
     assert.equal(checksumEntries["images/app.tar"], sha256File(appArchive));
     assert.equal(checksumEntries["images/botified-runner.tar"], sha256File(runnerArchive));
+
+    const manifest = readFileSync(path.join(outputDir, "manifest.yaml"), "utf8");
+    assert.match(manifest, /^botified:\n  version: v0\.4\.44\n  asset: botified-core-linux-x86_64-musl\.tar\.gz\n  sha256: 1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0$/m);
   });
 
   it("reads digest refs from --images-lock instead of requiring manual image arguments", () => {
@@ -72,6 +83,33 @@ describe("build offline bundle", () => {
       botifiedRunner: runnerDigestRef
     });
     assert.equal(readFileSync(path.join(outputDir, "images.lock"), "utf8"), `${appDigestRef}\n${runnerDigestRef}\n`);
+  });
+
+  it("fails when the exported runner archive has missing or mismatched release labels", () => {
+    const cases: Array<{
+      name: string;
+      mode: "runner-labels-missing" | "runner-labels-mismatched";
+      runnerRef: string;
+    }> = [
+      { name: "missing release labels", mode: "runner-labels-missing", runnerRef: runnerMissingLabelsDigestRef },
+      { name: "mismatched release labels", mode: "runner-labels-mismatched", runnerRef: runnerMismatchedLabelsDigestRef }
+    ];
+
+    for (const candidate of cases) {
+      const tempDir = mkdtempSync(path.join(tmpdir(), "agentsmith-lite-offline-bundle-metadata-"));
+      const outputDir = path.join(tempDir, "bundle");
+      const binDir = writeFakeSkopeo(tempDir, candidate.mode);
+
+      const result = runBundle(
+        ["--app-image", appDigestRef, "--runner-image", candidate.runnerRef, "--output", outputDir],
+        binDir
+      );
+
+      assert.notEqual(result.status, 0, candidate.name);
+      assert.match(result.stderr, /config label|expected Botified labels/i, candidate.name);
+      assert.equal(readSkopeoCalls(tempDir).length, 2, candidate.name);
+      assert.equal(existsSync(outputDir), false, candidate.name);
+    }
   });
 
   it("restores an existing bundle when publishing the staged bundle fails", () => {
@@ -134,7 +172,7 @@ describe("build offline bundle", () => {
     const cases: Array<{
       name: string;
       args: string[];
-      skopeoMode?: "write" | "missing" | "empty" | "mismatched";
+      skopeoMode?: SkopeoMode;
       error: RegExp;
     }> = [
       {
@@ -195,18 +233,26 @@ function runBundle(args: string[], pathPrefix?: string) {
   });
 }
 
-function writeFakeSkopeo(tempDir: string, mode: "write" | "missing" | "empty" | "mismatched"): string {
+type SkopeoMode = "write" | "missing" | "empty" | "mismatched" | "runner-labels-missing" | "runner-labels-mismatched";
+
+function writeFakeSkopeo(tempDir: string, mode: SkopeoMode): string {
   const binDir = path.join(tempDir, "bin");
   mkdirSync(binDir);
   const skopeo = path.join(binDir, "skopeo");
+  const callsFile = path.join(tempDir, "skopeo-calls.log");
   const appArchive = path.join(tempDir, "app.oci.tar");
   const runnerArchive = path.join(tempDir, "runner.oci.tar");
+  const runnerMissingLabelsArchive = path.join(tempDir, "runner-missing-labels.oci.tar");
+  const runnerMismatchedLabelsArchive = path.join(tempDir, "runner-mismatched-labels.oci.tar");
   writeMinimalOciArchive(appArchive, appOciImage);
   writeMinimalOciArchive(runnerArchive, runnerOciImage);
+  writeMinimalOciArchive(runnerMissingLabelsArchive, runnerMissingLabelsOciImage);
+  writeMinimalOciArchive(runnerMismatchedLabelsArchive, runnerMismatchedLabelsOciImage);
   writeFileSync(
     skopeo,
     `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\n' "$*" >> "${callsFile}"
 if [ "$#" -ne 4 ] || [ "$1" != "copy" ] || [ "$2" != "--preserve-digests" ]; then
   echo "unexpected fake skopeo args: $*" >&2
   exit 9
@@ -221,6 +267,20 @@ case "${mode}" in
       *) exit 9 ;;
     esac
     ;;
+  runner-labels-missing)
+    case "$3" in
+      "docker://${appDigestRef}") cp "${appArchive}" "$archive" ;;
+      "docker://${runnerMissingLabelsDigestRef}") cp "${runnerMissingLabelsArchive}" "$archive" ;;
+      *) exit 9 ;;
+    esac
+    ;;
+  runner-labels-mismatched)
+    case "$3" in
+      "docker://${appDigestRef}") cp "${appArchive}" "$archive" ;;
+      "docker://${runnerMismatchedLabelsDigestRef}") cp "${runnerMismatchedLabelsArchive}" "$archive" ;;
+      *) exit 9 ;;
+    esac
+    ;;
   missing) ;;
   empty) : > "$archive" ;;
   mismatched) cp "${runnerArchive}" "$archive" ;;
@@ -229,6 +289,15 @@ esac
   );
   chmodSync(skopeo, 0o755);
   return binDir;
+}
+
+function readSkopeoCalls(tempDir: string): string[] {
+  const callsFile = path.join(tempDir, "skopeo-calls.log");
+  if (!existsSync(callsFile)) {
+    return [];
+  }
+  const text = readFileSync(callsFile, "utf8").trim();
+  return text === "" ? [] : text.split("\n");
 }
 
 function writeFailingPublishMv(binDir: string, outputDir: string): void {
@@ -260,10 +329,14 @@ function sha256File(file: string): string {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
-function createOciImage(name: string) {
+function createOciImage(name: string, labels: Record<string, string> = name === "botified-runner" ? {
+  "io.agentsmith.botified.version": "v0.4.44",
+  "io.agentsmith.botified.asset": "botified-core-linux-x86_64-musl.tar.gz",
+  "io.agentsmith.botified.sha256": "1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0"
+} : {}) {
   const layer = Buffer.alloc(1024);
   const layerDigest = createHash("sha256").update(layer).digest("hex");
-  const config = Buffer.from(JSON.stringify({ architecture: "amd64", config: { name }, os: "linux", rootfs: { diff_ids: [`sha256:${layerDigest}`], type: "layers" } }));
+  const config = Buffer.from(JSON.stringify({ architecture: "amd64", config: { Labels: labels, name }, os: "linux", rootfs: { diff_ids: [`sha256:${layerDigest}`], type: "layers" } }));
   const configDigest = createHash("sha256").update(config).digest("hex");
   const manifest = Buffer.from(JSON.stringify({
     config: { digest: `sha256:${configDigest}`, mediaType: "application/vnd.oci.image.config.v1+json", size: config.length },

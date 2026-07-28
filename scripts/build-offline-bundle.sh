@@ -3,6 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 repo_root="$(pwd)"
 oci_validator="$repo_root/scripts/deploy/validate-oci-archive.sh"
+source infra/docker/botified-release.env
+
+: "${BOTIFIED_RELEASE_VERSION:?missing BOTIFIED_RELEASE_VERSION}"
+: "${BOTIFIED_RELEASE_ASSET:?missing BOTIFIED_RELEASE_ASSET}"
+: "${BOTIFIED_RELEASE_SHA256:?missing BOTIFIED_RELEASE_SHA256}"
 
 app_image=
 runner_image=
@@ -88,11 +93,14 @@ export_image() {
   local image_name="${ref%%@*}"
 
   "$skopeo_bin" copy --preserve-digests "docker://$ref" "oci-archive:$archive:$image_name"
-  bash "$oci_validator" "$archive" "${ref#*@}"
+  bash "$oci_validator" "$archive" "${ref#*@}" "${@:3}"
 }
 
 export_image "$app_image" "$staging_dir/images/app.tar"
-export_image "$runner_image" "$staging_dir/images/botified-runner.tar"
+export_image "$runner_image" "$staging_dir/images/botified-runner.tar" \
+  "$BOTIFIED_RELEASE_VERSION" \
+  "$BOTIFIED_RELEASE_ASSET" \
+  "$BOTIFIED_RELEASE_SHA256"
 
 cat > "$staging_dir/images.lock" <<LOCK
 ${app_image}
@@ -103,8 +111,9 @@ cat > "$staging_dir/manifest.yaml" <<MANIFEST
 schema: agentsmith-lite.app-offline-bundle/v1
 created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 botified:
-  mode: vendored_source
-  pin_file: third_party/botified/PINNED_SOURCE.json
+  version: ${BOTIFIED_RELEASE_VERSION}
+  asset: ${BOTIFIED_RELEASE_ASSET}
+  sha256: ${BOTIFIED_RELEASE_SHA256}
 images:
   - name: agentsmith-lite/app
     ref: ${app_image}

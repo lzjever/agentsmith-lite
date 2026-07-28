@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source infra/docker/botified-release.env
+
+: "${BOTIFIED_RELEASE_VERSION:?missing BOTIFIED_RELEASE_VERSION}"
+: "${BOTIFIED_RELEASE_ASSET:?missing BOTIFIED_RELEASE_ASSET}"
+: "${BOTIFIED_RELEASE_SHA256:?missing BOTIFIED_RELEASE_SHA256}"
 
 tag=dev
 runtime="${CONTAINER_RUNTIME:-docker}"
@@ -54,6 +59,9 @@ app_image="agentsmith-lite/app:${tag}"
 runner_image="agentsmith-lite/botified-runner:${tag}"
 node_build_heap_mb="${NODE_BUILD_HEAP_MB:-2048}"
 cargo_build_jobs="${CARGO_BUILD_JOBS:-1}"
+botified_version_label="io.agentsmith.botified.version"
+botified_asset_label="io.agentsmith.botified.asset"
+botified_sha256_label="io.agentsmith.botified.sha256"
 
 if [ -z "${APP_PUBLIC_BASE_URL:-}" ]; then
   echo "APP_PUBLIC_BASE_URL is required to build the Next application" >&2
@@ -150,8 +158,20 @@ write_images_lock() {
   mv "$temp_lock" "$lock_file"
 }
 
-run_runtime build --build-arg "APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL}" --build-arg "NODE_BUILD_HEAP_MB=${node_build_heap_mb}" -f infra/docker/Dockerfile.app -t "$app_image" .
-run_runtime build --build-arg "CARGO_BUILD_JOBS=${cargo_build_jobs}" -f infra/docker/Dockerfile.botified-runner -t "$runner_image" .
+run_runtime build --platform linux/amd64 \
+  --build-arg "APP_PUBLIC_BASE_URL=${APP_PUBLIC_BASE_URL}" \
+  --build-arg "NODE_BUILD_HEAP_MB=${node_build_heap_mb}" \
+  -f infra/docker/Dockerfile.app \
+  -t "$app_image" \
+  .
+run_runtime build --platform linux/amd64 \
+  --build-arg "CARGO_BUILD_JOBS=${cargo_build_jobs}" \
+  --label "${botified_version_label}=${BOTIFIED_RELEASE_VERSION}" \
+  --label "${botified_asset_label}=${BOTIFIED_RELEASE_ASSET}" \
+  --label "${botified_sha256_label}=${BOTIFIED_RELEASE_SHA256}" \
+  -f infra/docker/Dockerfile.botified-runner \
+  -t "$runner_image" \
+  .
 
 if [ "$push" = true ]; then
   run_runtime push "$app_image"

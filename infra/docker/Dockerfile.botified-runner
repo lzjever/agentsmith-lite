@@ -1,17 +1,29 @@
-FROM rust:1-bookworm AS build
+FROM --platform=linux/amd64 rust:1-bookworm AS build
 WORKDIR /src/bash-executor
 ARG CARGO_BUILD_JOBS=1
 COPY packages/bash-executor ./
 RUN cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin bash-executor
 
-WORKDIR /src/botified
-COPY third_party/botified ./
-RUN cargo build --jobs "$CARGO_BUILD_JOBS" --release --bin botified
+FROM --platform=linux/amd64 debian:bookworm-slim AS botified-release
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /tmp/botified-release
+COPY infra/docker/botified-release.env /tmp/botified-release.env
+RUN . /tmp/botified-release.env \
+    && test -n "$BOTIFIED_RELEASE_VERSION" \
+    && test -n "$BOTIFIED_RELEASE_ASSET" \
+    && test -n "$BOTIFIED_RELEASE_SHA256" \
+    && curl --fail --location --output "$BOTIFIED_RELEASE_ASSET" \
+      "https://github.com/lzjever/botified-releases/releases/download/${BOTIFIED_RELEASE_VERSION}/${BOTIFIED_RELEASE_ASSET}" \
+    && printf '%s  %s\n' "$BOTIFIED_RELEASE_SHA256" "$BOTIFIED_RELEASE_ASSET" | sha256sum --check \
+    && mkdir -p /opt/botified \
+    && tar -xzf "$BOTIFIED_RELEASE_ASSET" -C /opt/botified --strip-components=2 ./bin/botified
 
-FROM debian:bookworm-slim
+FROM --platform=linux/amd64 debian:bookworm-slim
 RUN useradd --system --uid 10001 --gid 0 botified
 RUN useradd --system --uid 10002 --gid 0 bash-executor
-COPY --from=build /src/botified/target/release/botified /usr/local/bin/botified
+COPY --from=botified-release /opt/botified/botified /usr/local/bin/botified
 COPY --from=build /src/bash-executor/target/release/bash-executor /usr/local/bin/bash-executor
 COPY infra/docker/botified-runner-entrypoint.sh /usr/local/bin/botified-runner-entrypoint.sh
 USER 10001

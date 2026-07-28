@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: validate-oci-archive.sh <archive> <sha256-digest>" >&2
+if [ "$#" -ne 2 ] && [ "$#" -ne 5 ]; then
+  echo "usage: validate-oci-archive.sh <archive> <sha256-digest> [<botified-version> <botified-asset> <botified-sha256>]" >&2
   exit 2
 fi
 
 archive="$1"
 expected_digest="$2"
+validate_labels=false
+if [ "$#" -eq 5 ]; then
+  validate_labels=true
+fi
+expected_version="${3:-}"
+expected_asset="${4:-}"
+expected_sha256="${5:-}"
 
 if [[ ! "$expected_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
   echo "invalid expected OCI digest: $expected_digest" >&2
@@ -138,9 +145,23 @@ if ! node -e '
   if (config?.os !== "linux" || config?.architecture !== "amd64") {
     throw new Error("config must target linux/amd64");
   }
-' "$config_blob_file"; then
+  if (process.argv[2] === "true") {
+    const expected = process.argv.slice(3);
+    const labels = config?.config?.Labels;
+    const required = [
+      ["io.agentsmith.botified.version", expected[0]],
+      ["io.agentsmith.botified.asset", expected[1]],
+      ["io.agentsmith.botified.sha256", expected[2]]
+    ];
+    for (const [key, value] of required) {
+      if (labels?.[key] !== value) {
+        throw new Error(`config label ${key} does not match expected value`);
+      }
+    }
+  }
+' "$config_blob_file" "$validate_labels" "$expected_version" "$expected_asset" "$expected_sha256"; then
   rm -f "$config_blob_file"
-  echo "OCI archive config must target linux/amd64: $archive" >&2
+  echo "OCI archive config must target linux/amd64 and match expected Botified labels: $archive" >&2
   exit 1
 fi
 rm -f "$config_blob_file"

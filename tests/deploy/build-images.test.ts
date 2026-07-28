@@ -31,20 +31,31 @@ describe("build images", () => {
     }
   });
 
-  it("builds runner binaries sequentially in one Rust stage", () => {
+  it("builds the runner from the pinned Botified release and only compiles the Bash executor", () => {
+    const releaseMetadata = readFileSync(path.join(process.cwd(), "infra/docker/botified-release.env"), "utf8");
     const dockerfile = readFileSync(path.join(process.cwd(), "infra/docker/Dockerfile.botified-runner"), "utf8");
-    const runtimeStart = dockerfile.indexOf("\nFROM debian:bookworm-slim");
-    assert.notEqual(runtimeStart, -1, "Dockerfile.botified-runner must include its Debian runtime stage");
-    const buildStage = dockerfile.slice(0, runtimeStart);
+    const buildScript = readFileSync(path.join(process.cwd(), "scripts/build-images.sh"), "utf8");
 
-    assert.equal((dockerfile.match(/^FROM rust:1-bookworm\b/gm) ?? []).length, 1);
-    assert.match(buildStage, /^FROM rust:1-bookworm AS build$/m);
-    assert.match(
-      buildStage,
-      /WORKDIR \/src\/bash-executor\nARG CARGO_BUILD_JOBS=1\nCOPY packages\/bash-executor \.\/\nRUN cargo build --jobs "\$CARGO_BUILD_JOBS" --release --bin bash-executor\n\nWORKDIR \/src\/botified\nCOPY third_party\/botified \.\/\nRUN cargo build --jobs "\$CARGO_BUILD_JOBS" --release --bin botified/
-    );
+    assert.match(releaseMetadata, /^BOTIFIED_RELEASE_VERSION=v0\.4\.44$/m);
+    assert.match(releaseMetadata, /^BOTIFIED_RELEASE_ASSET=botified-core-linux-x86_64-musl\.tar\.gz$/m);
+    assert.match(releaseMetadata, /^BOTIFIED_RELEASE_SHA256=1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0$/m);
+    assert.match(buildScript, /^source infra\/docker\/botified-release\.env$/m);
+    assert.doesNotMatch(buildScript, /--build-arg "BOTIFIED_RELEASE_(?:VERSION|ASSET|SHA256)=/);
+    assert.doesNotMatch(dockerfile, /ARG BOTIFIED_RELEASE_(?:VERSION|ASSET|SHA256)/);
+    assert.match(dockerfile, /^FROM --platform=linux\/amd64 debian:bookworm-slim AS botified-release$/m);
+    assert.match(dockerfile, /^FROM --platform=linux\/amd64 debian:bookworm-slim$/m);
+    assert.match(dockerfile, /^COPY infra\/docker\/botified-release\.env \/tmp\/botified-release\.env$/m);
+    assert.equal(dockerfile.includes("RUN . /tmp/botified-release.env \\"), true);
+    assert.match(dockerfile, /sha256sum --check/);
+    assert.match(dockerfile, /tar .*"\$BOTIFIED_RELEASE_ASSET"/);
+    assert.doesNotMatch(dockerfile, /third_party\/botified|cargo build[^\n]*--bin botified/);
+    assert.equal((dockerfile.match(/cargo build[^\n]*--bin bash-executor/g) ?? []).length, 1);
     assert.match(dockerfile, /COPY --from=build \/src\/bash-executor\/target\/release\/bash-executor \/usr\/local\/bin\/bash-executor/);
-    assert.match(dockerfile, /COPY --from=build \/src\/botified\/target\/release\/botified \/usr\/local\/bin\/botified/);
+    assert.match(dockerfile, /COPY --from=botified-release \/opt\/botified\/botified \/usr\/local\/bin\/botified/);
+
+    for (const duplicate of [dockerfile, buildScript]) {
+      assert.doesNotMatch(duplicate, /v0\.4\.44|botified-core-linux-x86_64-musl\.tar\.gz|1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0/);
+    }
   });
 
   it("pushes images with the selected runtime and writes images.lock from canonical RepoDigests", () => {
@@ -61,8 +72,8 @@ describe("build images", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readCalls(callsFile), [
-      "build --build-arg APP_PUBLIC_BASE_URL=http://localhost:3000/app --build-arg NODE_BUILD_HEAP_MB=1536 -f infra/docker/Dockerfile.app -t agentsmith-lite/app:release-1 .",
-      "build --build-arg CARGO_BUILD_JOBS=2 -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:release-1 .",
+      "build --platform linux/amd64 --build-arg APP_PUBLIC_BASE_URL=http://localhost:3000/app --build-arg NODE_BUILD_HEAP_MB=1536 -f infra/docker/Dockerfile.app -t agentsmith-lite/app:release-1 .",
+      "build --platform linux/amd64 --build-arg CARGO_BUILD_JOBS=2 --label io.agentsmith.botified.version=v0.4.44 --label io.agentsmith.botified.asset=botified-core-linux-x86_64-musl.tar.gz --label io.agentsmith.botified.sha256=1fdd193eeaea911951d58a15b1b42a786c6962d7af70af01f96fb13af56bf8f0 -f infra/docker/Dockerfile.botified-runner -t agentsmith-lite/botified-runner:release-1 .",
       "push agentsmith-lite/app:release-1",
       "push agentsmith-lite/botified-runner:release-1",
       "image inspect agentsmith-lite/app:release-1",
