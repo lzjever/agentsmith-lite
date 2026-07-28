@@ -45,7 +45,6 @@ export interface BotifiedRuntimeStateResult {
   snapshot: unknown;
   sessionId?: string;
   state?: string;
-  turnId?: string;
   timelineCursor?: string;
   activeItems?: unknown[];
 }
@@ -202,7 +201,6 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     };
     const sessionId = stringField(record, "session_id");
     const state = stringField(record, "state");
-    const turnId = stringField(record, "turn_id");
     const timelineCursor = stringField(record, "timeline_cursor");
     const activeItems = arrayFieldOrUndefined(record, "active_items");
     if (sessionId !== undefined) {
@@ -210,9 +208,6 @@ export class FetchBotifiedRuntimeHttpClient implements BotifiedRuntimeHttpClient
     }
     if (state !== undefined) {
       result.state = state;
-    }
-    if (turnId !== undefined) {
-      result.turnId = turnId;
     }
     if (timelineCursor !== undefined) {
       result.timelineCursor = timelineCursor;

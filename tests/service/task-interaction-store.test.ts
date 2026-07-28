@@ -173,7 +173,7 @@ describe("task interaction store", () => {
 
   it("defines authoritative state events without a durable interaction cursor", () => {
     const events: TaskInteractionStreamEvent[] = [
-      { type:"state", queuedMessages:[], presentation:{task:{id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",createdAt:timestamp(0),updatedAt:timestamp(0)},lifecycle:{state:"active"},currentTurn:{state:"ready",turnId:null},sandboxState:{state:"released",runId:null,cause:null},capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false}} },
+      { type:"state", queuedMessages:[], presentation:{task:{id:"task_interactions",workspaceId:"workspace",projectId:"project",endpointId:"endpoint",fileLibraryId:"library_interactions",title:"Task",prompt:"work",createdAt:timestamp(0),updatedAt:timestamp(0)},lifecycle:{state:"active"},currentTurn:{state:"ready"},sandboxState:{state:"released",runId:null,cause:null},capabilities:{sendMessage:true,editQueuedMessage:false,abortTurn:false,openTerminal:true,releaseSandbox:true,editTask:true,archiveTask:false,deleteTask:false}} },
       { type:"connection", connectionState:"connected", runtimeReachability:"reachable", historyStatus:"complete", lastSyncedAt:timestamp(3), message:null }
     ];
     assert.equal(events.every((event) => !("cursor" in event)),true);

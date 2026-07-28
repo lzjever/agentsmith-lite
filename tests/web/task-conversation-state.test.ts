@@ -47,7 +47,7 @@ const presentation = (overrides: Partial<TaskCapabilities> = {}): TaskDetail => 
     updatedAt: "2026-07-13T00:00:00.000Z"
   },
   lifecycle: { state: "active" },
-  currentTurn:{state:"running",turnId:"turn_1"},
+  currentTurn:{state:"running"},
   sandboxState: { state: "active", runId: "run_1", cause: null },
   capabilities: { ...capabilities, ...overrides }
 });
@@ -1153,7 +1153,6 @@ function presentationFor(
         : sandboxState === "active"
           ? "running"
           : "ready",
-      turnId:sandboxState==="active"?"turn_1":null
     },
     sandboxState: {
       state: sandboxState,

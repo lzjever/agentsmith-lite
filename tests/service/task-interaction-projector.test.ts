@@ -456,43 +456,6 @@ describe("task interaction projection", () => {
     assert.equal(canonicalAcceptance.interaction?.revision, 3);
   });
 
-  it("owns turn abort identity and ignores duplicate or out-of-order product revisions", () => {
-    const source: ProductTaskInteractionSource = {
-      sourceKind: "product",
-      taskId: "task-1",
-      sourceId: "turn:cycle-1:abort",
-      sourceRevision: 1,
-      occurredAt: "2026-07-13T10:00:10.000Z",
-      position: 10,
-      type: "turn_aborted",
-      turnId: "cycle-1"
-    };
-    const aborted = projectProduct(source);
-    const persisted: TaskInteractionProjectionState = {
-      ...state(aborted),
-      sourceKind: "product",
-      sourceId: source.sourceId,
-      sourceRevision: source.sourceRevision
-    };
-    const duplicate = projectProduct({ ...source, occurredAt:"2026-07-13T10:00:11.000Z" }, persisted);
-    const outOfOrder = projectProduct({ ...source, sourceRevision:0, occurredAt:"2026-07-13T10:00:09.000Z" }, persisted);
-    const nextTurn = projectProduct({
-      ...source,
-      sourceId: "turn:cycle-2:abort",
-      turnId: "cycle-2",
-      occurredAt: "2026-07-13T10:01:00.000Z",
-      position: 20
-    });
-
-    assert.equal(aborted.interaction?.kind, "assistant_message");
-    assert.equal(aborted.interaction?.body, "Current turn stopped.");
-    assert.equal(field(aborted, "status"), "aborted");
-    assert.equal(duplicate.interaction, null);
-    assert.equal(outOfOrder.interaction, null);
-    assert.notEqual(nextTurn.interaction?.id, aborted.interaction?.id);
-  });
-
-
   it("returns an internal artifact upsert without exposing storage fields in the interaction", () => {
     const result = projectBotified(canonicalEvent(1, "file.published", {
       file_id: "file-1",

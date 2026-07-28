@@ -244,7 +244,7 @@ function presentation(
       updatedAt: "2026-07-25T00:00:00.000Z"
     },
     lifecycle: { state: "active" },
-    currentTurn:{state:state==="active"?"running":state==="starting"?"starting":"ready",turnId:state==="active"?"turn_1":null},
+    currentTurn:{state:state==="active"?"running":state==="starting"?"starting":"ready"},
     sandboxState: {
       state,
       runId: "run_1",

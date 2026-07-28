@@ -567,7 +567,6 @@ export interface TaskArtifactListPage {
 export interface TaskLifecycleProjection { state: "active" | "archived"; }
 export interface TaskCurrentTurnProjection {
   state: "ready" | "starting" | "queued" | "running" | "aborting";
-  turnId: string | null;
 }
 export type SandboxFailureCode = "startup_failed" | "runtime_unreachable" | "runner_failed" | "cleanup_failed";
 export interface TaskSandboxFailureCause {

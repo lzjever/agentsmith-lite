@@ -2597,19 +2597,19 @@ export class TaskService {
     };
   }
 
-  private async taskRuntimePresentation(task:PersistedAgentTask,knownRun?:PersistedSandboxRunState|null):Promise<{turn:TaskCurrentTurnProjection["state"];turnId:string|null;reachability:TaskRuntimeReachability}>{
+  private async taskRuntimePresentation(task:PersistedAgentTask,knownRun?:PersistedSandboxRunState|null):Promise<{turn:TaskCurrentTurnProjection["state"];reachability:TaskRuntimeReachability}>{
     const run=knownRun===undefined?(task.currentRunId?await this.store.sandboxRuns.get(task.currentRunId):null):knownRun;
-    if(!run||run.taskId!==task.id||run.state==="released")return{turn:"ready",turnId:null,reachability:"unreachable"};
-    if(run.state==="starting")return{turn:"starting",turnId:null,reachability:"unknown"};
-    if(run.state!=="active")return{turn:"ready",turnId:null,reachability:"unreachable"};
+    if(!run||run.taskId!==task.id||run.state==="released")return{turn:"ready",reachability:"unreachable"};
+    if(run.state==="starting")return{turn:"starting",reachability:"unknown"};
+    if(run.state!=="active")return{turn:"ready",reachability:"unreachable"};
     try {
       const serviceKey = this.serviceKeyForTask(task);
       const runtime = await this.readRuntimeState(task, serviceKey);
       const state = await this.readVerifiedBotifiedState(task,runtime.baseUrl,serviceKey);
       const turn=botifiedTaskTurnState(state.state);
-      return{turn,turnId:turn==="running"||turn==="aborting"?state.turnId??null:null,reachability:"reachable"};
+      return{turn,reachability:"reachable"};
     } catch {
-      return{turn:"starting",turnId:null,reachability:"unreachable"};
+      return{turn:"starting",reachability:"unreachable"};
     }
   }
 
@@ -2619,7 +2619,6 @@ export class TaskService {
     known:{
       run?:PersistedSandboxRunState|null;
       turn?:TaskCurrentTurnProjection["state"];
-      turnId?:string|null;
       reachability?:TaskRuntimeReachability;
       queued?:PersistedTaskMessage[];
       projectAccess?:ProjectAccessSnapshot;
@@ -2630,13 +2629,12 @@ export class TaskService {
     const unavailableRunId=task.currentRunId&&!run?task.currentRunId:null;
     const queued=known.queued??await this.store.listTaskMessages(task.id);
     const runtime=known.turn!==undefined
-      ?{turn:known.turn,turnId:known.turnId??null,reachability:known.reachability??(run?.state==="active"?"reachable":"unreachable")}
+      ?{turn:known.turn,reachability:known.reachability??(run?.state==="active"?"reachable":"unreachable")}
       :await this.taskRuntimePresentation(task,run);
     const turn=unavailableRunId
       ?"ready"
       :runtime.turn==="ready"&&await this.hasQueuedTurnMessage(task.id,queued)?"queued":runtime.turn;
-    const turnId=turn===runtime.turn?runtime.turnId:null;
-    const state=projectTaskState({archivedAt:task.archivedAt,run,unavailableRunId,turn,turnId});
+    const state=projectTaskState({archivedAt:task.archivedAt,run,unavailableRunId,turn});
     const [projectAccess,executionEligible]=await Promise.all([
       known.projectAccess??this.workspaces.projectAccessForUser(userId,task.projectId),
       this.taskExecutionEligible(task)
@@ -2658,7 +2656,7 @@ export class TaskService {
     } : {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),
-      abortTurn:canControlCurrentWork&&turn==="running"&&turnId!==null,
+      abortTurn:canControlCurrentWork&&runtime.turn==="running",
       openTerminal: !cleanupPending&&(
         canStartNewWork&&(releaseConfirmed||run?.state==="starting")||
         canControlCurrentWork
@@ -2983,9 +2981,8 @@ function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTa
     !hasExactKeys(lifecycle,["state"])||
     !["active","archived"].includes(String(lifecycle.state))||
     !isUnknownRecord(currentTurn)||
-    !hasExactKeys(currentTurn,["state","turnId"])||
+    !hasExactKeys(currentTurn,["state"])||
     !["ready","starting","queued","running","aborting"].includes(String(currentTurn.state))||
-    !(currentTurn.turnId===null||typeof currentTurn.turnId==="string")||
     !isUnknownRecord(sandboxState)||
     !hasExactKeys(sandboxState,["cause","runId","state"])||
     !["starting","active","release_requested","released","failed"].includes(String(sandboxState.state))||
@@ -3001,8 +2998,10 @@ function requireLegacyTaskCreatePresentation(value:unknown,task:PersistedAgentTa
 }
 
 function normalizeHistoricalTaskCreatePresentation(value:unknown):unknown{
-  if(!isUnknownRecord(value)||!isUnknownRecord(value.currentTurn)||"turnId" in value.currentTurn)return value;
-  return{...value,currentTurn:{...value.currentTurn,turnId:null}};
+  if(!isUnknownRecord(value)||!isUnknownRecord(value.currentTurn)||!("turnId" in value.currentTurn))return value;
+  if(value.currentTurn.turnId!==null&&typeof value.currentTurn.turnId!=="string")return value;
+  const {turnId:_,...currentTurn}=value.currentTurn;
+  return{...value,currentTurn};
 }
 
 function validLegacySandboxCause(value:unknown):boolean{

@@ -2,19 +2,24 @@
 
 import { CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
 import { Button as AstryxButton, IconButton, Text } from "@astryxdesign/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
 
 export function TaskRunStatus({ currentTurn, sandboxState, capabilities, aborting, onAbort }: { currentTurn: TaskDetail["currentTurn"]; sandboxState: TaskDetail["sandboxState"]; capabilities: TaskCapabilities; aborting: boolean; onAbort: () => Promise<void> }) {
-  const [abortError, setAbortError] = useState("");
+  const [abortError, setAbortError] = useState<{runId:string|null;message:string}|null>(null);
+  useEffect(() => {
+    setAbortError((current) => current?.runId===sandboxState.runId ? current : null);
+  }, [sandboxState.runId]);
   async function abort() {
     if (!capabilities.abortTurn || aborting) return;
-    setAbortError("");
+    const runId=sandboxState.runId;
+    setAbortError(null);
     try { await onAbort(); }
-    catch (reason) { setAbortError(reason instanceof Error ? reason.message : "Current turn could not be stopped."); }
+    catch (reason) { setAbortError({runId,message:reason instanceof Error ? reason.message : "Current turn could not be stopped."}); }
   }
   const presentation = taskStatePresentation(currentTurn, sandboxState);
   const Icon = presentation.icon;
+  const visibleAbortError=abortError?.runId===sandboxState.runId?abortError:null;
   return <div className="flex min-w-max shrink-0 items-center gap-2">
     {presentation.spinning ? <Icon aria-hidden="true" className={`size-4 shrink-0 animate-spin ${presentation.iconClass}`} /> : <Icon aria-hidden="true" className={`size-4 shrink-0 ${presentation.iconClass}`} />}
     <span role="status" aria-live="polite" aria-atomic="true"><Text type="supporting" color="secondary" className="whitespace-nowrap">{presentation.label}</Text></span>
@@ -22,7 +27,7 @@ export function TaskRunStatus({ currentTurn, sandboxState, capabilities, abortin
       <IconButton className="min-h-11 min-w-11 sm:hidden" label={aborting ? "Stopping current turn" : "Stop current turn"} tooltip={aborting ? "Stopping current turn" : "Stop current turn"} variant="ghost" size="lg" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} />
       <AstryxButton className="hidden min-h-11 sm:inline-flex" label={aborting ? "Stopping..." : "Stop current turn"} variant="ghost" size="sm" icon={<Square size={14} />} isDisabled={aborting} isLoading={aborting} onClick={() => void abort()} />
     </> : null}
-    {capabilities.abortTurn && abortError ? <span role="alert" className="whitespace-nowrap text-error"><Text type="supporting" color="inherit">Current turn could not be stopped: {abortError}</Text></span> : null}
+    {visibleAbortError ? <span role="alert" className="whitespace-nowrap text-error"><Text type="supporting" color="inherit">Current turn could not be stopped: {visibleAbortError.message}</Text></span> : null}
   </div>;
 }
 

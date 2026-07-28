@@ -63,16 +63,10 @@ export interface MessageDeliveryInteractionSource extends ProductSourceBase {
   status: "pending" | "dispatching" | "accepted" | "queued" | "rejected" | "failed";
 }
 
-export interface TurnAbortedInteractionSource extends ProductSourceBase {
-  type: "turn_aborted";
-  turnId: string;
-}
-
 export type ProductTaskInteractionSource =
   | TaskCreatedInteractionSource
   | MessageAdmittedInteractionSource
-  | MessageDeliveryInteractionSource
-  | TurnAbortedInteractionSource;
+  | MessageDeliveryInteractionSource;
 
 export type TaskInteractionProjectionSource = BotifiedTaskInteractionSource | ProductTaskInteractionSource;
 
@@ -184,19 +178,6 @@ function projectProduct(
   previous: TaskInteractionProjectionState | null,
   redaction: InteractionTextRedactionOptions
 ): TaskInteractionProjectionResult {
-  if (source.type === "turn_aborted") {
-    const old = previous?.interaction.kind === "assistant_message" ? previous.interaction : null;
-    const interaction: TaskAssistantMessageInteraction = {
-      ...base(source.taskId, old?.id ?? interactionId(source.taskId, `TurnAbort:${source.turnId}`), source, old),
-      kind: "assistant_message",
-      title: "Assistant",
-      body: "Current turn stopped.",
-      contentMode: "full",
-      status: terminalAssistantStatus(old?.status, "aborted")
-    };
-    return { interaction };
-  }
-
   const old = previous?.interaction.kind === "user_message" ? previous.interaction : null;
   const content = "content" in source ? source.content : undefined;
   const body = content === undefined ? bodyFromPrevious(old) : optionalProductRedacted(content, redaction);

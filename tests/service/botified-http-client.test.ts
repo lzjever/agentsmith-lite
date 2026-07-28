@@ -176,7 +176,7 @@ describe("Botified HTTP client", () => {
     });
   });
 
-  it("reads runtime state with bearer auth and parses the canonical turn identity", async () => {
+  it("reads runtime state without promoting turn identity into Abort authority", async () => {
     const client = new FetchBotifiedRuntimeHttpClient(async (input, init = {}) => {
       assert.equal(String(input), "http://botified.local/v1/state");
       assert.equal(init.method, "GET");
@@ -200,7 +200,6 @@ describe("Botified HTTP client", () => {
       },
       sessionId: "session_1",
       state: "running",
-      turnId: "turn_1",
       timelineCursor: "timeline:main:4",
       activeItems: [{ id: "service", type: "service_status", status: "running" }]
     });

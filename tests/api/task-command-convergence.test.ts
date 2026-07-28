@@ -180,7 +180,7 @@ describe("Task command convergence API", { concurrency:false }, () => {
       const historicalPresentation=structuredClone(legacyPresentation) as unknown as {
         currentTurn:{state:string;turnId?:string|null};
       };
-      delete historicalPresentation.currentTurn.turnId;
+      historicalPresentation.currentTurn.turnId="historical-turn";
       assert.ok(requestHash);
       const workspace=await store.findWorkspace(auth.workspaceId);
       assert.ok(workspace);
@@ -209,19 +209,9 @@ describe("Task command convergence API", { concurrency:false }, () => {
         "task-create-legacy-replay"
       );
       assert.equal(replay.status,200,await replay.clone().text());
-      const replayBody=await replay.json() as {task:{id:string};currentTurn:{state:string;turnId:string|null}};
+      const replayBody=await replay.json() as {task:{id:string};currentTurn:{state:string}};
       assert.equal(replayBody.task.id,body.task.id);
-      assert.equal(Object.hasOwn(replayBody.currentTurn,"turnId"),true);
-
-      await seed("task-create-explicit-turn-replay",legacyPresentation);
-      const explicit=await auth.request(
-        "POST",
-        `/api/v1/projects/${auth.projectId}/tasks`,
-        input,
-        "task-create-explicit-turn-replay"
-      );
-      assert.equal(explicit.status,200,await explicit.clone().text());
-      assert.equal((await explicit.json() as {task:{id:string}}).task.id,body.task.id);
+      assert.equal(Object.hasOwn(replayBody.currentTurn,"turnId"),false);
 
       await seed("task-create-malformed-legacy-replay",{task:body.task});
       const malformed=await auth.request(

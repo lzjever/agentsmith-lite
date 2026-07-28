@@ -358,6 +358,10 @@ describe("task interactions API", () => {
     await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
     const run=await store.sandboxRuns.get(current.currentRunId);assert.ok(run);
+    const presentation=(await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`)).presentation;
+    assert.equal(presentation.currentTurn.state,"running");
+    assert.equal(Object.hasOwn(presentation.currentTurn,"turnId"),false);
+    assert.equal(presentation.capabilities.abortTurn,true);
 
     const stale=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
       expectedRunId:"run_stale"
@@ -2728,7 +2732,6 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   healthFailure: unknown;
   previewSignal: AbortSignal | undefined;
   previewWaitForAbort = false;
-  stateTurnId: string | undefined = "turn-current";
   timelineSessionId: string | undefined;
   stateSessionId: string | undefined;
 
@@ -2758,9 +2761,8 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
     const sessionId=this.stateSessionId??serviceKey;
     return{
       sessionId,
-      snapshot:this.stateTurnId===undefined?{session_id:sessionId}:{session_id:sessionId,turn_id:this.stateTurnId},
-      state:"running" as const,
-      ...(this.stateTurnId===undefined?{}:{turnId:this.stateTurnId})
+      snapshot:{session_id:sessionId},
+      state:"running" as const
     };
   }
 
