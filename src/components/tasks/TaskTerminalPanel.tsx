@@ -272,7 +272,7 @@ export function TaskTerminalPanel({
 
   const cleanupMessage = presentation.sandboxState.cause?.message
     ?? (presentation.sandboxState.state === "release_requested"
-      ? "Sandbox cleanup is pending."
+      ? "Sandbox release is in progress. AgentSmith will continue automatically."
       : "The failed Sandbox must be cleaned up before Terminal can start.");
   return <section className="grid h-full min-h-0 flex-1 place-items-center border border-border bg-muted px-5" aria-label="Task terminal">
     <div className="max-w-lg text-center">
@@ -291,7 +291,7 @@ export function TaskTerminalPanel({
         <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">Starting the Sandbox for this Task.</Text>
       </> : null}
       {surface.kind === "cleanup_pending" ? <>
-        <Text as="p" display="block" className="mt-3" weight="semibold">Terminal cleanup pending</Text>
+        <Text as="p" display="block" className="mt-3" weight="semibold">Sandbox release in progress</Text>
         <Text as="p" display="block" type="supporting" color="secondary" className="mt-2">{cleanupMessage}</Text>
       </> : null}
       {surface.kind === "active" ? <>

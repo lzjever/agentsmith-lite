@@ -2653,7 +2653,7 @@ export class TaskService {
       releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false
     } : cleanupPending ? {
       sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,
-      releaseSandbox:canWrite&&!task.deletedAt,editTask:false,archiveTask:false,deleteTask:false
+      releaseSandbox:run?.state==="failed"&&canWrite&&!task.deletedAt,editTask:false,archiveTask:false,deleteTask:false
     } : {
       sendMessage: canInteract,
       editQueuedMessage: canInteract && queued.some((message) => (message.deliveryStatus ?? "pending") === "pending" && !message.deletedAt),

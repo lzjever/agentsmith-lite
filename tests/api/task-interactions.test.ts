@@ -1306,6 +1306,10 @@ describe("task interactions API", () => {
       const replay=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/sandbox/release`,{method:"POST",headers,body});const replayBody=await replay.json();
       assert.equal(first.status,202);assert.equal(replay.status,202);assert.deepEqual(replayBody,firstBody);
       assert.deepEqual(firstBody,{outcome:"accepted_in_progress",keyDisposition:"retain",taskId:task.id,runId:JSON.parse(body).expectedRunId});
+      const releasing=await auth.requestJson("GET",`/api/v1/tasks/${task.id}/detail`);
+      assert.equal(releasing.sandboxState.state,"release_requested");
+      assert.equal(releasing.sandboxState.cause,null);
+      assert.equal(releasing.capabilities.releaseSandbox,false);
       const requested=await store.sandboxRuns.get(JSON.parse(body).expectedRunId);assert.ok(requested);
       const releasedAt=new Date(Date.parse(requested.updatedAt)+1).toISOString();
       const released={...requested,state:"released" as const,releasedAt,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:requested.fencingToken+1,updatedAt:releasedAt};

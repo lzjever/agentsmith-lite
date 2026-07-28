@@ -56,8 +56,14 @@ export class RuntimeService {
     }
 
     let sandboxReap:SandboxReapResult;
-    try{sandboxReap=await this.sandboxLifecycle.reapSandboxRunsOnce({apply:true});}
-    catch{sandboxReap=emptySandboxReapResult();}
+    try{
+      sandboxReap=await this.sandboxLifecycle.reapSandboxRunsOnce({apply:true});
+      if(sandboxReap.errors.length>0)logSandboxMaintenanceFailure();
+    }
+    catch{
+      logSandboxMaintenanceFailure();
+      sandboxReap=emptySandboxReapResult();
+    }
     return { taskSync, sandboxReap };
   }
 
@@ -96,6 +102,10 @@ export class RuntimeService {
         this.tickInFlight = null;
       });
   }
+}
+
+function logSandboxMaintenanceFailure():void{
+  console.error("Sandbox maintenance could not complete; automatic retry will continue.");
 }
 
 function emptySandboxReapResult():SandboxReapResult{return{namespace:"",activeTaskCount:0,runCounts:{total:0,starting:0,active:0,releaseRequested:0,failed:0,released:0},observedResourceCounts:{},cleanupPlan:{targets:[],recentFailures:[]},recentCleanupFailures:[],actionSummary:[],errors:["Sandbox reap failed"],dryRun:false,storedRunIds:[]};}

@@ -6,12 +6,12 @@ describe("Task state projection", () => {
   it("keeps Task lifecycle independent from Turn and Run state", () => {
     assert.deepEqual(projectTaskState({
       archivedAt:null,
-      run:{ runId:"run_1", state:"failed", failureCode:"startup_failed", lastCleanupError:null },
+      run:{ runId:"run_1", state:"failed", failureCode:"startup_failed", lastCleanupError:null, releaseRequestedAt:"2026-07-23T00:00:00.000Z" },
       turn:"ready"
     }), {
       lifecycle:{ state:"active" },
       currentTurn:{ state:"ready" },
-      sandboxState:{ state:"failed", runId:"run_1", cause:{code:"startup_failed",message:"Sandbox startup did not complete. Retry release to remove its resources."} }
+      sandboxState:{ state:"failed", runId:"run_1", cause:{code:"startup_failed",message:"Sandbox startup did not complete. Release the sandbox to remove its resources."} }
     });
   });
 
@@ -40,24 +40,57 @@ describe("Task state projection", () => {
     });
   });
 
-  it("retains a safe failure cause while failed resources await release", () => {
+  it("keeps transient cleanup failures private during the first 90 seconds of release", () => {
     assert.deepEqual(projectTaskState({
       archivedAt:"2026-07-23T00:00:00.000Z",
-      run:{ runId:"run_2", state:"release_requested", failureCode:"runner_failed", lastCleanupError:null },
-      turn:"ready"
+      run:{
+        runId:"run_2",
+        state:"release_requested",
+        failureCode:"runner_failed",
+        releaseRequestedAt:"2026-07-23T00:00:00.000Z",
+        lastCleanupError:{at:"2026-07-23T00:00:30.000Z",target:"Pod/runtime",message:"transient"}
+      },
+      turn:"ready",
+      now:new Date("2026-07-23T00:01:29.999Z")
     }), {
       lifecycle:{ state:"archived" },
       currentTurn:{ state:"ready" },
-      sandboxState:{ state:"release_requested", runId:"run_2", cause:{code:"runner_failed",message:"The sandbox runtime stopped unexpectedly. Retry release to remove its resources."} }
+      sandboxState:{ state:"release_requested", runId:"run_2", cause:null }
     });
   });
 
-  it("projects cleanup failures without exposing persisted infrastructure detail", () => {
+  it("exposes an automatic-retry warning after 90 seconds while cleanup still fails", () => {
     const projected=projectTaskState({
       archivedAt:null,
-      run:{runId:"run_3",state:"release_requested",failureCode:"runner_failed",lastCleanupError:{at:"2026-07-23T00:00:00.000Z",target:"Secret/runtime",message:"Bearer sk-runtime-secret"}},
-      turn:"ready"
+      run:{
+        runId:"run_3",
+        state:"release_requested",
+        failureCode:"runner_failed",
+        releaseRequestedAt:"2026-07-23T00:00:00.000Z",
+        lastCleanupError:{at:"2026-07-23T00:01:29.000Z",target:"Secret/runtime",message:"Bearer sk-runtime-secret"}
+      },
+      turn:"ready",
+      now:new Date("2026-07-23T00:01:30.000Z")
     });
-    assert.deepEqual(projected.sandboxState.cause,{code:"cleanup_failed",message:"Sandbox cleanup could not be completed. Retry release to try again."});
+    assert.deepEqual(projected.sandboxState.cause,{
+      code:"cleanup_failed",
+      message:"Sandbox release is taking longer than expected. AgentSmith is still retrying automatically."
+    });
+  });
+
+  it("removes the delayed warning after cleanup recovers", () => {
+    const projected=projectTaskState({
+      archivedAt:null,
+      run:{
+        runId:"run_4",
+        state:"release_requested",
+        failureCode:"runner_failed",
+        releaseRequestedAt:"2026-07-23T00:00:00.000Z",
+        lastCleanupError:null
+      },
+      turn:"ready",
+      now:new Date("2026-07-23T00:03:00.000Z")
+    });
+    assert.equal(projected.sandboxState.cause,null);
   });
 });

@@ -461,7 +461,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
 
   const { task, capabilities, lifecycle, sandboxState } = detail;
   const mutationBusy = deleting || releasing || lifecycleBusy || turnAborting;
-  const releaseLabel=sandboxState.state==="failed"||sandboxState.state==="release_requested"?"Retry release":"Release sandbox";
+  const releaseLabel="Release sandbox";
   const artifactsPanel = <ArtifactsSection taskId={taskId} artifacts={artifactPage.items} state={artifactsState} error={artifactsError} refreshing={refreshingArtifacts} filter={artifactPage.filter} hasNext={artifactPage.nextCursor !== null} hasPrevious={artifactPage.cursorStack.length > 0} onFilterChange={changeArtifactFilter} onNext={nextArtifactPage} onPrevious={previousArtifactPage} onRefresh={refreshArtifacts} onRetry={retryArtifacts} />;
   const taskRefreshError = taskError ? <SectionError title="Task status refresh failed" message={taskError} onRetry={async () => {
     await requestCanonicalRefresh(true);
@@ -469,6 +469,9 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
   const archivedNotice = lifecycle.state === "archived" ? <Banner status="info" icon={<Archive size={16} />} title="Task archived" description="Its conversation, files, and artifacts remain available." /> : null;
   const sandboxFailureNotice = sandboxState.state === "failed"
     ? <Banner status="error" title="Sandbox unavailable" description={sandboxState.cause?.message ?? "Release the failed Sandbox before continuing this Task."} />
+    : null;
+  const sandboxReleaseNotice = sandboxState.state === "release_requested" && sandboxState.cause?.code === "cleanup_failed"
+    ? <Banner status="warning" title="Sandbox release delayed" description={sandboxState.cause.message} />
     : null;
   const filesHref = `/workspaces/${workspaceId}/projects/${projectId}/files?${new URLSearchParams({ libraryId: task.fileLibraryId, returnTo: canonicalHref })}`;
   const changeDetailsOpen = (open: boolean) => {
@@ -513,6 +516,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       {taskRefreshError ? <div className="shrink-0 pt-2">{taskRefreshError}</div> : null}
       {archivedNotice ? <div className="shrink-0 pt-2">{archivedNotice}</div> : null}
       {sandboxFailureNotice ? <div className="shrink-0 pt-2">{sandboxFailureNotice}</div> : null}
+      {sandboxReleaseNotice ? <div className="shrink-0 pt-2">{sandboxReleaseNotice}</div> : null}
       <div ref={taskWorkspaceRef} tabIndex={-1} className="grid min-h-0 min-w-0 flex-1 overflow-hidden pt-2 outline-none" data-testid="task-workspace">
         <div className={`${mode === "conversation" ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 flex-col`}><TaskConversationWorkspace taskId={taskId} userId={currentUser.id} projectId={projectId} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} state={taskPresentation} dispatch={dispatchTaskPresentation} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestConversationCanonicalRefresh} commandBusy={turnAborting} onUnavailable={handleConversationUnavailable} onArtifactPublished={handleArtifactPublished} /></div>
         {mode === "terminal" ? <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden"><TaskTerminalPanel taskId={taskId} userId={currentUser.id} projectId={projectId} presentation={detail} canonicalEpoch={taskPresentation.canonicalEpoch} intent={terminalIntent} activeSandboxesHref={`/workspaces/${workspaceId}/projects/${projectId}/usage#sandbox-usage`} canManagePolicy={canManagePolicy} policyHref={`/workspaces/${workspaceId}/projects/${projectId}/policy`} onIntent={dispatchTerminalIntent} captureCommandFence={captureCommandFence} acceptCanonicalMutation={acceptCanonicalMutation} requestCanonicalRefresh={requestCanonicalRefresh} /></div> : null}

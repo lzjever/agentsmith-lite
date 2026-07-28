@@ -57,6 +57,28 @@ describe("runtime service coordination", () => {
     assert.deepEqual(third.sandboxReap.errors,["Sandbox reap failed"]);
     runtime.stopLoop();
   });
+
+  it("logs one generic line for a failed maintenance tick and none for a healthy tick", async () => {
+    const lines:string[]=[];
+    const original=console.error;
+    console.error=(message?:unknown)=>{lines.push(String(message));};
+    try{
+      let errors=["transient Kubernetes detail"];
+      const runtime=new RuntimeService(
+        {async syncActiveTasksOnce(){return{activeTaskCount:0,syncedTaskIds:[],failedTaskIds:[]};}},
+        {async reapSandboxRunsOnce(input){return{...emptyReap(input),errors};}}
+      );
+
+      await runtime.tickOnce();
+      assert.deepEqual(lines,["Sandbox maintenance could not complete; automatic retry will continue."]);
+
+      errors=[];
+      await runtime.tickOnce();
+      assert.equal(lines.length,1);
+    }finally{
+      console.error=original;
+    }
+  });
 });
 
 function emptyReap(input:SandboxReapInput):SandboxReapResult {

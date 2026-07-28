@@ -8,15 +8,12 @@ import type { PersistedSandboxRunState } from "../../ports/src/store.js";
 
 export function projectTaskState(input: {
   archivedAt: string | null;
-  run: Pick<PersistedSandboxRunState, "runId" | "state" | "failureCode" | "lastCleanupError"> | null;
+  run: Pick<PersistedSandboxRunState, "runId" | "state" | "failureCode" | "lastCleanupError" | "releaseRequestedAt"> | null;
   unavailableRunId?: string | null;
   turn: TaskCurrentTurnProjection["state"];
+  now?:Date;
 }): TaskStateProjection {
-  const cause=input.run?.lastCleanupError
-    ? failureCause("cleanup_failed")
-    : input.run?.failureCode
-      ? failureCause(input.run.failureCode)
-      : null;
+  const cause=publicSandboxCause(input.run,input.now??new Date());
   return {
     lifecycle:{ state:input.archivedAt ? "archived" : "active" },
     currentTurn:{ state:input.turn },
@@ -38,11 +35,32 @@ export function projectTaskState(input: {
   };
 }
 
+const DELAYED_RELEASE_WARNING_MS=90_000;
+
+function publicSandboxCause(
+  run:Pick<PersistedSandboxRunState,"state"|"failureCode"|"lastCleanupError"|"releaseRequestedAt">|null,
+  now:Date
+):TaskSandboxFailureCause|null{
+  if(!run)return null;
+  if(run.state==="release_requested"){
+    if(!run.lastCleanupError||!run.releaseRequestedAt)return null;
+    const requestedAt=Date.parse(run.releaseRequestedAt);
+    return Number.isFinite(requestedAt)&&now.getTime()-requestedAt>=DELAYED_RELEASE_WARNING_MS
+      ?failureCause("cleanup_failed")
+      :null;
+  }
+  return run.failureCode
+    ?failureCause(run.failureCode)
+    :run.lastCleanupError
+      ?failureCause("cleanup_failed")
+      :null;
+}
+
 function failureCause(code:SandboxFailureCode):TaskSandboxFailureCause{
   return{code,message:{
-    startup_failed:"Sandbox startup did not complete. Retry release to remove its resources.",
-    runtime_unreachable:"The sandbox runtime became unavailable. Retry release to remove its resources.",
-    runner_failed:"The sandbox runtime stopped unexpectedly. Retry release to remove its resources.",
-    cleanup_failed:"Sandbox cleanup could not be completed. Retry release to try again."
+    startup_failed:"Sandbox startup did not complete. Release the sandbox to remove its resources.",
+    runtime_unreachable:"The sandbox runtime became unavailable. Release the sandbox to remove its resources.",
+    runner_failed:"The sandbox runtime stopped unexpectedly. Release the sandbox to remove its resources.",
+    cleanup_failed:"Sandbox release is taking longer than expected. AgentSmith is still retrying automatically."
   }[code]};
 }
