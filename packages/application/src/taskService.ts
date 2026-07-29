@@ -208,6 +208,7 @@ const BOTIFIED_RUNNER_DIRECTORY_MODE = 0o775;
 const BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE = 0o777;
 const BOTIFIED_TASK_HOME_PATH = "/workspace/task/home/workspace";
 const BOTIFIED_DATA_PATH = "/workspace/task/botified";
+const BOTIFIED_AGENTS_PATH = "/workspace/task/agents";
 const TASK_ENDPOINT_CAPABILITIES = ["text", "tool_calls"] as const;
 const ARTIFACT_PREVIEW_MAX_BYTES = 8_192;
 const DEFAULT_DELIVERY_LEASE_MS = 30_000;
@@ -2173,7 +2174,7 @@ export class TaskService {
     const config=generateBotifiedConfig({
       endpoint,
       task:{
-        taskId:input.task.id,taskHomePath:BOTIFIED_TASK_HOME_PATH,botifiedDataPath:BOTIFIED_DATA_PATH,
+        taskId:input.task.id,taskHomePath:BOTIFIED_TASK_HOME_PATH,botifiedDataPath:BOTIFIED_DATA_PATH,agentsPath:BOTIFIED_AGENTS_PATH,
         providerBaseUrl:this.botifiedBrokerBaseUrlForTask(input.task),servicePort:run.botifiedPort
       }
     });
@@ -2387,7 +2388,7 @@ export class TaskService {
     const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
     assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
     const botifiedDirectory = path.resolve(taskRoot, "botified");
-    const runnerWritableDirectories = [botifiedDirectory, path.resolve(botifiedDirectory, "agents")];
+    const runnerWritableDirectories = [botifiedDirectory, path.resolve(taskRoot, "agents")];
     for (const directory of runnerWritableDirectories) {
       assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
     }

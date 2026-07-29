@@ -2132,11 +2132,11 @@ describe("task interactions API", () => {
       const blockedTask=await store.findTask(blockedCreated.id as string);assert.ok(blockedTask?.currentRunId);
       const project=await store.findProject(blockedTask.projectId);assert.ok(project);
       const externalTarget=path.join(dataRoot,"external-agents-target");
-      const blockedBotifiedDirectory=path.join(dataRoot,project.rootPath,"tasks",blockedTask.id,"botified");
+      const blockedTaskDirectory=path.join(dataRoot,project.rootPath,"tasks",blockedTask.id);
       await mkdir(externalTarget,{recursive:true});
       await chmod(externalTarget,0o750);
-      await mkdir(blockedBotifiedDirectory,{recursive:true});
-      await symlink(externalTarget,path.join(blockedBotifiedDirectory,"agents"));
+      await mkdir(blockedTaskDirectory,{recursive:true});
+      await symlink(externalTarget,path.join(blockedTaskDirectory,"agents"));
       const externalBefore=await stat(externalTarget);
 
       const background=createApplicationServices({
@@ -2164,13 +2164,15 @@ describe("task interactions API", () => {
       await background.tasks.syncActiveTasksOnce();
 
       const normalRun=await store.sandboxRuns.get(normalTask.currentRunId!);
-      const agentsDirectory=path.join(dataRoot,project.rootPath,"tasks",normalTask.id,"botified","agents");
+      const agentsDirectory=path.join(dataRoot,project.rootPath,"tasks",normalTask.id,"agents");
+      const botifiedDirectory=path.join(dataRoot,project.rootPath,"tasks",normalTask.id,"botified");
       const libraryHome=path.join(dataRoot,project.rootPath,library.rootSubPath);
       const agentsDirectoryStat=await stat(agentsDirectory);
       const agentsDirectoryMode=agentsDirectoryStat.mode&0o777;
       assert.equal(normalRun?.state,"active");
       assert.equal(resources.every((resource)=>resource.metadata.labels?.["agentsmith-lite/task-id"]===normalTask.id),true);
       assert.equal(agentsDirectoryStat.isDirectory(),true);
+      assert.equal(path.relative(botifiedDirectory,agentsDirectory).startsWith(`..${path.sep}`),true);
       assert.equal(path.relative(libraryHome,agentsDirectory).startsWith(`..${path.sep}`),true);
       assert.equal(agentsDirectoryStat.uid===10001
         ? agentsDirectoryStat.gid===10001&&agentsDirectoryMode===0o775

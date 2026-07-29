@@ -203,6 +203,11 @@ export function renderSandboxResources(input: SandboxRenderInput): SandboxRender
                 subPath: `${taskSubPath}/botified`
               },
               {
+                name: "project-files",
+                mountPath: "/workspace/task/agents",
+                subPath: `${taskSubPath}/agents`
+              },
+              {
                 name: "botified-config",
                 mountPath: "/etc/botified",
                 readOnly: true

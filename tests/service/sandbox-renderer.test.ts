@@ -301,6 +301,7 @@ describe("sandbox manifest renderer", () => {
     const executor = pod?.spec.containers.find((candidate) => candidate.name === "bash-executor");
     const libraryMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home");
     const botifiedMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/botified");
+    const agentsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/agents");
     const instructionsMount = container?.volumeMounts.find((mount) => mount.mountPath === "/workspace/task/home/workspace/AGENTS.md");
     assert.ok(container);
     assert.ok(executor);
@@ -308,6 +309,7 @@ describe("sandbox manifest renderer", () => {
     assert.deepEqual(executor.command, ["bash-executor", "--listen", "0.0.0.0:3110"]);
     assert.ok(libraryMount);
     assert.ok(botifiedMount);
+    assert.ok(agentsMount);
     assert.deepEqual(instructionsMount, { name: "botified-instructions", mountPath: "/workspace/task/home/workspace/AGENTS.md", subPath: "AGENTS.md", readOnly: true });
     assert.equal(container.workingDir, "/workspace/task/home/workspace");
     assert.deepEqual(container.env, [
@@ -361,12 +363,17 @@ describe("sandbox manifest renderer", () => {
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
     assert.notEqual(botifiedMount.subPath, libraryMount.subPath);
     assert.notEqual(botifiedMount.readOnly, true);
-    assert.equal(container.volumeMounts.filter((mount) => mount.name === "project-files").length, 2);
+    assert.equal(agentsMount.subPath, "workspaces/w1/projects/p1/tasks/t1/agents");
+    assert.notEqual(agentsMount.subPath, botifiedMount.subPath);
+    assert.notEqual(agentsMount.subPath, libraryMount.subPath);
+    assert.notEqual(agentsMount.readOnly, true);
+    assert.equal(container.volumeMounts.filter((mount) => mount.name === "project-files").length, 3);
     assert.equal(executor.workingDir, "/workspace/task/home/workspace");
     assert.deepEqual(executor.env, [{ name: "HOME", value: "/workspace/task/home" }]);
     assert.equal(executor.securityContext.runAsUser, 10002);
     assert.deepEqual(executor.volumeMounts, [{ name: "project-files", mountPath: "/workspace/task/home", subPath: "workspaces/w1/projects/p1/libraries/library_one/home" }]);
     assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/botified"), false);
+    assert.equal(executor.volumeMounts.some((mount) => mount.mountPath === "/workspace/task/agents"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-instructions" || mount.mountPath === "/workspace/task/home/AGENTS.md"), false);
     assert.equal(executor.volumeMounts.some((mount) => mount.name === "botified-config" || mount.name === "model-ca"), false);
     assert.ok(service, "Service should be rendered");

@@ -9,6 +9,7 @@ export interface BotifiedTaskRuntimeInput {
   taskId: string;
   taskHomePath: string;
   botifiedDataPath: string;
+  agentsPath: string;
   providerBaseUrl: string;
   servicePort?: number;
 }
@@ -131,7 +132,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     runtime: {
       cwd: input.task.taskHomePath,
       data_dir: input.task.botifiedDataPath,
-      agents_dir: `${input.task.botifiedDataPath}/agents`,
+      agents_dir: input.task.agentsPath,
       session: input.task.taskId
     },
     timeline: {

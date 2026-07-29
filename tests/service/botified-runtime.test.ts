@@ -22,6 +22,7 @@ describe("botified runtime integration", () => {
         taskId: "t1",
         taskHomePath: "/workspace/task/home/workspace",
         botifiedDataPath: "/workspace/task/botified",
+        agentsPath: "/workspace/task/agents",
         providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/api/internal/tasks/t1/runs/r1/v1"
       }
     });
@@ -74,16 +75,16 @@ describe("botified runtime integration", () => {
     assert.deepEqual(Object.keys(config.runtime).sort(), ["agents_dir", "cwd", "data_dir", "session"].sort());
     assert.equal(config.runtime.cwd, "/workspace/task/home/workspace");
     assert.equal(config.runtime.data_dir, "/workspace/task/botified");
-    assert.equal(config.runtime.agents_dir, "/workspace/task/botified/agents");
+    assert.equal(config.runtime.agents_dir, "/workspace/task/agents");
     assert.equal(config.runtime.session, "t1");
     assert.equal(config.files.root_dir,".artifacts/t1");
     assert.equal(pathIsInside(config.runtime.cwd, "/workspace/task/home"), true);
-    assert.equal(pathIsInside(config.runtime.agents_dir, config.runtime.data_dir), true);
+    assert.equal(pathIsInside(config.runtime.agents_dir, config.runtime.data_dir), false);
     assert.equal(pathIsInside(config.runtime.agents_dir, "/workspace/task/home"), false);
     assert.notEqual(config.runtime.cwd, config.runtime.data_dir);
     assert.notEqual(config.files.root_dir, "/workspace/task/artifacts");
     const serialized = JSON.parse(serializeBotifiedConfig(config)) as typeof config;
-    assert.equal(serialized.runtime.agents_dir, "/workspace/task/botified/agents");
+    assert.equal(serialized.runtime.agents_dir, "/workspace/task/agents");
     assert.deepEqual(config.tools.enabled, ["bash"]);
     assert.equal("bash_executor_addr" in config.tools.execution, false);
     assert.equal(config.skills.default_discovery, false);
@@ -109,6 +110,7 @@ describe("botified runtime integration", () => {
       task: {
         taskId: "t1", taskHomePath: "/runner/task-home",
         botifiedDataPath: "/runner/botified-data",
+        agentsPath: "/runner/agents",
         providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
@@ -144,6 +146,7 @@ describe("botified runtime integration", () => {
         taskId: "t1",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        agentsPath: "/workspace/project/tasks/t1/agents",
         providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1",
         servicePort: 4100
       }
@@ -176,6 +179,7 @@ describe("botified runtime integration", () => {
         taskId: "t1",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        agentsPath: "/workspace/project/tasks/t1/agents",
         providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
@@ -206,6 +210,7 @@ describe("botified runtime integration", () => {
         taskId: "t1",
         taskHomePath: "/workspace/project/tasks/t1/home",
         botifiedDataPath: "/workspace/project/tasks/t1/botified",
+        agentsPath: "/workspace/project/tasks/t1/agents",
         providerBaseUrl: "http://agentsmith-lite-api.agentsmith.svc.cluster.local/v1"
       }
     });
