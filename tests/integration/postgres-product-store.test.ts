@@ -2132,6 +2132,77 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal(summary.kind,"available");if(summary.kind==="available"){assert.equal(summary.value.usage?.projectFileBytesMeasuredAt,fileMeasuredAt);assert.equal(summary.value.sandbox.unreleasedCount,0);assert.equal(summary.value.sandbox.totalDurationMilliseconds,"0");assert.deepEqual(summary.value.sandbox.liveRuns,[])}
   });
 
+  it("preserves each missing provider usage dimension across PostgreSQL settlement and aggregates",async()=>{
+    const reservedAt="2026-07-23T00:10:00.000Z";
+    await store.patchProjectResourcePolicy("project_atomic",{
+      endpointWindows:[
+        {endpointId:"endpoint_atomic",metric:"providerTokens",limit:10_000,windowSeconds:3600},
+        {endpointId:"endpoint_atomic",metric:"providerCost",limit:1_000,windowSeconds:3600}
+      ]
+    },reservedAt);
+    const reserve=async(id:string,reservedTokens:number,reservedCost:number)=>{
+      assert.ok(await store.reserveProjectProviderSettlement({
+        id,projectId:"project_atomic",taskId:null,endpointId:"endpoint_atomic",actorId:"user_atomic",
+        reservedTokens,reservedCost,reservedAt,expiresAt:"2026-07-23T01:10:00.000Z"
+      }));
+    };
+    const settle=async(id:string,reservedTokens:number,reservedCost:number,usage:{tokens?:number;cost?:number})=>{
+      await reserve(id,reservedTokens,reservedCost);
+      assert.ok(await store.markProjectProviderSettlementDispatched(id,reservedAt));
+      assert.ok(await store.markProjectProviderSettlementDelivered(id,reservedAt));
+      assert.ok(await store.settleProjectProviderSettlement(id,usage,reservedAt));
+    };
+
+    await settle("pg_partial_tokens",100,10,{tokens:7});
+    await settle("pg_partial_cost",200,20,{cost:3});
+    await settle("pg_partial_zero",300,30,{tokens:0,cost:0});
+    assert.ok(await store.settleProjectProviderSettlement("pg_partial_zero",{tokens:999,cost:999},"2026-07-23T00:11:00.000Z"));
+    await reserve("pg_partial_unknown",400,40);
+    assert.ok(await store.markProjectProviderSettlementDispatched("pg_partial_unknown",reservedAt));
+    assert.equal((await store.failProjectProviderSettlement("pg_partial_unknown",reservedAt))?.status,"unknown");
+    await reserve("pg_partial_failed",500,50);
+    assert.equal((await store.failProjectProviderSettlement("pg_partial_failed",reservedAt))?.status,"failed");
+
+    const usage=(await store.findProjectResourceUsage("project_atomic"))!;
+    assert.deepEqual(
+      {requests:usage.providerRequests,tokens:usage.providerTokens,cost:usage.providerCost},
+      {requests:4,tokens:607,cost:53}
+    );
+    const rows=await store.listSettledProjectProviderSettlements("project_atomic","2026-07-23T00:00:00.000Z");
+    assert.deepEqual(rows.toSorted((left,right)=>left.id.localeCompare(right.id)).map((row)=>[row.id,row.usage]),[
+      ["pg_partial_cost",{cost:3}],
+      ["pg_partial_tokens",{tokens:7}],
+      ["pg_partial_zero",{tokens:0,cost:0}]
+    ]);
+    const client=new pg.Client({connectionString:postgresUrl});await client.connect();
+    try{
+      const measured=await client.query<{id:string;provider_tokens:string|null;provider_cost:number|null}>("select id,provider_tokens::text,provider_cost from project_provider_settlements where id like 'pg_partial_%' order by id");
+      assert.deepEqual(measured.rows.map((row)=>[row.id,row.provider_tokens,row.provider_cost]),[
+        ["pg_partial_cost",null,3],
+        ["pg_partial_failed",null,null],
+        ["pg_partial_tokens","7",null],
+        ["pg_partial_unknown",null,null],
+        ["pg_partial_zero","0",0]
+      ]);
+    }finally{await client.end()}
+    assert.equal((await store.measureProjectProviderWindow({projectId:"project_atomic",endpointId:"endpoint_atomic",actorId:"user_atomic",metric:"providerTokens",since:"2026-07-22T23:10:00.000Z"})).current,607);
+    assert.equal((await store.measureProjectProviderWindow({projectId:"project_atomic",endpointId:"endpoint_atomic",actorId:"user_atomic",metric:"providerCost",since:"2026-07-22T23:10:00.000Z"})).current,53);
+    const overview=await store.readProjectUsageOverview({
+      projectId:"project_atomic",userId:"user_atomic",selectedUserId:"user_atomic",
+      periodStart:"2026-07-23T00:00:00.000Z",periodEnd:"2026-07-24T00:00:00.000Z",
+      selectedEndpointId:"endpoint_atomic",measuredAt:"2026-07-23T00:15:00.000Z"
+    });
+    assert.equal(overview.kind,"available");
+    if(overview.kind==="available")assert.deepEqual(overview.value.provider.totals,{requests:3,tokens:207,cost:13});
+    const endpointUsage=await store.queryProjectEndpointUsagePage({
+      projectId:"project_atomic",userId:"user_atomic",periodStart:"2026-07-23T00:00:00.000Z",
+      periodEnd:"2026-07-24T00:00:00.000Z",measuredAt:"2026-07-23T00:15:00.000Z",q:"",limit:20
+    });
+    assert.deepEqual(endpointUsage.items.map((item)=>[item.requests,item.tokens,item.cost]),[[3,207,13]]);
+    assert.equal(await store.measureProjectAlertRule({projectId:"project_atomic",alertType:"provider_tokens_limit",metric:"provider_tokens",windowSeconds:3600,endpointId:"endpoint_atomic",now:"2026-07-23T00:15:00.000Z"}),207);
+    assert.equal(await store.measureProjectAlertRule({projectId:"project_atomic",alertType:"provider_cost_limit",metric:"provider_cost",windowSeconds:3600,endpointId:"endpoint_atomic",now:"2026-07-23T00:15:00.000Z"}),13);
+  });
+
   function atomicMessage(task:PersistedAgentTask,released:PersistedSandboxRunState,label:string,newRunId:string):AtomicTaskMessageInput{
     const replacement={...task,currentRunId:newRunId,updatedAt:`2026-07-23T00:01:0${label.length}.000Z`};
     const persistedMessage=message(`message_${label}`,task.id);

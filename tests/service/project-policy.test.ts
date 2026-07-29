@@ -157,7 +157,76 @@ describe("project resource policy", () => {
     );
     assert.ok(await store.settleProjectProviderSettlement(unknown, { tokens: 1 }, new Date().toISOString()));
     const afterLateUsage = (await store.findProjectResourceUsage(project.id))!;
-    assert.deepEqual({ requests: afterLateUsage.providerRequests, tokens: afterLateUsage.providerTokens, cost: afterLateUsage.providerCost }, { requests: 2, tokens: 4, cost: 1 });
+    assert.deepEqual({ requests: afterLateUsage.providerRequests, tokens: afterLateUsage.providerTokens, cost: afterLateUsage.providerCost }, { requests: 2, tokens: 4, cost: 2 });
+  });
+
+  it("preserves each missing provider usage dimension across settlement and aggregates", async () => {
+    const store = createInMemoryProductStore();
+    const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-provider-partial-usage", builtinAdminPassword: "admin-password" });
+    const { user } = await services.auth.loginAfterBootstrap("admin-password");
+    const workspace = await services.workspaces.createWorkspace(user.id, { name: "W" });
+    const project = await services.workspaces.createProject(user.id, workspace.id, { name: "P" });
+    const endpoint = endpointRecord(project.id);
+    const at = "2026-07-20T12:00:00.000Z";
+    await store.createEndpoint(endpoint);
+    await store.patchProjectResourcePolicy(project.id, {
+      endpointWindows: [
+        { endpointId: endpoint.id, metric: "providerTokens", limit: 10_000, windowSeconds: 3600 },
+        { endpointId: endpoint.id, metric: "providerCost", limit: 1_000, windowSeconds: 3600 }
+      ]
+    }, at);
+    const reserve = async (id: string, reservedTokens: number, reservedCost: number) => {
+      assert.ok(await store.reserveProjectProviderSettlement({
+        id, projectId: project.id, taskId: null, endpointId: endpoint.id, actorId: user.id,
+        reservedTokens, reservedCost, reservedAt: at, expiresAt: "2026-07-20T13:00:00.000Z"
+      }));
+    };
+    const settle = async (id: string, reservedTokens: number, reservedCost: number, usage: { tokens?: number; cost?: number }) => {
+      await reserve(id, reservedTokens, reservedCost);
+      assert.ok(await store.markProjectProviderSettlementDispatched(id, at));
+      assert.ok(await store.markProjectProviderSettlementDelivered(id, at));
+      assert.ok(await store.settleProjectProviderSettlement(id, usage, at));
+    };
+
+    await settle("partial_tokens", 100, 10, { tokens: 7 });
+    await settle("partial_cost", 200, 20, { cost: 3 });
+    await settle("partial_zero", 300, 30, { tokens: 0, cost: 0 });
+    assert.ok(await store.settleProjectProviderSettlement("partial_zero", { tokens: 999, cost: 999 }, "2026-07-20T12:01:00.000Z"));
+
+    await reserve("partial_unknown", 400, 40);
+    assert.ok(await store.markProjectProviderSettlementDispatched("partial_unknown", at));
+    assert.equal((await store.failProjectProviderSettlement("partial_unknown", at))?.status, "unknown");
+    await reserve("partial_failed", 500, 50);
+    assert.equal((await store.failProjectProviderSettlement("partial_failed", at))?.status, "failed");
+
+    const usage = (await store.findProjectResourceUsage(project.id))!;
+    assert.deepEqual(
+      { requests: usage.providerRequests, tokens: usage.providerTokens, cost: usage.providerCost },
+      { requests: 4, tokens: 607, cost: 53 }
+    );
+    const settled = await store.listSettledProjectProviderSettlements(project.id, "2026-07-20T00:00:00.000Z");
+    assert.deepEqual(settled.toSorted((left, right) => left.id.localeCompare(right.id)).map((row) => [row.id, row.usage]), [
+      ["partial_cost", { cost: 3 }],
+      ["partial_tokens", { tokens: 7 }],
+      ["partial_zero", { tokens: 0, cost: 0 }]
+    ]);
+    assert.equal((await store.measureProjectProviderWindow({ projectId: project.id, endpointId: endpoint.id, actorId: user.id, metric: "providerTokens", since: "2026-07-20T11:00:00.000Z" })).current, 607);
+    assert.equal((await store.measureProjectProviderWindow({ projectId: project.id, endpointId: endpoint.id, actorId: user.id, metric: "providerCost", since: "2026-07-20T11:00:00.000Z" })).current, 53);
+
+    const overview = await store.readProjectUsageOverview({
+      projectId: project.id, userId: user.id, selectedUserId: user.id,
+      periodStart: "2026-07-20T00:00:00.000Z", periodEnd: "2026-07-21T00:00:00.000Z",
+      selectedEndpointId: endpoint.id, measuredAt: "2026-07-20T12:05:00.000Z"
+    });
+    assert.equal(overview.kind, "available");
+    if (overview.kind === "available") assert.deepEqual(overview.value.provider.totals, { requests: 3, tokens: 207, cost: 13 });
+    const endpointUsage = await store.queryProjectEndpointUsagePage({
+      projectId: project.id, userId: user.id, periodStart: "2026-07-20T00:00:00.000Z",
+      periodEnd: "2026-07-21T00:00:00.000Z", measuredAt: "2026-07-20T12:05:00.000Z", q: "", limit: 20
+    });
+    assert.deepEqual(endpointUsage.items.map((item) => [item.requests, item.tokens, item.cost]), [[3, 207, 13]]);
+    assert.equal(await store.measureProjectAlertRule({ projectId: project.id, alertType: "provider_tokens_limit", metric: "provider_tokens", windowSeconds: 3600, endpointId: endpoint.id, now: "2026-07-20T12:05:00.000Z" }), 207);
+    assert.equal(await store.measureProjectAlertRule({ projectId: project.id, alertType: "provider_cost_limit", metric: "provider_cost", windowSeconds: 3600, endpointId: endpoint.id, now: "2026-07-20T12:05:00.000Z" }), 13);
   });
 
   it("keeps conservative usage when a dispatched provider request fails ambiguously", async () => {

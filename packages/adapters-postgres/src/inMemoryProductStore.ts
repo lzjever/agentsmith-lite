@@ -713,8 +713,8 @@ export class InMemoryProductStore implements ProductStore {
     if (!policy || !current) return null;
     const next = {
       ...current,
-      providerTokens: Math.max(0, current.providerTokens + (usage.tokens ?? 0) - settlement.reservedTokens),
-      providerCost: Math.max(0, current.providerCost + (usage.cost ?? 0) - settlement.reservedCost),
+      providerTokens: Math.max(0, current.providerTokens + (usage.tokens === undefined ? 0 : usage.tokens - settlement.reservedTokens)),
+      providerCost: Math.max(0, current.providerCost + (usage.cost === undefined ? 0 : usage.cost - settlement.reservedCost)),
       updatedAt
     };
     this.usage.set(settlement.projectId, clone(next));
@@ -753,9 +753,9 @@ export class InMemoryProductStore implements ProductStore {
     const settled=providerSettlements.filter((value)=>value.actorId===input.userId&&value.status==="settled"&&value.settledAt!==null&&value.settledAt>=input.periodStart&&value.settledAt<input.periodEnd);
     const selected=settled.filter((value)=>input.selectedEndpointId===null||value.endpointId===input.selectedEndpointId);
     const byDay=new Map<string,{requests:number;tokens:number;cost:number}>();
-    for(const value of selected){const date=value.settledAt!.slice(0,10),current=byDay.get(date)??{requests:0,tokens:0,cost:0};current.requests+=1;current.tokens+=value.usage?.tokens??0;current.cost+=value.usage?.cost??0;byDay.set(date,current)}
+    for(const value of selected){const date=value.settledAt!.slice(0,10),current=byDay.get(date)??{requests:0,tokens:0,cost:0};current.requests+=1;current.tokens+=settledProviderUsageValue(value,"providerTokens");current.cost+=settledProviderUsageValue(value,"providerCost");byDay.set(date,current)}
     const daily=[...byDay].sort(([left],[right])=>left.localeCompare(right)).map(([date,total])=>({date,...total}));
-    const totals=selected.reduce((total,value)=>({requests:total.requests+1,tokens:total.tokens+(value.usage?.tokens??0),cost:total.cost+(value.usage?.cost??0)}),{requests:0,tokens:0,cost:0});
+    const totals=selected.reduce((total,value)=>({requests:total.requests+1,tokens:total.tokens+settledProviderUsageValue(value,"providerTokens"),cost:total.cost+settledProviderUsageValue(value,"providerCost")}),{requests:0,tokens:0,cost:0});
     const settlementIds=new Set(sandboxSettlements.map((value)=>value.runId));
     for(const run of sandboxRuns){
       if(run.state==="released"){if(!settlementIds.has(run.runId))return{kind:"integrity_error"};continue}
@@ -791,7 +791,7 @@ export class InMemoryProductStore implements ProductStore {
         const current=inWindow.reduce((sum,value)=>sum+providerWindowValue(value,window.metric),0),oldestReservedAt=inWindow[0]?.reservedAt??null;
         limits.push({metric:window.metric,current,limit:window.limit,remaining:Math.max(0,window.limit-current),window:{kind:"rolling",windowSeconds:window.windowSeconds,startedAt:cutoff,resetAt:oldestReservedAt?new Date(Date.parse(oldestReservedAt)+window.windowSeconds*1000).toISOString():null}});
       }
-      return{endpointId:endpoint.id,endpointName:endpoint.name,requests:settled.length,tokens:settled.reduce((sum,value)=>sum+(value.usage?.tokens??0),0),cost:settled.reduce((sum,value)=>sum+(value.usage?.cost??0),0),limits,cursorCreatedAt:endpoint.createdAt,cursorId:endpoint.id};
+      return{endpointId:endpoint.id,endpointName:endpoint.name,requests:settled.length,tokens:settled.reduce((sum,value)=>sum+settledProviderUsageValue(value,"providerTokens"),0),cost:settled.reduce((sum,value)=>sum+settledProviderUsageValue(value,"providerCost"),0),limits,cursorCreatedAt:endpoint.createdAt,cursorId:endpoint.id};
     })};
   }
   async measureProjectProviderWindow(input:{projectId:string;endpointId:string;actorId:string|null;metric:import("../../contracts/src/api.js").EndpointPolicyMetric;since:string}):Promise<{current:number;oldestReservedAt:string|null}>{const settlements=[...this.providerSettlements.values()].filter((value)=>value.projectId===input.projectId&&value.endpointId===input.endpointId&&(value.actorId??null)===input.actorId&&value.status!=="failed"&&value.reservedAt>=input.since).sort((left,right)=>left.reservedAt.localeCompare(right.reservedAt)||left.id.localeCompare(right.id));return{current:settlements.reduce((sum,value)=>sum+providerWindowValue(value,input.metric),0),oldestReservedAt:settlements[0]?.reservedAt??null};}
@@ -800,7 +800,7 @@ export class InMemoryProductStore implements ProductStore {
     if(input.metric==="active_sandboxes")return usage?.activeSandboxes??0;
     if(input.metric==="project_file_bytes")return usage?.projectFileBytes??0;
     const cutoff=input.windowSeconds===null?null:Date.parse(input.now)-input.windowSeconds*1000;
-    if(input.metric!=="failure_count")return [...this.providerSettlements.values()].filter(value=>value.projectId===input.projectId&&value.status==="settled"&&value.settledAt!==null&&(cutoff===null||Date.parse(value.settledAt)>=cutoff)&&(input.endpointId===null||value.endpointId===input.endpointId)).reduce((sum,value)=>sum+(input.metric==="provider_requests"?1:input.metric==="provider_tokens"?(value.usage?.tokens??0):(value.usage?.cost??0)),0);
+    if(input.metric!=="failure_count")return [...this.providerSettlements.values()].filter(value=>value.projectId===input.projectId&&value.status==="settled"&&value.settledAt!==null&&(cutoff===null||Date.parse(value.settledAt)>=cutoff)&&(input.endpointId===null||value.endpointId===input.endpointId)).reduce((sum,value)=>sum+(input.metric==="provider_requests"?1:settledProviderUsageValue(value,input.metric==="provider_tokens"?"providerTokens":"providerCost")),0);
     return this.auditEvents.filter(event=>event.projectId===input.projectId&&(cutoff===null||Date.parse(event.createdAt)>=cutoff)&&(input.endpointId===null||event.detail?.endpointId===input.endpointId)&&failureEventMatches(input.alertType,event)).length;
   }
   private transitionSettlement(id: string, allowed: ProjectProviderSettlement["status"][], status: ProjectProviderSettlement["status"], updatedAt: string, timestamp?: "dispatchedAt" | "deliveredAt"): ProjectProviderSettlement | null { const current = this.providerSettlements.get(id); if (!current) return null; if (current.status === status) return clone(current); if (!allowed.includes(current.status)) return null; const updated = { ...current, status, ...(timestamp ? { [timestamp]: updatedAt } : {}), updatedAt } as ProjectProviderSettlement; this.providerSettlements.set(id, clone(updated)); return clone(updated); }
@@ -2562,8 +2562,14 @@ function providerReservationExceedsPolicy(policy: ProjectResourcePolicy, usage: 
 
 function providerWindowValue(settlement:ProjectProviderSettlement,metric:import("../../contracts/src/api.js").EndpointPolicyMetric):number {
   if(metric==="providerRequests")return 1;
-  if(settlement.status==="settled")return metric==="providerTokens"?settlement.usage?.tokens??0:settlement.usage?.cost??0;
+  if(settlement.status==="settled")return settledProviderUsageValue(settlement,metric);
   return metric==="providerTokens"?settlement.reservedTokens:settlement.reservedCost;
+}
+
+function settledProviderUsageValue(settlement:ProjectProviderSettlement,metric:"providerTokens"|"providerCost"):number {
+  return metric==="providerTokens"
+    ? settlement.usage?.tokens??settlement.reservedTokens
+    : settlement.usage?.cost??settlement.reservedCost;
 }
 
 function taskArtifactKind(artifact: PersistedTaskArtifact): import("../../contracts/src/api.js").TaskArtifactKind {
