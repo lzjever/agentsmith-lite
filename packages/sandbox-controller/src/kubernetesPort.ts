@@ -13,7 +13,7 @@ export interface KubernetesResourceRef {
 }
 
 export interface KubernetesTransportRequest {
-  method: "GET" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PATCH" | "DELETE";
   path: string;
   headers: Record<string, string>;
   body?: string;
@@ -114,25 +114,48 @@ export class SandboxKubernetesPort implements SandboxKubernetesMutationPort, San
       path: resourcePath(ref),
       headers: {}
     },signal);
-    if (isSuccess(existing.statusCode) && !hasLabels(asResource(existing.body), expectedLabels)) {
-      return "fence_mismatch";
-    }
     if (existing.statusCode !== 404 && !isSuccess(existing.statusCode)) {
       throw kubernetesHttpError(`Kubernetes get before apply ${ref.kind}/${ref.name} failed with HTTP ${existing.statusCode}`, existing);
     }
 
-    const response = await this.transport.request({
-      method: "PATCH",
-      path: `${resourcePath(ref)}?fieldManager=${encodeURIComponent(FIELD_MANAGER)}&force=false`,
-      headers: {
-        "content-type": "application/apply-patch+yaml"
-      },
-      body: JSON.stringify(prepareApplyResource(resource))
-    },signal);
+    const body=prepareApplyResource(resource);
+    const response = existing.statusCode===404
+      ? await this.transport.request({
+          method:"POST",
+          path:`${listPath(ref.kind,ref.namespace)}?fieldManager=${encodeURIComponent(FIELD_MANAGER)}`,
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify(body)
+        },signal)
+      : await this.applyExistingResource(ref,body,existing,expectedLabels,signal);
+    if(response==="fence_mismatch")return response;
+    if (response.statusCode === 409) {
+      return "fence_mismatch";
+    }
     if (!isSuccess(response.statusCode)) {
-      throw kubernetesHttpError(`Kubernetes apply ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
+      const operation=existing.statusCode===404?"create":"apply";
+      throw kubernetesHttpError(`Kubernetes ${operation} ${ref.kind}/${ref.name} failed with HTTP ${response.statusCode}`, response);
     }
     return "applied";
+  }
+
+  private async applyExistingResource(
+    ref:KubernetesResourceRef,
+    body:KubernetesResource,
+    existing:KubernetesTransportResponse,
+    expectedLabels:Record<string,string>,
+    signal?:AbortSignal
+  ):Promise<KubernetesTransportResponse|"fence_mismatch">{
+    const observed=parseExactResource(existing.body,ref);
+    if(!hasLabels(observed,expectedLabels))return"fence_mismatch";
+    const resourceVersion=observed.metadata.resourceVersion;
+    if(typeof resourceVersion!=="string"||resourceVersion.length===0)return"fence_mismatch";
+    body.metadata.resourceVersion=resourceVersion;
+    return this.transport.request({
+      method:"PATCH",
+      path:`${resourcePath(ref)}?fieldManager=${encodeURIComponent(FIELD_MANAGER)}&force=false`,
+      headers:{"content-type":"application/apply-patch+yaml"},
+      body:JSON.stringify(body)
+    },signal);
   }
 
   async deleteResource(ref: KubernetesResourceRef, expectedLabels: Record<string, string>): Promise<"deleted" | "not_found" | "fence_mismatch"> {

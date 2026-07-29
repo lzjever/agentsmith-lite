@@ -69,7 +69,7 @@ describe("sandbox Kubernetes port", () => {
     ]);
   });
 
-  it("applies resources with server-side apply, converts Secret stringData, and fences existing label mismatches", async () => {
+  it("creates absent resources without upsert, converts Secret stringData, and fences existing label mismatches", async () => {
     const transport = recordingTransport((request) => {
       if (request.method === "GET") {
         return { statusCode: 404 };
@@ -90,13 +90,13 @@ describe("sandbox Kubernetes port", () => {
       "applied"
     );
 
-    const patch = transport.requests[1];
+    const create = transport.requests[1];
     assert.equal(
-      `${patch?.method} ${patch?.path}`,
-      "PATCH /api/v1/namespaces/agentsmith/secrets/asl-botified-t1?fieldManager=agentsmith-lite-sandbox&force=false"
+      `${create?.method} ${create?.path}`,
+      "POST /api/v1/namespaces/agentsmith/secrets?fieldManager=agentsmith-lite-sandbox"
     );
-    assert.equal(patch?.headers["content-type"], "application/apply-patch+yaml");
-    const body = JSON.parse(String(patch?.body)) as KubernetesResource;
+    assert.equal(create?.headers["content-type"], "application/json");
+    const body = JSON.parse(String(create?.body)) as KubernetesResource;
     assert.deepEqual(body.data, { BOTIFIED_SERVICE_KEY: "czNjcjN0" });
     assert.equal(body.stringData, undefined);
 
@@ -107,6 +107,51 @@ describe("sandbox Kubernetes port", () => {
     const fencedPort = new SandboxKubernetesPort({ transport: mismatched });
     assert.equal(await fencedPort.applyResource(resource("Secret", "asl-botified-t1"), identityLabels), "fence_mismatch");
     assert.deepEqual(mismatched.requests.map((request) => request.method), ["GET"]);
+  });
+
+  it("uses the observed resourceVersion as the only apply CAS and fences a replacement conflict", async () => {
+    const transport = recordingTransport((request) => {
+      if (request.method === "GET") {
+        return {
+          statusCode: 200,
+          body: {
+            ...resource("ConfigMap", "asl-task-t1-config", identityLabels, "uid-original"),
+            metadata: {
+              ...resource("ConfigMap", "asl-task-t1-config", identityLabels, "uid-original").metadata,
+              resourceVersion: "41"
+            }
+          }
+        };
+      }
+      assert.equal(request.method, "PATCH");
+      return { statusCode: 409, body: { kind: "Status", reason: "Conflict", code: 409 } };
+    });
+    const port = new SandboxKubernetesPort({ transport });
+
+    assert.equal(
+      await port.applyResource(resource("ConfigMap", "asl-task-t1-config"), identityLabels),
+      "fence_mismatch"
+    );
+
+    assert.deepEqual(transport.requests.map((request) => request.method), ["GET", "PATCH"]);
+    const body = JSON.parse(String(transport.requests[1]?.body)) as KubernetesResource;
+    assert.equal(body.metadata.resourceVersion, "41");
+    assert.equal(body.metadata.uid, undefined);
+  });
+
+  it("never patches after an absent-read create race", async () => {
+    const transport = recordingTransport((request) => {
+      if (request.method === "GET") return { statusCode: 404 };
+      assert.equal(request.method, "POST");
+      return { statusCode: 409, body: { kind: "Status", reason: "AlreadyExists", code: 409 } };
+    });
+    const port = new SandboxKubernetesPort({ transport });
+
+    assert.equal(
+      await port.applyResource(resource("Secret", "asl-botified-t1"), identityLabels),
+      "fence_mismatch"
+    );
+    assert.deepEqual(transport.requests.map((request) => request.method), ["GET", "POST"]);
   });
 
   it("does not contact Kubernetes when the apply body is missing expected identity labels", async () => {
@@ -127,11 +172,11 @@ describe("sandbox Kubernetes port", () => {
 
   it("propagates an absolute startup abort through apply to the pending transport request",async()=>{
     const controller=new AbortController();
-    let patchSignal:AbortSignal|undefined;
+    let createSignal:AbortSignal|undefined;
     const transport:KubernetesTransport={
       async request(request,signal){
         if(request.method==="GET")return{statusCode:404};
-        patchSignal=signal;
+        createSignal=signal;
         return new Promise<KubernetesTransportResponse>((_resolve,reject)=>{
           signal?.addEventListener("abort",()=>reject(signal.reason),{once:true});
         });
@@ -144,8 +189,8 @@ describe("sandbox Kubernetes port", () => {
     controller.abort(new Error("startup action deadline elapsed"));
 
     await assert.rejects(applying,/startup action deadline elapsed/);
-    assert.equal(patchSignal,controller.signal);
-    assert.equal(patchSignal?.aborted,true);
+    assert.equal(createSignal,controller.signal);
+    assert.equal(createSignal?.aborted,true);
   });
 
   it("deletes with GET label fencing and UID precondition, with idempotent not-found handling", async () => {

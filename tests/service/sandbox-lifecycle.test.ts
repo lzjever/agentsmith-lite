@@ -58,6 +58,42 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal(port.remainingResources().length,6);
   });
 
+  it("deletes late resources for a released Run as UID-fenced orphans without settling again",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const releasePort=new LifecyclePort([],false);
+    await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:releasePort,
+      now:()=>new Date(timestamp(3))
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+    assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.length,1);
+
+    const lateResources=observedResources(run)
+      .filter((resource)=>resource.kind==="Pod"||resource.kind==="Secret")
+      .map((resource)=>({
+        ...resource,
+        metadata:{...resource.metadata,uid:`uid-late-${resource.kind.toLowerCase()}`}
+      }));
+    const orphanPort=new LifecyclePort(lateResources,false);
+    const result=await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:orphanPort,
+      now:()=>new Date(timestamp(4))
+    }).reapSandboxRunsOnce({apply:true});
+
+    assert.deepEqual(result.errors,[]);
+    assert.equal(orphanPort.remainingResources().length,0);
+    assert.deepEqual(orphanPort.deletedRefs.map((ref)=>[ref.kind,ref.uid]),[
+      ["Pod","uid-late-pod"],
+      ["Secret","uid-late-secret"]
+    ]);
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+    assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.length,1);
+  });
+
   it("persists a bounded cleanup failure, clears its claim, and settles a later retry once",async()=>{
     const store=createLocalInMemoryProductStore();
     const {run}=await createReleaseRequestedRun(store);
@@ -106,7 +142,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     const recovered=await lifecycle.reapSandboxRunsOnce({apply:true,runId:run.runId});
     assert.deepEqual(recovered.errors,[]);
     assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
-    assert.equal(port.listCalls,2);
+    assert.equal(port.listCalls,3);
     assert.equal(port.inspectCalls.length,12);
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
     assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.filter((event)=>event.action==="sandbox.released").length,1);
@@ -122,9 +158,78 @@ describe("sandbox lifecycle fenced cleanup",()=>{
 
     assert.deepEqual(result.errors,[]);
     assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
-    assert.equal(port.listCalls,1);
+    assert.equal(port.listCalls,2);
     assert.equal(port.inspectCalls.length,6);
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+  });
+
+  it("does not settle when a late owned Pod appears after all exact resources were absent",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const latePod=observedResources(run).find((resource)=>resource.kind==="Pod");assert.ok(latePod);
+    const port=new LifecyclePort([],false);
+    port.listResponses=[[],[latePod]];
+
+    const result=await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port,
+      now:()=>new Date(timestamp(3))
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    assert.deepEqual(result.errors,[]);
+    const pending=await store.sandboxRuns.get(run.runId);assert.ok(pending);
+    assert.equal(pending.state,"release_requested");
+    assert.equal(pending.cleanupClaimedAt,null);
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,0);
+    assert.equal(port.listCalls,2);
+  });
+
+  it("fails closed when the fresh final inventory cannot be read",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const port=new LifecyclePort([],false);
+    port.listFailuresAt.add(2);
+
+    const result=await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port,
+      now:()=>new Date(timestamp(3))
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    assert.equal(result.errors.length,1);
+    assert.match(result.errors[0]??"",/Final inventory unavailable/);
+    const pending=await store.sandboxRuns.get(run.runId);assert.ok(pending);
+    assert.equal(pending.state,"release_requested");
+    assert.equal(pending.cleanupClaimedAt,null);
+    assert.equal(pending.lastCleanupError?.target,"Kubernetes inventory");
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,0);
+  });
+
+  it("uses one final inventory for multiple cleanup-complete Runs and isolates a late resource",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const first=await createReleaseRequestedRun(store);
+    const second=await createReleaseRequestedRun(store,"lifecycle_late",false);
+    const latePod=observedResources(second.run).find((resource)=>resource.kind==="Pod");assert.ok(latePod);
+    const port=new LifecyclePort([],false);
+    port.listResponses=[[],[latePod]];
+
+    const result=await new SandboxLifecycleService(store,{
+      namespace:first.run.namespace,
+      port,
+      now:()=>new Date(timestamp(3))
+    }).reapSandboxRunsOnce({apply:true});
+
+    assert.deepEqual(result.errors,[]);
+    assert.equal(port.listCalls,2);
+    assert.equal(port.inspectCalls.length,12);
+    assert.equal((await store.sandboxRuns.get(first.run.runId))?.state,"released");
+    const pending=await store.sandboxRuns.get(second.run.runId);assert.ok(pending);
+    assert.equal(pending.state,"release_requested");
+    assert.equal(pending.cleanupClaimedAt,null);
+    assert.deepEqual(
+      (await store.listSandboxUsageSettlements(first.run.projectId,first.run.startedByUserId)).map((value)=>value.runId),
+      [first.run.runId]
+    );
   });
 
   it("clears the cleanup claim and stale error while an exact resource is terminating",async()=>{
@@ -404,8 +509,15 @@ class LifecyclePort {
   listCalls=0;
   inspectFailures=0;
   failAfterDelete=false;
+  listResponses:KubernetesResource[][]=[];
+  readonly listFailuresAt=new Set<number>();
   constructor(resources:KubernetesResource[],private readonly fail:boolean){this.resources=structuredClone(resources);}
-  async listManagedResources():Promise<KubernetesResource[]>{this.listCalls+=1;return structuredClone(this.resources);}
+  async listManagedResources():Promise<KubernetesResource[]>{
+    this.listCalls+=1;
+    if(this.listFailuresAt.has(this.listCalls))throw new Error("Final inventory unavailable for Bearer bsk_runtime_secret");
+    const response=this.listResponses[this.listCalls-1];
+    return structuredClone(response??this.resources);
+  }
   async inspectResource(ref:KubernetesResourceRef,expectedLabels:Record<string,string>){
     this.inspectCalls.push(structuredClone(ref));
     if(this.inspectFailures>0){
@@ -433,14 +545,22 @@ class LifecyclePort {
   remainingResources():KubernetesResource[]{return structuredClone(this.resources);}
 }
 
-async function createReleaseRequestedRun(store:ReturnType<typeof createLocalInMemoryProductStore>){
-  const owner="user_lifecycle",workspaceId="workspace_lifecycle",projectId="project_lifecycle",taskId="task_lifecycle",libraryId="library_lifecycle";
-  await store.createUser({id:owner,email:"lifecycle@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp(0),updatedAt:timestamp(0)});
-  await store.createWorkspace({id:workspaceId,name:"Workspace",ownerUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)});
-  await store.createProject({id:projectId,workspaceId,name:"Project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,sandboxLimit:1,createdAt:timestamp(0),updatedAt:timestamp(0)});
-  const task:PersistedAgentTask={id:taskId,workspaceId,projectId,endpointId:"endpoint_lifecycle",fileLibraryId:libraryId,createdByUserId:owner,title:"Task",prompt:"Work",agentContext:"",currentRunId:"run_lifecycle",archivedAt:null,deletedAt:null,createdAt:timestamp(0),updatedAt:timestamp(0)};
-  const run:PersistedSandboxRunState={workspaceId,projectId,taskId,runId:task.currentRunId!,namespace:"agentsmith",state:"release_requested",image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${libraryId}/home`,fileLibraryId:libraryId,startedByUserId:owner,startedAt:timestamp(0),startupReadyAt:null,startupActionDeadlineAt:null,startupPodUid:"uid-pod",botifiedPort:3099,resourceNames:{pod:"task-lifecycle",service:"task-lifecycle",configMap:"task-lifecycle-config",secret:"task-lifecycle-secret",serviceAccount:"task-lifecycle",networkPolicy:"task-lifecycle"},serviceKeySecretRef:{name:"task-lifecycle-secret",key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:"requested",releaseRequestedAt:timestamp(1),failedAt:null,releasedAt:null,createdAt:timestamp(0),updatedAt:timestamp(1)};
-  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},idempotency:{actorId:owner,projectId,operation:"create",key:"fixture-lifecycle",requestHash:"fixture-lifecycle-hash",resourceId:taskId,claimToken:"fixture-lifecycle-claim",now:timestamp(0),leaseExpiresAt:timestamp(9)},rejectionPresentation:null,rejectedAuditEvent:{id:"audit_fixture_lifecycle_rejected",projectId,actorId:owner,action:"task.create",status:"rejected",resourceKind:"task",resourceId:taskId,detail:{taskId,trigger:"task_create"},createdAt:timestamp(0)},newFileLibrary:{id:libraryId,workspaceId,projectId,name:"Library",rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)},sandboxRun:run});
+async function createReleaseRequestedRun(
+  store:ReturnType<typeof createLocalInMemoryProductStore>,
+  suffix="lifecycle",
+  createProject=true
+){
+  const owner="user_lifecycle",workspaceId="workspace_lifecycle",projectId="project_lifecycle";
+  const taskId=`task_${suffix}`,libraryId=`library_${suffix}`,runId=`run_${suffix}`;
+  if(createProject){
+    await store.createUser({id:owner,email:"lifecycle@example.test",emailVerified:true,passwordHash:"hash",createdAt:timestamp(0),updatedAt:timestamp(0)});
+    await store.createWorkspace({id:workspaceId,name:"Workspace",ownerUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)});
+    await store.createProject({id:projectId,workspaceId,name:"Project",ownerUserId:owner,rootPath:`workspaces/${workspaceId}/projects/${projectId}`,sandboxLimit:10,createdAt:timestamp(0),updatedAt:timestamp(0)});
+  }
+  const task:PersistedAgentTask={id:taskId,workspaceId,projectId,endpointId:"endpoint_lifecycle",fileLibraryId:libraryId,createdByUserId:owner,title:"Task",prompt:"Work",agentContext:"",currentRunId:runId,archivedAt:null,deletedAt:null,createdAt:timestamp(0),updatedAt:timestamp(0)};
+  const resourceBase=taskId.replaceAll("_","-");
+  const run:PersistedSandboxRunState={workspaceId,projectId,taskId,runId:task.currentRunId!,namespace:"agentsmith",state:"release_requested",image:"botified:test",pvcName:"files",projectSubPath:`workspaces/${workspaceId}/projects/${projectId}`,fileLibraryRootSubPath:`libraries/${libraryId}/home`,fileLibraryId:libraryId,startedByUserId:owner,startedAt:timestamp(0),startupReadyAt:null,startupActionDeadlineAt:null,startupPodUid:"uid-pod",botifiedPort:3099,resourceNames:{pod:resourceBase,service:resourceBase,configMap:`${resourceBase}-config`,secret:`${resourceBase}-secret`,serviceAccount:resourceBase,networkPolicy:resourceBase},serviceKeySecretRef:{name:`${resourceBase}-secret`,key:"BOTIFIED_SERVICE_KEY"},directories:{libraryHome:"/workspace/library",botified:"/workspace/botified"},resourceLimits:{cpuRequest:"250m",memoryRequest:"512Mi",cpuLimit:"1",memoryLimit:"1Gi"},resourceSnapshot:{cpuRequestMillis:"250",memoryRequestBytes:"536870912",cpuLimitMillis:"1000",memoryLimitBytes:"1073741824"},failureCode:null,failureCause:null,fencingToken:1,cleanupClaimedAt:null,cleanupAttempts:0,lastCleanupAt:null,lastCleanupError:null,releaseReason:"requested",releaseRequestedAt:timestamp(1),failedAt:null,releasedAt:null,createdAt:timestamp(0),updatedAt:timestamp(1)};
+  const created=await store.createTaskAtomically({task,reserveActive:true, admission:{namespace:"agentsmith",namespaceLimit:100},idempotency:{actorId:owner,projectId,operation:"create",key:`fixture-${suffix}`,requestHash:`fixture-${suffix}-hash`,resourceId:taskId,claimToken:`fixture-${suffix}-claim`,now:timestamp(0),leaseExpiresAt:timestamp(9)},rejectionPresentation:null,rejectedAuditEvent:{id:`audit_fixture_${suffix}_rejected`,projectId,actorId:owner,action:"task.create",status:"rejected",resourceKind:"task",resourceId:taskId,detail:{taskId,trigger:"task_create"},createdAt:timestamp(0)},newFileLibrary:{id:libraryId,workspaceId,projectId,name:`Library ${suffix}`,rootSubPath:run.fileLibraryRootSubPath,lifecycleStatus:"active" as const,createdByUserId:owner,createdAt:timestamp(0),updatedAt:timestamp(0)},sandboxRun:run});
   assert.equal(created.kind,"created");
   return{task,run};
 }
