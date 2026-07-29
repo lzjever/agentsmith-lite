@@ -858,6 +858,7 @@ const auditActionLabels: Record<ProjectAuditAction, string> = {
   "task.message.create": "Sent task message",
   "task.message.edit": "Edited task message",
   "task.message.delete": "Deleted task message",
+  "task.turn.abort": "Requested turn abort",
   "artifact.project": "Projected task artifact",
   "sandbox.started": "Started sandbox",
   "sandbox.failed": "Sandbox failed",

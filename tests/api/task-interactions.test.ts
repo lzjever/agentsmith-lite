@@ -400,10 +400,47 @@ describe("task interactions API", () => {
       id:ownerMessage.id,taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
       claimToken:"abort-owner",claimedAt:new Date().toISOString(),leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
     }));
+    botified.postMessageCalls.push({
+      baseUrl:`http://${run.resourceNames.service}.${run.namespace}.svc.cluster.local:${run.botifiedPort}`,
+      serviceKey:task.id,
+      message:ownerMessage.content
+    });
     const presentation=(await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`)).presentation;
     assert.equal(presentation.currentTurn.state,"running");
     assert.equal(Object.hasOwn(presentation.currentTurn,"turnId"),false);
     assert.equal(presentation.capabilities.abortTurn,true);
+
+    const malformed=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
+      expectedRunId:""
+    });
+    assert.equal(malformed.status,400);
+    const missing=await auth.request("POST","/api/v1/tasks/task_missing/turn/abort",{
+      expectedRunId:current.currentRunId
+    });
+    assert.equal(missing.status,404);
+    await store.createUser({
+      id:"abort_outsider",email:"abort-outsider@example.test",emailVerified:true,passwordHash:"external:oidc",
+      createdAt:"2026-07-29T00:00:00.000Z",updatedAt:"2026-07-29T00:00:00.000Z"
+    });
+    await store.createSession({
+      id:"abort-outsider-session",userId:"abort_outsider",csrfToken:"abort-outsider-csrf",
+      createdAt:"2026-07-29T00:00:00.000Z",expiresAt:"2999-01-01T00:00:00.000Z"
+    });
+    const forbidden=await fetch(`${api.baseUrl}/api/v1/tasks/${task.id}/turn/abort`,{
+      method:"POST",
+      headers:{
+        "content-type":"application/json",
+        cookie:"asl_session=abort-outsider-session",
+        "x-csrf-token":"abort-outsider-csrf"
+      },
+      body:JSON.stringify({expectedRunId:current.currentRunId})
+    });
+    assert.equal(forbidden.status,403);
+    assert.equal(
+      ((await store.queryProjectAuditEvents(auth.projectId,{limit:100})).items)
+        .filter((event)=>event.action==="task.turn.abort").length,
+      0
+    );
 
     const stale=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
       expectedRunId:"run_stale"
@@ -422,6 +459,32 @@ describe("task interactions API", () => {
       baseUrl:`http://${run.resourceNames.service}.${run.namespace}.svc.cluster.local:${run.botifiedPort}`,
       serviceKey:task.id
     }]);
+
+    const inactiveRun={...run,state:"failed" as const,failureCode:"runtime_unreachable" as const,failureCause:"test inactive Run",failedAt:new Date().toISOString(),releaseReason:"failed" as const,releaseRequestedAt:new Date().toISOString(),fencingToken:run.fencingToken+1,updatedAt:new Date().toISOString()};
+    assert.ok(await store.sandboxRuns.updateWithFencing(run.runId,run.fencingToken,inactiveRun));
+    const inactive=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
+      expectedRunId:run.runId
+    });
+    assert.equal(inactive.status,409);
+    assert.equal(botified.abortCalls.length,1);
+    const abortAudits=((await store.queryProjectAuditEvents(auth.projectId,{limit:100})).items)
+      .filter((event)=>event.action==="task.turn.abort");
+    assert.equal(abortAudits.length,3);
+    assert.deepEqual(
+      abortAudits.map((event)=>({
+        actorId:event.actorId,
+        projectId:event.projectId,
+        status:event.status,
+        resourceKind:event.resourceKind,
+        resourceId:event.resourceId,
+        detail:event.detail
+      })).sort((left,right)=>String(left.detail?.runId).localeCompare(String(right.detail?.runId))||left.status.localeCompare(right.status)),
+      [
+        {actorId:task.createdByUserId,projectId:task.projectId,status:"accepted",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,runId:run.runId}},
+        {actorId:task.createdByUserId,projectId:task.projectId,status:"rejected",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,runId:run.runId}},
+        {actorId:task.createdByUserId,projectId:task.projectId,status:"rejected",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,runId:"run_stale"}}
+      ].sort((left,right)=>String(left.detail.runId).localeCompare(String(right.detail.runId))||left.status.localeCompare(right.status))
+    );
 
     const stopped=await auth.request("POST",`/api/v1/tasks/${task.id}/work/interaction_1/stop`,{
       expectedRunId:current.currentRunId,interactionId:"interaction_1"
@@ -464,6 +527,23 @@ describe("task interactions API", () => {
     assert.equal(botified.abortCalls.length,1);
     assert.equal((await store.sandboxRuns.get(current.currentRunId))?.state,"active");
     assert.equal((await store.sandboxRuns.get(current.currentRunId))?.currentLlmMessageId,ownerMessage.id);
+    const abortAudits=((await store.queryProjectAuditEvents(auth.projectId,{limit:100})).items)
+      .filter((event)=>event.action==="task.turn.abort");
+    assert.deepEqual(abortAudits.map((event)=>({
+      actorId:event.actorId,
+      projectId:event.projectId,
+      status:event.status,
+      resourceKind:event.resourceKind,
+      resourceId:event.resourceId,
+      detail:event.detail
+    })),[{
+      actorId:task.createdByUserId,
+      projectId:task.projectId,
+      status:"accepted",
+      resourceKind:"task",
+      resourceId:task.id,
+      detail:{taskId:task.id,runId:run.runId}
+    }]);
 
     await createApplicationServices({
       store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,

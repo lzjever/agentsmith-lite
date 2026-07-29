@@ -516,6 +516,40 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
     });
   });
 
+  it("allows task turn Abort audits in migration 082 and keeps the action set closed",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"082_task_turn_abort_audit",async(client,migrationSql)=>{
+      const ids=await insertProjectFixture(client,"abort_audit_082");
+      await client.query(migrationSql);
+      const timestamp="2026-07-29T20:00:00.000Z";
+      await client.query(
+        `insert into project_audit_events (
+           id,project_id,actor_id,action,status,resource_kind,resource_id,detail,created_at
+         ) values ($1,$2,$3,'task.turn.abort','accepted','task',$4,$5::jsonb,$6)`,
+        [
+          `audit_abort_${ids.suffix}`,ids.projectId,ids.userId,`task_${ids.suffix}`,
+          JSON.stringify({taskId:`task_${ids.suffix}`,runId:`run_${ids.suffix}`}),timestamp
+        ]
+      );
+      assert.equal(
+        (await client.query<{action:string}>(
+          "select action from project_audit_events where id=$1",
+          [`audit_abort_${ids.suffix}`]
+        )).rows[0]?.action,
+        "task.turn.abort"
+      );
+      await assert.rejects(
+        client.query(
+          `insert into project_audit_events (
+             id,project_id,actor_id,action,status,resource_kind,resource_id,created_at
+           ) values ($1,$2,$3,'task.turn.abort.completed','accepted','task',$4,$5)`,
+          [`audit_abort_invalid_${ids.suffix}`,ids.projectId,ids.userId,`task_${ids.suffix}`,timestamp]
+        ),
+        isCheckViolation
+      );
+    });
+  });
+
   it("preserves non-Task receipts, bound endpoints, and read-only historical rows through migration 066", async () => {
     assert.ok(postgresUrl);
     await withMigration066Database(postgresUrl, async (client, cutoverSql) => {

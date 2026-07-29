@@ -1445,11 +1445,29 @@ export class TaskService {
   async abortTaskTurn(userId:string,taskId:string,request:TaskTurnAbortRequest):Promise<TaskTurnAbortResponse>{
     const task=await this.requireTaskRecordForUser(userId,taskId,"write");
     const expectedRunId=requireNonEmptyString(request.expectedRunId,"task.abort.expectedRunId");
-    if(task.currentRunId!==expectedRunId)throw taskRunTargetConflictError();
+    const auditAbortRequest=(status:"accepted"|"rejected")=>this.store.appendProjectAuditEvent({
+      id:newId("audit"),
+      projectId:task.projectId,
+      actorId:userId,
+      action:"task.turn.abort",
+      status,
+      resourceKind:"task",
+      resourceId:task.id,
+      detail:{taskId:task.id,runId:expectedRunId},
+      createdAt:nowIso()
+    });
+    if(task.currentRunId!==expectedRunId){
+      await auditAbortRequest("rejected");
+      throw taskRunTargetConflictError();
+    }
     const run=await this.store.sandboxRuns.get(expectedRunId);
-    if(!run||run.state!=="active"||!taskMatchesExactSandboxRun(task,run))throw taskRunTargetConflictError();
+    if(!run||run.state!=="active"||!taskMatchesExactSandboxRun(task,run)){
+      await auditAbortRequest("rejected");
+      throw taskRunTargetConflictError();
+    }
     const serviceKey=this.serviceKeyForRun(task,run);
     const baseUrl=this.botifiedBaseUrlForRun(run);
+    await auditAbortRequest("accepted");
     let result;
     try{
       result=await this.botified.abort(baseUrl,serviceKey);
