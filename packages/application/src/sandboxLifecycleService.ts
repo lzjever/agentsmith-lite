@@ -34,6 +34,8 @@ export interface SandboxLifecycleServiceConfig {
   port?: SandboxLifecycleKubernetesPort;
   now?: () => Date;
   hasLocalStartupOperation?: (runId:string)=>boolean;
+  withProjectFileMeasurement?<T>(projectId:string,project:(bytes:number)=>Promise<T>):Promise<T>;
+  refreshProjectFileAlerts?(projectId:string):Promise<void>;
 }
 
 export interface SandboxLifecycleScope {
@@ -656,31 +658,59 @@ export class SandboxLifecycleService {
   private async completeReleasedRun(run:SandboxRunState):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
     const current=await this.store.sandboxRuns.get(run.runId);if(!current)return null;
     const releasedAt=(this.config.now?.()??new Date()).toISOString();
-    const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:releasedAt,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
-    const startedAt=current.startedAt;
-    const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
-    const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
-    const result=await this.store.completeSandboxRunRelease({
-      runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,
-      auditEvent:{id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:current.taskId,detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},createdAt:releasedAt},
-      releaseReceipt:{
-        responseStatus:200,
-        responseBody:{outcome:"completed",keyDisposition:"retire",taskId:current.taskId,runId:current.runId},
-        updatedAt:releasedAt
+    const complete=async(fileMeasurement?:{bytes:number;measuredAt:string})=>{
+      const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:releasedAt,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
+      const startedAt=current.startedAt;
+      const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
+      const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
+      const result=await this.store.completeSandboxRunRelease({
+        runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,
+        ...(fileMeasurement?{fileMeasurement}:{}),
+        auditEvent:{
+          id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,
+          subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",
+          resourceKind:"sandbox",resourceId:current.taskId,
+          detail:{
+            taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason,
+            ...(fileMeasurement?{metric:"project_file_bytes" as const,current:fileMeasurement.bytes}:{})
+          },
+          createdAt:releasedAt
+        },
+        releaseReceipt:{
+          responseStatus:200,
+          responseBody:{outcome:"completed",keyDisposition:"retire",taskId:current.taskId,runId:current.runId},
+          updatedAt:releasedAt
+        }
+      });
+      if(result==="conflict")return null;
+      if(result==="applied"&&fileMeasurement&&this.config.refreshProjectFileAlerts){
+        try{await this.config.refreshProjectFileAlerts(current.projectId)}
+        catch(error){console.error(`Project file alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`)}
       }
-    });
-    if(result==="conflict")return null;
+      try{
+        await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
+        await recoverProjectAlerts(this.store,current.projectId,"sandbox_capacity",{unconfiguredFallback:true});
+        if(stored.releaseReason!=="failed"){
+          const endpointId=(await this.store.findTask(current.taskId))?.endpointId;
+          await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_failure",endpointId?{endpointId}:{});
+          await recoverProjectAlerts(this.store,current.projectId,"sandbox_failure",{...(endpointId?{endpointId}:{}),unconfiguredFallback:true});
+        }
+      }
+      catch(error){console.error(`Sandbox capacity alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
+      return{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
+    };
+    if(!this.config.withProjectFileMeasurement)return complete();
+    let callbackEntered=false;
     try{
-      await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
-      await recoverProjectAlerts(this.store,current.projectId,"sandbox_capacity",{unconfiguredFallback:true});
-      if(stored.releaseReason!=="failed"){
-        const endpointId=(await this.store.findTask(current.taskId))?.endpointId;
-        await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_failure",endpointId?{endpointId}:{});
-        await recoverProjectAlerts(this.store,current.projectId,"sandbox_failure",{...(endpointId?{endpointId}:{}),unconfiguredFallback:true});
-      }
+      return await this.config.withProjectFileMeasurement(current.projectId,async(bytes)=>{
+        callbackEntered=true;
+        return complete({bytes,measuredAt:(this.config.now?.()??new Date()).toISOString()});
+      });
+    }catch(error){
+      if(callbackEntered)throw error;
+      console.error(`Project file measurement failed: ${sanitizeCleanupError(errorMessage(error))}`);
+      return complete();
     }
-    catch(error){console.error(`Sandbox capacity alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
-    return{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
   }
 
   private async persistTerminalFailureTransitions(

@@ -589,6 +589,10 @@ export interface CompleteSandboxRunReleaseInput {
   expectedFencingToken: number;
   run: PersistedSandboxRunState;
   settlement: SandboxUsageSettlement;
+  fileMeasurement?: {
+    bytes: number;
+    measuredAt: string;
+  };
   auditEvent: ProjectAuditEvent;
   releaseReceipt?:{
     responseStatus:number;

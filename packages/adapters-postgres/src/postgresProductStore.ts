@@ -985,7 +985,7 @@ export class PostgresProductStore implements ProductStore {
     await insertAuditEventWithClient(client,input.auditEvent);
     return{kind:"activated" as const,task:mapTask(updatedTask.rows[0]),run:activatedRun};
   })}
-  async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{return transaction(this.pool,async(client)=>{
+  async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{assertProjectFileMeasurement(input.fileMeasurement);return transaction(this.pool,async(client)=>{
     await lockSandboxNamespaceWithClient(client,input.run.namespace);
     const project=await client.query("select id from projects where id=$1 for update",[input.run.projectId]);if(!project.rows[0])return"conflict" as const;
     const policy=await client.query("select project_id from project_resource_policies where project_id=$1 for update",[input.run.projectId]);
@@ -1015,7 +1015,14 @@ export class PostgresProductStore implements ProductStore {
         [input.run.projectId,input.runId,input.releaseReceipt.responseStatus,JSON.stringify(input.releaseReceipt.responseBody),input.releaseReceipt.updatedAt]
       );
     }
-    await setAuthoritativeActiveTaskUsageWithClient(client,task.project_id,input.run.updatedAt);await insertAuditEventWithClient(client,input.auditEvent);return"applied" as const;
+    await setAuthoritativeActiveTaskUsageWithClient(client,task.project_id,input.run.updatedAt);
+    if(input.fileMeasurement){
+      await client.query(
+        "update project_resource_usage set project_file_bytes=$2,project_file_bytes_measured_at=$3,updated_at=$3 where project_id=$1",
+        [input.run.projectId,input.fileMeasurement.bytes,input.fileMeasurement.measuredAt]
+      );
+    }
+    await insertAuditEventWithClient(client,input.auditEvent);return"applied" as const;
   })}
   async failSandboxRun(input:SandboxRunFailureInput):Promise<PersistedSandboxRunState|null>{return transaction(this.pool,async(client)=>{
     const observed=await selectSandboxRunWithClient(client,input.runId);
@@ -3396,6 +3403,12 @@ function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRun
 }
 function taskRunRowIdentityMatches(task:AgentTaskRow,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.current_run_id===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspace_id===run.workspaceId&&task.project_id===run.projectId&&task.file_library_id===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return strictStructuralEqual(left,right)}
+function assertProjectFileMeasurement(measurement:CompleteSandboxRunReleaseInput["fileMeasurement"]):void{
+  if(!measurement)return;
+  if(!Number.isSafeInteger(measurement.bytes)||measurement.bytes<0||!Number.isFinite(Date.parse(measurement.measuredAt))){
+    throw new Error("Sandbox Release file measurement is invalid");
+  }
+}
 function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,released:PersistedSandboxRunState):boolean{const releasedAt=released.releasedAt;const duration=current.startedAt===null||!releasedAt?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(current.startedAt))/1000);return Boolean(releasedAt)&&value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===releasedAt&&value.durationSeconds===duration&&value.releaseReason===released.releaseReason&&strictStructuralEqual(value.resources,current.resourceSnapshot)}
 function taskMatchesActiveSandboxRunRow(task:SandboxReleaseTaskRow|undefined,run:PersistedSandboxRunState):task is SandboxReleaseTaskRow{return Boolean(task&&task.deleted_at===null&&task.id===run.taskId&&task.current_run_id===run.runId&&task.project_id===run.projectId&&task.workspace_id===run.workspaceId&&task.file_library_id===run.fileLibraryId&&task.project_workspace_id===run.workspaceId)}
 function nullableNumber(value: string | number | null): number | null { return value === null ? null : Number(value); }

@@ -894,6 +894,7 @@ export class InMemoryProductStore implements ProductStore {
     });
   }
   async completeSandboxRunRelease(input:CompleteSandboxRunReleaseInput):Promise<CompleteSandboxRunReleaseResult>{
+    assertProjectFileMeasurement(input.fileMeasurement);
     try{return await this.atomicTaskMessageMutation([],()=>this.sandboxRunRecords.completeRelease(input,(replay)=>{
       const task=this.tasks.get(input.run.taskId);
       const project=this.projects.get(input.run.projectId);
@@ -913,7 +914,19 @@ export class InMemoryProductStore implements ProductStore {
         }
       }
       if(!existing)this.sandboxUsageSettlements.set(input.runId,clone(input.settlement));
-      if(!replay)this.setAuthoritativeActiveTaskUsage(input.run.projectId,input.run.releasedAt!);
+      if(!replay){
+        this.setAuthoritativeActiveTaskUsage(input.run.projectId,input.run.releasedAt!);
+        if(input.fileMeasurement){
+          const usage=this.usage.get(input.run.projectId);
+          if(!usage)throw new Error("Sandbox Release file measurement usage is unavailable");
+          this.usage.set(input.run.projectId,clone({
+            ...usage,
+            projectFileBytes:input.fileMeasurement.bytes,
+            projectFileBytesMeasuredAt:input.fileMeasurement.measuredAt,
+            updatedAt:input.fileMeasurement.measuredAt
+          }));
+        }
+      }
       try{
         if(!this.auditEvents.some((event)=>event.id===input.auditEvent.id))this.auditEvents.push(clone({...input.auditEvent,detail:sanitizeProjectAuditDetail(input.auditEvent.detail)}));
       }catch(error){
@@ -2302,6 +2315,12 @@ function sameRunIdentity(left:PersistedSandboxRunState,right:PersistedSandboxRun
 }
 function taskRunIdentityMatches(task:PersistedAgentTask,run:PersistedSandboxRunState,input:ActivateTaskSandboxRunInput):boolean{return task.id===input.taskId&&task.currentRunId===input.runId&&run.taskId===input.taskId&&run.runId===input.runId&&task.workspaceId===run.workspaceId&&task.projectId===run.projectId&&task.fileLibraryId===run.fileLibraryId}
 function sameSettlement(left:SandboxUsageSettlement,right:SandboxUsageSettlement):boolean{return strictStructuralEqual(left,right)}
+function assertProjectFileMeasurement(measurement:CompleteSandboxRunReleaseInput["fileMeasurement"]):void{
+  if(!measurement)return;
+  if(!Number.isSafeInteger(measurement.bytes)||measurement.bytes<0||!Number.isFinite(Date.parse(measurement.measuredAt))){
+    throw new Error("Sandbox Release file measurement is invalid");
+  }
+}
 function settlementMatchesRun(value:SandboxUsageSettlement,current:PersistedSandboxRunState,released:PersistedSandboxRunState):boolean{const releasedAt=released.releasedAt;const duration=current.startedAt===null||!releasedAt?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(current.startedAt))/1000);return Boolean(releasedAt)&&value.runId===current.runId&&value.workspaceId===current.workspaceId&&value.projectId===current.projectId&&value.taskId===current.taskId&&value.fileLibraryId===current.fileLibraryId&&value.startedByUserId===current.startedByUserId&&value.startedAt===current.startedAt&&value.releasedAt===releasedAt&&value.durationSeconds===duration&&value.releaseReason===released.releaseReason&&strictStructuralEqual(value.resources,current.resourceSnapshot)}
 function taskMatchesActiveSandboxRun(task:PersistedAgentTask|undefined,project:Project|undefined,run:PersistedSandboxRunState):boolean{return Boolean(task&&project&&!task.deletedAt&&task.id===run.taskId&&task.currentRunId===run.runId&&task.projectId===run.projectId&&task.workspaceId===run.workspaceId&&task.fileLibraryId===run.fileLibraryId&&project.id===run.projectId&&project.workspaceId===run.workspaceId)}
 

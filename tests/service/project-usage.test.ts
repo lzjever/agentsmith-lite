@@ -49,10 +49,10 @@ describe("project Sandbox Usage",()=>{
     const releasedAt="2026-07-23T00:02:00.000Z";
     const released:PersistedSandboxRunState={...fixture.run,state:"released",releaseReason:"requested",releaseRequestedAt:"2026-07-23T00:01:00.000Z",releasedAt,fencingToken:2,updatedAt:releasedAt};
     const settlement={runId:released.runId,workspaceId:released.workspaceId,projectId:released.projectId,taskId:released.taskId,fileLibraryId:released.fileLibraryId,startedByUserId:released.startedByUserId,startedAt:released.startedAt,releasedAt,durationSeconds:120,resources:released.resourceSnapshot,releaseReason:"requested" as const};
-    const input={runId:released.runId,expectedFencingToken:fixture.run.fencingToken,run:released,settlement,auditEvent:{id:"audit_release",projectId:released.projectId,actorId:null,subjectUserId:released.startedByUserId,action:"sandbox.released" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:released.taskId,detail:{taskId:released.taskId,runId:released.runId,releaseReason:"requested" as const},createdAt:releasedAt}};
+    const input={runId:released.runId,expectedFencingToken:fixture.run.fencingToken,run:released,settlement,fileMeasurement:{bytes:194,measuredAt:releasedAt},auditEvent:{id:"audit_release",projectId:released.projectId,actorId:null,subjectUserId:released.startedByUserId,action:"sandbox.released" as const,status:"accepted" as const,resourceKind:"sandbox" as const,resourceId:released.taskId,detail:{taskId:released.taskId,runId:released.runId,releaseReason:"requested" as const,metric:"project_file_bytes" as const,current:194},createdAt:releasedAt}};
 
     assert.equal(await fixture.store.completeSandboxRunRelease(input),"applied");
-    assert.equal(await fixture.store.completeSandboxRunRelease({...input,expectedFencingToken:released.fencingToken}),"already_applied");
+    assert.equal(await fixture.store.completeSandboxRunRelease({...input,expectedFencingToken:released.fencingToken,fileMeasurement:{bytes:999,measuredAt:"2026-07-23T00:03:00.000Z"}}),"already_applied");
     assert.equal(await fixture.store.completeSandboxRunRelease({...input,expectedFencingToken:released.fencingToken,settlement:{...settlement,durationSeconds:121}}),"conflict");
     const overview=await fixture.services.policies.getUsageOverview(fixture.userId,fixture.projectId,undefined,fixture.runnerId);
     assert.equal(overview.sandbox.unreleasedCount,0);
@@ -65,6 +65,8 @@ describe("project Sandbox Usage",()=>{
     assert.equal(history.items[0]?.taskTitle,"Task");
     assert.equal(history.items[0]?.taskAvailable,true);
     assert.equal((await fixture.store.findProjectResourceUsage(fixture.projectId))?.activeSandboxes,0);
+    assert.equal((await fixture.store.findProjectResourceUsage(fixture.projectId))?.projectFileBytes,194);
+    assert.equal((await fixture.store.findProjectResourceUsage(fixture.projectId))?.projectFileBytesMeasuredAt,releasedAt);
   });
 
   it("pages 55 tied settlements with a scope-bound snapshot cursor and deleted Task projection",async()=>{

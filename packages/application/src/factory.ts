@@ -84,7 +84,9 @@ export function createApplicationServices(input: CreateApplicationServicesInput)
   const sandboxLifecycle = new SandboxLifecycleService(input.store, {
     namespace,
     ...(sandboxLifecyclePort ? { port: sandboxLifecyclePort } : {}),
-    hasLocalStartupOperation:(runId)=>tasks?.hasLocalStartupOperation(runId)??false
+    hasLocalStartupOperation:(runId)=>tasks?.hasLocalStartupOperation(runId)??false,
+    withProjectFileMeasurement:(projectId,project)=>fileLibraries.reconcileStoredProjectFileBytes(projectId,project),
+    refreshProjectFileAlerts:(projectId)=>policies.refreshFileAlerts(projectId)
   });
   const taskConfig = {
     dataRoot: input.dataRoot,

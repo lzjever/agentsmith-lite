@@ -2131,6 +2131,62 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     assert.equal((await store.sandboxRuns.list()).some((candidate)=>candidate.projectId===task.projectId),false);
   });
 
+  it("commits Release file measurement once with PostgreSQL parity",async()=>{
+    const task=taskRecord("task_release_files","library_release_files","run_release_files");
+    const pending={
+      ...run(task,task.currentRunId!,"starting"),
+      state:"release_requested" as const,
+      releaseReason:"requested" as const,
+      releaseRequestedAt:"2026-07-23T00:01:00.000Z"
+    };
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
+      ...createAdmissionReceipt(task,"release-files"),
+      newFileLibrary:library(task.fileLibraryId!,"Release files"),
+      sandboxRun:pending
+    })).kind,"created");
+    await store.setProjectFileBytes(task.projectId,121,"2026-07-23T00:00:30.000Z");
+    const releasedAt="2026-07-23T00:02:00.000Z";
+    const released={...pending,state:"released" as const,releasedAt,fencingToken:pending.fencingToken+1,updatedAt:releasedAt};
+    const input={
+      runId:pending.runId,
+      expectedFencingToken:pending.fencingToken,
+      run:released,
+      settlement:{
+        runId:pending.runId,workspaceId:pending.workspaceId,projectId:pending.projectId,
+        taskId:pending.taskId,fileLibraryId:pending.fileLibraryId,startedByUserId:pending.startedByUserId,
+        startedAt:null,releasedAt,durationSeconds:0,resources:pending.resourceSnapshot,releaseReason:"requested" as const
+      },
+      fileMeasurement:{bytes:194,measuredAt:releasedAt},
+      auditEvent:{
+        id:"audit_release_files",projectId:task.projectId,actorId:null,
+        subjectUserId:pending.startedByUserId,action:"sandbox.released" as const,status:"accepted" as const,
+        resourceKind:"sandbox" as const,resourceId:task.id,
+        detail:{taskId:task.id,runId:pending.runId,releaseReason:"requested" as const,metric:"project_file_bytes" as const,current:194},
+        createdAt:releasedAt
+      }
+    };
+
+    assert.equal(await store.completeSandboxRunRelease(input),"applied");
+    assert.equal(await store.completeSandboxRunRelease({
+      ...input,
+      expectedFencingToken:released.fencingToken,
+      fileMeasurement:{bytes:999,measuredAt:"2026-07-23T00:03:00.000Z"}
+    }),"already_applied");
+    assert.equal(await store.completeSandboxRunRelease({
+      ...input,
+      expectedFencingToken:released.fencingToken,
+      settlement:{...input.settlement,durationSeconds:1},
+      fileMeasurement:{bytes:777,measuredAt:"2026-07-23T00:04:00.000Z"}
+    }),"conflict");
+    const usage=await store.findProjectResourceUsage(task.projectId);assert.ok(usage);
+    assert.equal(usage.activeSandboxes,0);
+    assert.equal(usage.projectFileBytes,194);
+    assert.equal(usage.projectFileBytesMeasuredAt,releasedAt);
+    const audit=(await store.queryProjectAuditEvents(task.projectId,{limit:20})).items.find((event)=>event.id==="audit_release_files");
+    assert.deepEqual(audit?.detail,input.auditEvent.detail);
+  });
+
   it("reads measured file storage, Sandbox Usage summary, and tied history with PostgreSQL parity",async()=>{
     assert.equal((await store.findProjectResourceUsage("project_atomic"))?.projectFileBytesMeasuredAt,null);
     const fileMeasuredAt="2026-07-23T00:00:30.000Z";

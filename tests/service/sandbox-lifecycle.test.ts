@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 import { createLocalInMemoryProductStore } from "../../packages/adapters-postgres/src/inMemoryProductStore.js";
+import { AuthorizationService } from "../../packages/application/src/authorizationService.js";
+import { createApplicationServices } from "../../packages/application/src/factory.js";
+import { ProjectPolicyService } from "../../packages/application/src/projectPolicyService.js";
 import { SandboxLifecycleService } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
@@ -230,6 +236,135 @@ describe("sandbox lifecycle fenced cleanup",()=>{
       (await store.listSandboxUsageSettlements(first.run.projectId,first.run.startedByUserId)).map((value)=>value.runId),
       [first.run.runId]
     );
+  });
+
+  it("measures Project files under the file lock after final absence and commits Release usage, audit, and alerts",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const policies=new ProjectPolicyService(store,new AuthorizationService(store));
+    await store.patchProjectResourcePolicy(run.projectId,{projectFileBytesLimit:150},timestamp(1));
+    await store.setProjectFileBytes(run.projectId,121,timestamp(1));
+    const events:string[]=[];
+
+    const result=await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:new LifecyclePort([],false),
+      now:()=>new Date(timestamp(3)),
+      withProjectFileMeasurement:async(projectId,project)=>{
+        events.push(`scan:${projectId}`);
+        const outcome=await project(194);
+        events.push(`finalized:${(await store.sandboxRuns.get(run.runId))?.state}`);
+        return outcome;
+      },
+      refreshProjectFileAlerts:async(projectId)=>{
+        events.push(`alert:${projectId}:${(await store.sandboxRuns.get(run.runId))?.state}`);
+        await policies.refreshFileAlerts(projectId);
+      }
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    assert.deepEqual(result.errors,[]);
+    assert.deepEqual(events,[
+      `scan:${run.projectId}`,
+      `alert:${run.projectId}:released`,
+      "finalized:released"
+    ]);
+    const usage=await store.findProjectResourceUsage(run.projectId);assert.ok(usage);
+    assert.equal(usage.projectFileBytes,194);
+    assert.equal(usage.projectFileBytesMeasuredAt,timestamp(3));
+    const releaseAudit=(await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.find((event)=>event.action==="sandbox.released");
+    assert.deepEqual(releaseAudit?.detail,{
+      taskId:run.taskId,
+      runId:run.runId,
+      releaseReason:"requested",
+      metric:"project_file_bytes",
+      current:194
+    });
+    assert.equal((await store.queryProjectAlerts(run.projectId,{view:"active",limit:20})).items.some((alert)=>alert.type==="project_file_bytes_limit"),true);
+  });
+
+  it("wires the existing active-Library scanner into final Release",async()=>{
+    const dataRoot=await mkdtemp(path.join(tmpdir(),"agentsmith-release-files-"));
+    try{
+      const store=createLocalInMemoryProductStore();
+      const {run}=await createReleaseRequestedRun(store);
+      const libraryRoot=path.join(dataRoot,run.projectSubPath,run.fileLibraryRootSubPath);
+      await mkdir(libraryRoot,{recursive:true});
+      await writeFile(path.join(libraryRoot,"bound-upload.bin"),Buffer.alloc(121));
+      await writeFile(path.join(libraryRoot,"agent-output.bin"),Buffer.alloc(73));
+      await store.setProjectFileBytes(run.projectId,121,timestamp(1));
+      const services=createApplicationServices({
+        store,
+        dataRoot,
+        builtinAdminPassword:"admin-password",
+        sandboxLifecyclePort:new LifecyclePort([],false)
+      });
+
+      const result=await services.sandboxLifecycle.reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+      assert.deepEqual(result.errors,[]);
+      assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+      const usage=await store.findProjectResourceUsage(run.projectId);assert.ok(usage);
+      assert.equal(usage.projectFileBytes,194);
+      assert.notEqual(usage.projectFileBytesMeasuredAt,timestamp(1));
+    }finally{
+      await rm(dataRoot,{recursive:true,force:true});
+    }
+  });
+
+  it("finalizes Release without changing file usage when measurement fails before its callback",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    await store.setProjectFileBytes(run.projectId,121,timestamp(1));
+    let refreshCalls=0;
+    const errors:string[]=[];
+    const previousConsoleError=console.error;
+    console.error=(...values:unknown[])=>errors.push(values.map(String).join(" "));
+    try{
+      const result=await new SandboxLifecycleService(store,{
+        namespace:run.namespace,
+        port:new LifecyclePort([],false),
+        now:()=>new Date(timestamp(3)),
+        withProjectFileMeasurement:async()=>{throw new Error("scan failed with Bearer bsk_file_measurement_secret")},
+        refreshProjectFileAlerts:async()=>{refreshCalls+=1}
+      }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+      assert.deepEqual(result.errors,[]);
+      assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+      const usage=await store.findProjectResourceUsage(run.projectId);assert.ok(usage);
+      assert.equal(usage.projectFileBytes,121);
+      assert.equal(usage.projectFileBytesMeasuredAt,timestamp(1));
+      assert.equal(refreshCalls,0);
+      assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+      assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.filter((event)=>event.action==="sandbox.released").length,1);
+    }finally{
+      console.error=previousConsoleError;
+    }
+    assert.equal(errors.length,1);
+    assert.match(errors[0]??"",/<redacted>/);
+    assert.doesNotMatch(errors[0]??"",/bsk_file_measurement_secret/);
+  });
+
+  it("does not fallback to an unmeasured finalize after the measurement callback reaches a conflict",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const complete=store.completeSandboxRunRelease.bind(store);
+    let completeCalls=0;
+    store.completeSandboxRunRelease=async(input)=>{
+      completeCalls+=1;
+      return completeCalls===1?"conflict":complete(input);
+    };
+
+    const result=await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:new LifecyclePort([],false),
+      now:()=>new Date(timestamp(3)),
+      withProjectFileMeasurement:async(_projectId,project)=>project(194)
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    assert.equal(completeCalls,1);
+    assert.equal(result.errors.length,1);
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"release_requested");
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,0);
   });
 
   it("clears the cleanup claim and stale error while an exact resource is terminating",async()=>{
