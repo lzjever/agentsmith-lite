@@ -359,6 +359,7 @@ describe("sandbox manifest renderer", () => {
     assert.equal(libraryMount.subPath, "workspaces/w1/projects/p1/libraries/library_one/home");
     assert.notEqual(libraryMount.readOnly, true);
     assert.equal(botifiedMount.subPath, "workspaces/w1/projects/p1/tasks/t1/botified");
+    assert.notEqual(botifiedMount.subPath, libraryMount.subPath);
     assert.notEqual(botifiedMount.readOnly, true);
     assert.equal(container.volumeMounts.filter((mount) => mount.name === "project-files").length, 2);
     assert.equal(executor.workingDir, "/workspace/task/home/workspace");

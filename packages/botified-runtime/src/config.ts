@@ -26,6 +26,7 @@ export interface BotifiedConfig {
   runtime: {
     cwd: string;
     data_dir: string;
+    agents_dir: string;
     session: string;
   };
   timeline: {
@@ -130,6 +131,7 @@ export function generateBotifiedConfig(input: GenerateBotifiedConfigInput): Boti
     runtime: {
       cwd: input.task.taskHomePath,
       data_dir: input.task.botifiedDataPath,
+      agents_dir: `${input.task.botifiedDataPath}/agents`,
       session: input.task.taskId
     },
     timeline: {
