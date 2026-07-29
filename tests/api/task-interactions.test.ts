@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -2088,6 +2088,68 @@ describe("task interactions API", () => {
       const failed=await store.sandboxRuns.get(task.currentRunId);
       assert.equal(failed?.state,"failed");
       assert.equal(failed?.startupClaimToken,null);
+    }finally{
+      if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
+    }
+  });
+
+  it("prepares the Task-private Botified agents directory before sandbox apply",async()=>{
+    const previousPostgresUrl=process.env.POSTGRES_APP_URL;
+    process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    const resources:KubernetesResource[]=[];
+    const livePort={
+      async applyResource(resource:KubernetesResource){
+        const next=structuredClone(resource);
+        if(next.kind==="Pod")next.metadata.uid="pod-uid-agents-directory";
+        resources.push(next);
+        return"applied" as const;
+      },
+      async deleteResource(){return"deleted" as const;},
+      async getPodReadiness(_namespace:string,name:string){
+        const pod=resources.find((resource)=>resource.kind==="Pod"&&resource.metadata.name===name);
+        return pod?{state:"ready" as const,podUid:String(pod.metadata.uid),podIp:"10.42.0.71"}:"not_found" as const;
+      },
+      async getConfigMapData(_namespace:string,name:string){
+        const config=resources.find((resource)=>resource.kind==="ConfigMap"&&resource.metadata.name===name);
+        return config?{data:structuredClone(config.data as Record<string,string>)}:"not_found" as const;
+      },
+      async listManagedResources(){return structuredClone(resources);},
+      async inspectResource(ref:KubernetesResourceRef,labels:Record<string,string>){return inspectFixtureResource(resources,ref,labels);}
+    };
+    try{
+      api=await createApiServer({
+        port:0,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,runtimeTickIntervalMs:60_000,store,botifiedClient:botified,
+        botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:livePort}
+      });
+      const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
+      const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"prepare Botified agents directory",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Agents directory files"}
+      })).task;
+      const task=await store.findTask(created.id as string);assert.ok(task?.fileLibraryId);
+      const project=await store.findProject(task.projectId);assert.ok(project);
+      const library=await store.findFileLibrary(task.fileLibraryId);assert.ok(library);
+
+      const background=createApplicationServices({
+        store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
+        sandboxNamespaceLimit:100,botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+        liveSandbox:{port:livePort},
+        providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+      });
+      await background.tasks.syncActiveTasksOnce();
+
+      const agentsDirectory=path.join(dataRoot,project.rootPath,"tasks",task.id,"botified","agents");
+      const libraryHome=path.join(dataRoot,project.rootPath,library.rootSubPath);
+      const agentsDirectoryStat=await stat(agentsDirectory);
+      const agentsDirectoryMode=agentsDirectoryStat.mode&0o777;
+      assert.equal(agentsDirectoryStat.isDirectory(),true);
+      assert.equal(path.relative(libraryHome,agentsDirectory).startsWith(`..${path.sep}`),true);
+      assert.equal(agentsDirectoryStat.uid===10001
+        ? agentsDirectoryStat.gid===10001&&agentsDirectoryMode===0o775
+        : agentsDirectoryMode===0o777,true);
     }finally{
       if(previousPostgresUrl===undefined)delete process.env.POSTGRES_APP_URL;else process.env.POSTGRES_APP_URL=previousPostgresUrl;
     }

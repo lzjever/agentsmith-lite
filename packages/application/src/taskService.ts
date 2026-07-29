@@ -2386,7 +2386,8 @@ export class TaskService {
     const dataRoot = path.resolve(this.config.dataRoot);
     const taskRoot = path.resolve(dataRoot, projectRootPath, "tasks", task.id);
     assertPathInside(dataRoot, taskRoot, "Task runtime directory is outside the data root");
-    const runnerWritableDirectories = [path.resolve(taskRoot, "botified")];
+    const botifiedDirectory = path.resolve(taskRoot, "botified");
+    const runnerWritableDirectories = [botifiedDirectory, path.resolve(botifiedDirectory, "agents")];
     for (const directory of runnerWritableDirectories) {
       assertPathInside(dataRoot, directory, "Task runtime directory is outside the data root");
     }
