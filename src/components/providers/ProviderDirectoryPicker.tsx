@@ -4,7 +4,7 @@ import { Button, Selector, Text, TextInput } from "@astryxdesign/core";
 import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, apiClient, type Endpoint, type ProjectCredential } from "../../lib/api/client";
-import { providerDirectoryExactFailure, providerDirectoryPickerItems, providerDirectoryRetryTargets, type ProviderDirectoryExactFailure } from "./providerDirectoryPickerItems";
+import { providerDirectoryExactFailure, providerDirectoryExactItemAvailable, providerDirectoryExactResultApplies, providerDirectoryPickerItems, providerDirectoryRetryTargets, type ProviderDirectoryExactFailure } from "./providerDirectoryPickerItems";
 
 type DirectoryItem={id:string};
 type DirectoryPage<T extends DirectoryItem>={items:T[];nextCursor:string|null};
@@ -16,21 +16,25 @@ export function CredentialPicker({projectId,value,selected,label="Credential",di
 
 export function EndpointPicker({projectId,value,selected,label="Endpoint",mode="all",disabled=false,onChange,onUnavailable}:{projectId:string;value:string;selected?:Endpoint;label?:string;mode?:"all"|"task_ready";disabled?:boolean;onChange:(endpoint:Endpoint)=>void;onUnavailable?:(id:string)=>void}){
   const load=useCallback((query:{q?:string;cursor?:string;limit:number})=>apiClient.endpoints(projectId,{...query,mode}),[mode,projectId]);
-  return <ProviderPicker<Endpoint> scopeKey={`endpoint:${projectId}:${mode}`} label={label} value={value} {...(selected?{selected}:{})} disabled={disabled} load={load} loadExact={(id)=>apiClient.endpoint(projectId,id)} optionLabel={(item)=>`${item.name} (${item.model})`} onChange={onChange} {...(onUnavailable?{onUnavailable}:{})}/>;
+  const exactItemAvailable=useCallback((item:Endpoint)=>providerDirectoryExactItemAvailable(mode,item),[mode]);
+  return <ProviderPicker<Endpoint> scopeKey={`endpoint:${projectId}:${mode}`} label={label} value={value} {...(selected?{selected}:{})} disabled={disabled} load={load} loadExact={(id)=>apiClient.endpoint(projectId,id)} exactItemAvailable={exactItemAvailable} optionLabel={(item)=>`${item.name} (${item.model})`} onChange={onChange} {...(onUnavailable?{onUnavailable}:{})}/>;
 }
 
-function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,disabled,load,loadExact,optionLabel,onChange,onUnavailable}:{scopeKey:string;label:string;value:string;selected?:T;disabled:boolean;load:(query:{q?:string;cursor?:string;limit:number})=>Promise<DirectoryPage<T>>;loadExact:(id:string)=>Promise<T>;optionLabel:(item:T)=>string;onChange:(item:T)=>void;onUnavailable?:(id:string)=>void}){
+function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,disabled,load,loadExact,exactItemAvailable=alwaysAvailable,optionLabel,onChange,onUnavailable}:{scopeKey:string;label:string;value:string;selected?:T;disabled:boolean;load:(query:{q?:string;cursor?:string;limit:number})=>Promise<DirectoryPage<T>>;loadExact:(id:string)=>Promise<T>;exactItemAvailable?:(item:T)=>boolean;optionLabel:(item:T)=>string;onChange:(item:T)=>void;onUnavailable?:(id:string)=>void}){
   const [query,setQuery]=useState(""),[committedQuery,setCommittedQuery]=useState("");
   const [page,setPage]=useState<DirectoryPage<T>>({items:[],nextCursor:null}),[history,setHistory]=useState<Array<string|undefined>>([]);
-  const [cursor,setCursor]=useState<string|undefined>(),[fixed,setFixed]=useState<T|undefined>(selected);
+  const eligibleSelected=selected&&exactItemAvailable(selected)?selected:undefined;
+  const [cursor,setCursor]=useState<string|undefined>(),[fixed,setFixed]=useState<T|undefined>(eligibleSelected);
   const [loadedHistory,setLoadedHistory]=useState<Array<string|undefined>>([]),[loadedCursor,setLoadedCursor]=useState<string|undefined>();
   const [state,setState]=useState<"loading"|"ready"|"error">("loading"),[refreshing,setRefreshing]=useState(false),[pageError,setPageError]=useState("");
   const [exactError,setExactError]=useState<(ProviderDirectoryExactFailure&{id:string})|null>(null),[exactLoading,setExactLoading]=useState(false);
-  const pageRequest=useRef(0),exactRequest=useRef(0),exactValue=useRef(""),hasContent=useRef(false);
+  const pageRequest=useRef(0),exactRequest=useRef(0),exactValue=useRef(""),currentValue=useRef(value),hasContent=useRef(false);
+  currentValue.current=value;
 
   useEffect(()=>{const timer=window.setTimeout(()=>{setCommittedQuery(query.trim());setHistory([]);setCursor(undefined)},250);return()=>window.clearTimeout(timer)},[query]);
-  useEffect(()=>{pageRequest.current+=1;exactRequest.current+=1;exactValue.current="";hasContent.current=false;setQuery("");setCommittedQuery("");setHistory([]);setLoadedHistory([]);setCursor(undefined);setLoadedCursor(undefined);setPage({items:[],nextCursor:null});setFixed(selected);setPageError("");setExactError(null);setExactLoading(false)},[scopeKey]);
-  useEffect(()=>{if(selected?.id===value)setFixed(selected)},[selected,value]);
+  useEffect(()=>{pageRequest.current+=1;exactRequest.current+=1;exactValue.current="";hasContent.current=false;setQuery("");setCommittedQuery("");setHistory([]);setLoadedHistory([]);setCursor(undefined);setLoadedCursor(undefined);setPage({items:[],nextCursor:null});setFixed(eligibleSelected);setPageError("");setExactError(null);setExactLoading(false)},[scopeKey]);
+  useEffect(()=>{exactRequest.current+=1;exactValue.current="";setExactLoading(false)},[value]);
+  useEffect(()=>{if(selected?.id===value)setFixed(eligibleSelected)},[eligibleSelected,selected?.id,value]);
   const fetchExact=useCallback(async(id:string,force=false)=>{
     if(!id||!force&&exactValue.current===id)return undefined;
     exactValue.current=id;
@@ -38,24 +42,31 @@ function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,
     setExactLoading(true);setExactError(null);
     try{
       const item=await loadExact(id);
-      if(revision!==exactRequest.current)return undefined;
+      if(!providerDirectoryExactResultApplies(id,currentValue.current,revision,exactRequest.current))return undefined;
+      if(!exactItemAvailable(item)){
+        const failure=providerDirectoryExactFailure(label,404,"");
+        setFixed((current)=>current?.id===id?undefined:current);
+        setExactError({...failure,id});
+        onUnavailable?.(id);
+        return undefined;
+      }
       setFixed(item);
       return item;
     }catch(reason){
-      if(revision!==exactRequest.current)return undefined;
+      if(!providerDirectoryExactResultApplies(id,currentValue.current,revision,exactRequest.current))return undefined;
       const failure=providerDirectoryExactFailure(label,reason instanceof ApiError?reason.status:undefined,reason instanceof Error?reason.message:"");
       setExactError({...failure,id});
       if(failure.unavailable){setFixed((current)=>current?.id===id?undefined:current);onUnavailable?.(id)}
       return undefined;
-    }finally{if(revision===exactRequest.current)setExactLoading(false)}
-  },[label,loadExact,onUnavailable]);
+    }finally{if(providerDirectoryExactResultApplies(id,currentValue.current,revision,exactRequest.current))setExactLoading(false)}
+  },[exactItemAvailable,label,loadExact,onUnavailable]);
   useEffect(()=>{
     if(!value){exactRequest.current+=1;exactValue.current="";setExactError((current)=>current?.unavailable?current:null);setExactLoading(false);return}
     const pageItem=page.items.find((item)=>item.id===value);
-    if(pageItem){setFixed(pageItem);setExactError(null);exactValue.current=value;return}
+    if(pageItem&&exactItemAvailable(pageItem)){setFixed(pageItem);setExactError(null);exactValue.current=value;return}
     if(fixed?.id===value)return;
     void fetchExact(value);
-  },[fetchExact,fixed?.id,page.items,value]);
+  },[exactItemAvailable,fetchExact,fixed?.id,page.items,value]);
 
   const fetchPage=useCallback(async()=>{
     const revision=++pageRequest.current,preserve=hasContent.current;
@@ -72,9 +83,9 @@ function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,
   },[committedQuery,cursor,history,label,load]);
   useEffect(()=>{void fetchPage()},[fetchPage]);
 
-  const items=useMemo(()=>providerDirectoryPickerItems(page.items,[fixed,selected]),[fixed,page.items,selected]);
+  const items=useMemo(()=>providerDirectoryPickerItems(page.items,[fixed,eligibleSelected]),[eligibleSelected,fixed,page.items]);
   const options=useMemo(()=>items.map((item)=>({value:item.id,label:optionLabel(item)})),[items,optionLabel]);
-  function select(id:string){const item=items.find((candidate)=>candidate.id===id);if(item){setExactError(null);setFixed(item);onChange(item)}}
+  function select(id:string){const item=items.find((candidate)=>candidate.id===id);if(item){exactRequest.current+=1;exactValue.current="";currentValue.current=id;setExactLoading(false);setExactError(null);setFixed(item);onChange(item)}}
   function next(){if(!page.nextCursor)return;setHistory([...loadedHistory,loadedCursor]);setCursor(page.nextCursor)}
   function previous(){if(loadedHistory.length===0)return;setCursor(loadedHistory.at(-1));setHistory(loadedHistory.slice(0,-1))}
   async function retry(){
@@ -95,3 +106,5 @@ function ProviderPicker<T extends DirectoryItem>({scopeKey,label,value,selected,
     {loadedHistory.length>0||page.nextCursor?<div className="flex items-center justify-end gap-2"><Button label="Previous" variant="secondary" size="sm" isDisabled={disabled||refreshing||Boolean(pageError)||loadedHistory.length===0} onClick={previous}/><Text type="supporting" color="secondary">Page {loadedHistory.length+1}</Text><Button label="Next" variant="secondary" size="sm" isDisabled={disabled||refreshing||Boolean(pageError)||query.trim()!==committedQuery||!page.nextCursor} onClick={next}/></div>:null}
   </div>;
 }
+
+function alwaysAvailable():boolean{return true}

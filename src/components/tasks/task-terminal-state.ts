@@ -99,11 +99,11 @@ export function terminalSurfaceState(
   presentation: TaskDetail,
   explicitStartPending: boolean
 ): TaskTerminalSurfaceState {
-  if (!presentation.capabilities.openTerminal) return { kind: "unavailable", presentation };
   if (
     presentation.sandboxState.state === "failed"
     || presentation.sandboxState.state === "release_requested"
   ) return { kind: "cleanup_pending", presentation };
+  if (!presentation.capabilities.openTerminal) return { kind: "unavailable", presentation };
   if (explicitStartPending) return { kind: "starting", presentation };
   if (presentation.sandboxState.state === "active") return { kind: "active", presentation };
   if (presentation.sandboxState.state === "starting") {

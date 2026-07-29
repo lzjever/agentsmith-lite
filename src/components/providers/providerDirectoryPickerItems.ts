@@ -5,6 +5,17 @@ export function providerDirectoryPickerItems<T extends {id:string}>(page:T[],pin
   return [...items.values()];
 }
 
+export function providerDirectoryExactItemAvailable(
+  mode:"all"|"task_ready",
+  item:{id:string;taskEligible?:boolean}
+):boolean{
+  return mode!=="task_ready"||item.taskEligible===true;
+}
+
+export function providerDirectoryExactResultApplies(requestId:string,currentValue:string,revision:number,currentRevision:number):boolean{
+  return requestId===currentValue&&revision===currentRevision;
+}
+
 export interface ProviderDirectoryExactFailure {message:string;unavailable:boolean}
 
 export function providerDirectoryExactFailure(label:string,status:number|undefined,message:string):ProviderDirectoryExactFailure{

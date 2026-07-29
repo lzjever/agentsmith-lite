@@ -19,6 +19,7 @@ import type {
   EndpointInput,
 } from "../../lib/api/client";
 import { CredentialPicker } from "../providers/ProviderDirectoryPicker";
+import { isValidEndpointRequestTimeout } from "../providers/providerFormValidation";
 import { endpointCapabilities } from "./endpoints-page-utils";
 
 export function EndpointDialog({
@@ -74,6 +75,14 @@ export function EndpointDialog({
   const handleOpenChange = (next: boolean) => {
     if (!saving && !discovering) onOpenChange(next);
   };
+  const timeoutValid=isValidEndpointRequestTimeout(input.requestTimeoutSecs);
+  const handleSubmit=(event:FormEvent<HTMLFormElement>)=>{
+    if(!timeoutValid){
+      event.preventDefault();
+      return;
+    }
+    onSubmit(event);
+  };
 
   return (
     <Dialog
@@ -93,7 +102,7 @@ export function EndpointDialog({
         {...(!saving && !discovering ? { onOpenChange: handleOpenChange } : {})}
       />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-        <form id={formId} onSubmit={onSubmit}>
+        <form id={formId} onSubmit={handleSubmit}>
           {error ? (
             <Banner
               className="mb-4"
@@ -164,8 +173,11 @@ export function EndpointDialog({
                 value={input.requestTimeoutSecs}
                 onChange={(value) => set("requestTimeoutSecs", value)}
                 min={1}
+                max={600}
+                isIntegerOnly
                 isRequired
                 isDisabled={saving}
+                {...(!timeoutValid&&{status:{type:"error",message:"Enter a whole number from 1 to 600."} as const})}
                 size="lg"
                 width="100%"
               />
@@ -181,6 +193,7 @@ export function EndpointDialog({
                 onClick={onDiscoverModels}
                 isDisabled={
                   !canSubmit ||
+                  !timeoutValid ||
                   saving ||
                   discovering ||
                   !input.baseUrl ||
@@ -242,6 +255,7 @@ export function EndpointDialog({
           isDisabled={
             !canSubmit ||
             !canSave ||
+            !timeoutValid ||
             saving ||
             discovering ||
             !input.credentialId ||

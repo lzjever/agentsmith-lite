@@ -18,9 +18,9 @@ import { EndpointPicker } from "../providers/ProviderDirectoryPicker";
 
 export const alertRuleTypes: Array<{ value: ProjectAlertType; label: string; metric: AlertRuleMetric; defaultWindowSeconds: number | null }> = [
   { value: "sandbox_capacity", label: "Sandbox capacity", metric: "active_sandboxes", defaultWindowSeconds: null },
-  { value: "provider_requests_limit", label: "Provider requests", metric: "provider_requests", defaultWindowSeconds: null },
-  { value: "provider_tokens_limit", label: "Provider tokens", metric: "provider_tokens", defaultWindowSeconds: null },
-  { value: "provider_cost_limit", label: "Provider cost", metric: "provider_cost", defaultWindowSeconds: null },
+  { value: "provider_requests_limit", label: "Provider requests", metric: "provider_requests", defaultWindowSeconds: 3600 },
+  { value: "provider_tokens_limit", label: "Provider tokens", metric: "provider_tokens", defaultWindowSeconds: 3600 },
+  { value: "provider_cost_limit", label: "Provider cost", metric: "provider_cost", defaultWindowSeconds: 3600 },
   { value: "project_file_bytes_limit", label: "File storage", metric: "project_file_bytes", defaultWindowSeconds: null },
   { value: "endpoint_failure", label: "Endpoint failure", metric: "failure_count", defaultWindowSeconds: 3600 },
   { value: "provider_failure", label: "Provider failure", metric: "failure_count", defaultWindowSeconds: 3600 },
@@ -115,7 +115,7 @@ export function AlertRuleFormDialog({ open, editing, value, projectId, saving, c
             <Selector
               label="Window"
               options={[
-                ...(value.metric !== "failure_count" ? [{ value: "current", label: "Current value" }] : []),
+                ...(supportsCurrentValue(value.metric) ? [{ value: "current", label: "Current value" }] : []),
                 ...(value.windowSeconds !== null && !standardWindowSeconds.has(value.windowSeconds)
                   ? [{ value: String(value.windowSeconds), label: `${value.windowSeconds} seconds (current)` }]
                   : []),
@@ -184,3 +184,4 @@ export function alertRuleType(alertType: ProjectAlertType) {
   return alertRuleTypes.find((type) => type.value === alertType) ?? alertRuleTypes[0]!;
 }
 function supportsEndpointScope(type:ProjectAlertType){return type!=="sandbox_capacity"&&type!=="project_file_bytes_limit";}
+function supportsCurrentValue(metric:AlertRuleMetric){return metric==="active_sandboxes"||metric==="project_file_bytes";}

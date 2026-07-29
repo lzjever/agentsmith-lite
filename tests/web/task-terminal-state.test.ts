@@ -75,8 +75,8 @@ describe("task terminal surface state", () => {
     assert.equal(terminalSurfaceState(presentation("released"), false).kind, "start");
     assert.equal(terminalSurfaceState(presentation("starting"), false).kind, "starting");
     assert.equal(terminalSurfaceState(presentation("active"), true).kind, "starting");
-    assert.equal(terminalSurfaceState(presentation("failed", false), false).kind, "unavailable");
-    assert.equal(terminalSurfaceState(presentation("release_requested", false), false).kind, "unavailable");
+    assert.equal(terminalSurfaceState(presentation("failed", false), false).kind, "cleanup_pending");
+    assert.equal(terminalSurfaceState(presentation("release_requested", false), false).kind, "cleanup_pending");
     assert.equal(terminalSurfaceState(presentation("failed"), false).kind, "cleanup_pending");
     assert.equal(terminalSurfaceState(presentation("release_requested"), false).kind, "cleanup_pending");
   });

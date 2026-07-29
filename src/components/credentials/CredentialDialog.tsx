@@ -6,6 +6,7 @@ import {
   TextInput,
 } from "@astryxdesign/core";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import { providerBaseUrlError } from "../providers/providerFormValidation";
 import { CredentialSecretField } from "./CredentialSecretField";
 
 export function CredentialDialog({ open, onOpenChange, title, busy, error, onSubmit, submit, includeName = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; busy: boolean; error: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; submit: string; includeName?: boolean }) {
@@ -31,8 +32,8 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
   const handleOpenChange = (next: boolean) => {
     if (!busy) onOpenChange(next);
   };
-  const baseUrlValid = !includeName || isValidHttpUrl(baseUrl);
-  const canSubmit = secret.length > 0 && (!includeName || name.trim().length > 0 && baseUrl.length > 0 && baseUrlValid);
+  const baseUrlValidationError = includeName&&baseUrl.length>0?providerBaseUrlError(baseUrl):null;
+  const canSubmit = secret.length > 0 && (!includeName || name.trim().length > 0 && baseUrl.length > 0 && baseUrlValidationError===null);
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     if (busy || !canSubmit) {
       event.preventDefault();
@@ -91,10 +92,10 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
                 isRequired
                 placeholder="https://api.example.com/v1"
                 isDisabled={busy}
-                {...(baseUrl.length > 0 && !baseUrlValid && {
+                {...(baseUrlValidationError && {
                   status: {
                     type: "error",
-                    message: "Enter a valid HTTP or HTTPS URL.",
+                    message: baseUrlValidationError,
                   } as const,
                 })}
                 width="100%"
@@ -125,13 +126,4 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
       </div>
     </Dialog>
   );
-}
-
-function isValidHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
-  } catch {
-    return false;
-  }
 }
