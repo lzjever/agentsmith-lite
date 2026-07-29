@@ -290,6 +290,39 @@ describe("task interactions API", () => {
     assert.deepEqual(detail.capabilities,{sendMessage:false,editQueuedMessage:false,abortTurn:false,openTerminal:false,releaseSandbox:false,editTask:false,archiveTask:false,deleteTask:false});
   });
 
+  it("presents an unreachable active runtime as ready while keeping controls closed",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new class extends FakeBotifiedClient{
+      override async readState():Promise<never>{throw new Error("Botified runtime unavailable");}
+    }([]);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"runtime unavailable",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Runtime unavailable"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+
+    const active=await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
+    assert.equal(active.presentation.currentTurn.state,"ready");
+    assert.equal(active.runtimeReachability,"unreachable");
+    assert.equal(active.presentation.capabilities.sendMessage,false);
+    assert.equal(active.presentation.capabilities.abortTurn,false);
+    assert.equal(active.presentation.capabilities.openTerminal,false);
+
+    const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const run=await store.sandboxRuns.get(current.currentRunId);assert.ok(run);
+    assert.ok(await store.sandboxRuns.updateWithFencing(run.runId,run.fencingToken,{
+      ...run,state:"starting",startupReadyAt:null,fencingToken:run.fencingToken+1,updatedAt:new Date().toISOString()
+    }));
+    const starting=await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`);
+    assert.equal(starting.presentation.currentTurn.state,"starting");
+  });
+
   it("uses a safe download header for persisted artifact names with path and control characters", async () => {
     const artifactBytes = new TextEncoder().encode("persisted artifact bytes");
     const store = createLocalInMemoryProductStore();

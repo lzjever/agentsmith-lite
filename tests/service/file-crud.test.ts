@@ -154,6 +154,39 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("does not create missing Library storage while listing or reading",async()=>{
+    const root=await mkdtemp(path.join(tmpdir(),"asl-files-missing-read-root-"));
+    const missingRoot=path.join(root,LIBRARY_ROOT);
+    const service=new FileService();
+    try{
+      for(const read of [
+        ()=>service.listLibraryFiles(root,LIBRARY_ROOT),
+        ()=>service.downloadLibraryFile(root,LIBRARY_ROOT,"notes.txt")
+      ]){
+        await assert.rejects(
+          read,
+          (error:unknown)=>error instanceof ProductError&&
+            error.statusCode===409&&error.code==="file_library_storage_missing"
+        );
+        await assert.rejects(()=>readdir(missingRoot),{code:"ENOENT"});
+      }
+
+      await service.ensureLibraryRoot(root,LIBRARY_ROOT);
+      await assert.rejects(
+        ()=>service.listLibraryFiles(root,LIBRARY_ROOT,"missing"),
+        (error:unknown)=>error instanceof ProductError&&
+          error.statusCode===404&&error.code==="file_path_not_found"
+      );
+      await assert.rejects(
+        ()=>service.downloadLibraryFile(root,LIBRARY_ROOT,"missing.txt"),
+        (error:unknown)=>error instanceof ProductError&&
+          error.statusCode===404&&error.code==="file_path_not_found"
+      );
+    }finally{
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+
   it("filters the Artifact namespace and projects server-owned delete capability", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-artifact-policy-"));
     try {

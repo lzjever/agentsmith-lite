@@ -2657,7 +2657,7 @@ export class TaskService {
       const turn=botifiedTaskTurnState(state.state);
       return{turn,reachability:"reachable"};
     } catch {
-      return{turn:"starting",reachability:"unreachable"};
+      return{turn:"ready",reachability:"unreachable"};
     }
   }
 

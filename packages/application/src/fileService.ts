@@ -213,13 +213,14 @@ export class FileService {
 
   private async listFilesUnlocked(projectRoot: string, input: string,rootSubPath:string,canDelete:boolean): Promise<ProjectFileListResponse> {
       const { normalizedPath, absolutePath } = await this.resolveLibraryFilePath(projectRoot,rootSubPath,input,true);
-      await this.ensureLibraryRootExists(projectRoot,rootSubPath);
+      await this.requireLibraryRootExists(projectRoot,rootSubPath);
 
       let directoryStat;
       try {
         directoryStat = await lstat(absolutePath);
       } catch (error) {
         if (isNotFound(error)) {
+          await this.requireLibraryRootExists(projectRoot,rootSubPath);
           throw new ProductError("File path not found", 404, "file_path_not_found");
         }
         throw error;
@@ -317,6 +318,7 @@ export class FileService {
 
   private async downloadFile(projectRoot: string, input: string,rootSubPath:string): Promise<ProjectFileDownloadResponse> {
     const { normalizedPath, absolutePath } = await this.resolveLibraryFilePath(projectRoot,rootSubPath,input);
+    await this.requireLibraryRootExists(projectRoot,rootSubPath);
     try {
       const entryStat = await lstat(absolutePath);
       if (entryStat.isDirectory()) {
@@ -337,7 +339,8 @@ export class FileService {
         throw error;
       }
       if (isNotFound(error)) {
-        throw new ProductError("File not found", 404);
+        await this.requireLibraryRootExists(projectRoot,rootSubPath);
+        throw new ProductError("File path not found", 404, "file_path_not_found");
       }
       throw error;
     }
@@ -405,6 +408,18 @@ export class FileService {
   }
 
   private async ensureLibraryRootExists(projectRoot:string,rootSubPath:string):Promise<void>{
+    try{
+      await this.requireLibraryRootExists(projectRoot,rootSubPath);
+      return;
+    }catch(error){
+      if(!(error instanceof ProductError&&error.code==="file_library_storage_missing"))throw error;
+    }
+    const {absolutePath}=await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
+    await mkdir(absolutePath,{recursive:true});
+    await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
+  }
+
+  private async requireLibraryRootExists(projectRoot:string,rootSubPath:string):Promise<void>{
     const {absolutePath}=await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
     try {
       const entryStat = await lstat(absolutePath);
@@ -415,11 +430,7 @@ export class FileService {
         throw new ProductError("File Library root is not a directory");
       }
     } catch (error) {
-      if (isNotFound(error)) {
-        await mkdir(absolutePath, { recursive: true });
-        await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
-        return;
-      }
+      if (isNotFound(error))throw fileLibraryStorageMissing();
       throw error;
     }
   }
