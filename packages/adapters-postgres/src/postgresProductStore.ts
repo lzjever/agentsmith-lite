@@ -67,9 +67,10 @@ import type {
   TaskStoreListPage,
   TaskArtifactStoreListQuery,
   TaskArtifactStoreListPage,
-  TaskDeliveryClaimInput,
-  TaskDeliverySuccessInput,
-  TaskDeliveryFailureInput,
+  TaskRunLlmClaimInput,
+  TaskRunLlmMessageInput,
+  TaskRunLlmSettlementInput,
+  TaskRunLlmAuthorizationInput,
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
@@ -1002,9 +1003,10 @@ export class PostgresProductStore implements ProductStore {
     if(current.startupActionDeadlineAt&&current.startupActionDeadlineAt>input.run.updatedAt)return"conflict" as const;
     if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.startupActionDeadlineAt!==null||!isConfirmedReleasedRun(input.run)||!settlementMatchesRun(input.settlement,current,input.run))return"conflict" as const;
     if(!taskMatchesActiveSandboxRunRow(task,current))return"conflict" as const;
+    await failOwnedRunLlmMessageWithClient(client,current,input.run.updatedAt);
     await terminalizeTerminalStartOwnerWithClient(client,current.taskId,input.run,input.run.updatedAt);
     await client.query("insert into sandbox_usage_settlements (run_id,workspace_id,project_id,task_id,file_library_id,started_by_user_id,started_at,released_at,duration_seconds,cpu_request_millis,memory_request_bytes,cpu_limit_millis,memory_limit_bytes,release_reason) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",[input.settlement.runId,input.settlement.workspaceId,input.settlement.projectId,input.settlement.taskId,input.settlement.fileLibraryId,input.settlement.startedByUserId,input.settlement.startedAt,input.settlement.releasedAt,input.settlement.durationSeconds,input.settlement.resources.cpuRequestMillis,input.settlement.resources.memoryRequestBytes,input.settlement.resources.cpuLimitMillis,input.settlement.resources.memoryLimitBytes,input.settlement.releaseReason]);
-    await updateSandboxRunWithClient(client,input.run);
+    await updateSandboxRunWithClient(client,{...input.run,currentLlmMessageId:null});
     if(input.releaseReceipt){
       await client.query(
         `update task_idempotency_records
@@ -1022,7 +1024,8 @@ export class PostgresProductStore implements ProductStore {
     const current=await selectSandboxRunWithClient(client,input.runId,true);
     if(!current||current.fencingToken!==input.expectedFencingToken||input.startupClaimToken!==undefined&&current.startupClaimToken!==input.startupClaimToken||!["starting","active"].includes(current.state))return null;
     if(!task.rows[0]||task.rows[0].current_run_id!==current.runId||!sameTaskRunScopeRow(task.rows[0],current))return null;
-    const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
+    await failOwnedRunLlmMessageWithClient(client,current,input.failedAt);
+    const failed:PersistedSandboxRunState={...current,currentLlmMessageId:null,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
     await terminalizeTerminalStartOwnerWithClient(client,current.taskId,failed,input.failedAt);
     await updateSandboxRunWithClient(client,failed);
     await insertAuditEventWithClient(client,input.auditEvent);
@@ -1033,7 +1036,8 @@ export class PostgresProductStore implements ProductStore {
     const current=await selectSandboxRunWithClient(client,input.failure.runId,true);
     if(!current||current.fencingToken!==input.failure.expectedFencingToken||!["starting","active"].includes(current.state))return{kind:"conflict"};
     if(!task.rows[0]||task.rows[0].id!==input.taskId||task.rows[0].current_run_id!==current.runId||!sameTaskRunScopeRow(task.rows[0],current)||current.startupClaimToken!==input.startupClaimToken||!strictStructuralEqual(current.resourceNames,input.resourceIdentity))return{kind:"conflict"};
-    const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.failure.code,failureCause:input.failure.message,terminalFailure:input.failure.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failure.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failure.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failure.failedAt};
+    await failOwnedRunLlmMessageWithClient(client,current,input.failure.failedAt);
+    const failed:PersistedSandboxRunState={...current,currentLlmMessageId:null,state:"failed",failureCode:input.failure.code,failureCause:input.failure.message,terminalFailure:input.failure.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failure.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failure.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failure.failedAt};
     const terminalized=await terminalizeTerminalStartOwnerWithClient(
       client,input.taskId,failed,input.idempotency.updatedAt,
       {responseStatus:input.idempotency.responseStatus,responseBody:input.idempotency.responseBody},
@@ -1171,7 +1175,7 @@ export class PostgresProductStore implements ProductStore {
       const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
       const run=await selectSandboxRunWithClient(client,input.runId,true);
       if(!task||!run||task.current_run_id!==run.runId||!sameTaskRunScopeRow(task,run)||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.actionDeadlineAt>input.drainedAt||run.cleanupClaimedAt===null)return null;
-      const drained={...run,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
+      const drained={...run,currentLlmMessageId:null,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
       await terminalizeTerminalStartOwnerWithClient(client,input.taskId,drained,input.drainedAt);
       await updateSandboxRunWithClient(client,drained);
       await insertAuditEventWithClient(client,input.auditEvent);
@@ -1903,9 +1907,11 @@ export class PostgresProductStore implements ProductStore {
     )return"conflict" as const;
     const already=current.state==="release_requested"||current.state==="released";
     if(current.fencingToken!==input.expectedFencingToken)return"conflict" as const;
+    await failOwnedRunLlmMessageWithClient(client,current,idem.updatedAt);
     if(current.state!=="released"){
       const requested:PersistedSandboxRunState={
         ...current,
+        currentLlmMessageId:null,
         state:"release_requested",
         releaseReason:current.releaseReason??(current.state==="failed"?"failed":"requested"),
         releaseRequestedAt:current.releaseRequestedAt??input.intent.requestedAt,
@@ -1933,7 +1939,7 @@ export class PostgresProductStore implements ProductStore {
     }
     return already?"already_requested" as const:"applied" as const;
   })}
-  async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{const result=await this.pool.query("update task_idempotency_records set status='completed',response_status=$4,response_body=$5::jsonb,updated_at=$6 where project_id=$1 and operation=$2 and resource_id=$3 and status='in_progress'",[input.projectId,input.operation,input.resourceId,input.responseStatus,JSON.stringify(input.responseBody),input.updatedAt]);return result.rowCount??0;}
+  async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{const result=await this.pool.query("update task_idempotency_records set status='completed',response_status=$4,response_body=$5::jsonb,updated_at=$6 where project_id=$1 and operation=$2 and resource_id=$3",[input.projectId,input.operation,input.resourceId,input.responseStatus,JSON.stringify(input.responseBody),input.updatedAt]);return result.rowCount??0;}
 
   async persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult> {
     return transaction(this.pool, async (client) => {
@@ -1945,8 +1951,23 @@ export class PostgresProductStore implements ProductStore {
         if (projection.artifact.taskId !== input.taskId || projection.projectId !== task.project_id) throw new Error("Task interaction artifact mismatch");
         await persistTaskArtifactProjectionWithClient(client,projection);
       }
+      if(input.canonicalAcceptedMessageIds?.length){
+        await client.query(
+          "update task_messages set delivery_status='accepted',lease_expires_at=null,safe_error=null,updated_at=$3 where task_id=$1 and id=any($2::text[]) and deleted_at is null and delivery_status<>'accepted'",
+          [input.taskId,input.canonicalAcceptedMessageIds,input.sourceSync?.lastSyncedAt??new Date().toISOString()]
+        );
+      }
       const { inserted } = await persistTaskInteractionChangesWithClient(client,input.taskId,input.changes);
       if (input.sourceSync) await client.query("update agent_tasks set interaction_source_cursor=$2,interaction_history_status=$3,interaction_last_synced_at=$4 where id=$1", [input.taskId,input.sourceSync.sourceCursor,input.sourceSync.historyStatus,input.sourceSync.lastSyncedAt]);
+      for(const completion of input.idempotencyCompletions??[]){
+        if(completion.projectId!==task.project_id||completion.operation!=="message")throw new Error("Task interaction idempotency completion mismatch");
+        const message=await client.query("select 1 from task_messages where id=$1 and task_id=$2",[completion.resourceId,input.taskId]);
+        if(!message.rowCount)throw new Error("Task interaction idempotency completion mismatch");
+        await client.query(
+          "update task_idempotency_records set status='completed',response_status=$4,response_body=$5::jsonb,updated_at=$6 where project_id=$1 and operation=$2 and resource_id=$3",
+          [completion.projectId,completion.operation,completion.resourceId,completion.responseStatus,JSON.stringify(completion.responseBody),completion.updatedAt]
+        );
+      }
       const nextSeq=Number((await client.query<{maximum:string}>("select coalesce(max(change_seq),0)::text as maximum from task_interaction_changes where task_id=$1",[input.taskId])).rows[0]?.maximum??0);
       const sync = input.sourceSync ? { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt } : { sourceCursor: task.interaction_source_cursor, historyStatus: task.interaction_history_status, lastSyncedAt: task.interaction_last_synced_at ? toIso(task.interaction_last_synced_at) : null };
       return { changes: inserted, latestChangeSeq: nextSeq, ...sync };
@@ -2096,9 +2117,35 @@ export class PostgresProductStore implements ProductStore {
   async listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where task_id=$1 and deleted_at is null order by created_at,id",[taskId]); return rows.map(mapPersistedTaskMessage); }
   async findTaskMessage(id: string): Promise<PersistedTaskMessage | null> { const rows=await this.queryRows<TaskMessageRow>("select * from task_messages where id=$1",[id]);return rows[0]?mapPersistedTaskMessage(rows[0]):null; }
   async listTaskMessagesDue(now:string,limit:number):Promise<PersistedTaskMessage[]>{const rows=await this.queryRows<TaskMessageRow>(`select message.* from task_messages message where message.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=message.task_id and interaction.source_kind='product' and interaction.source_id='message:'||message.id) and (message.delivery_status='pending' or (message.delivery_status='dispatching' and message.lease_expires_at <= $1)) order by message.created_at,message.id limit $2`,[now,limit]);return rows.map(mapPersistedTaskMessage);}
-  async claimTaskMessage(input:TaskDeliveryClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{const located=await client.query<{task_id:string}>("select task_id from task_messages where id=$1",[input.id]);if(!located.rows[0])return null;const source=await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[located.rows[0].task_id]);if(!source.rows[0]||source.rows[0].deleted_at)return null;const rows=await client.query<TaskMessageRow>(`update task_messages target set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,safe_error=null,updated_at=$3 where target.id=$1 and target.delivery_status='pending' and target.claim_token is null and target.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=target.task_id and interaction.source_kind='product' and interaction.source_id='message:'||target.id) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id) and exists (select 1 from task_interaction_changes older_interaction where older_interaction.task_id=older.task_id and older_interaction.source_kind='product' and older_interaction.source_id='message:'||older.id)) returning target.*`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt]);return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;});}
-  async acceptTaskMessage(input:TaskDeliverySuccessInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='accepted',lease_expires_at=null,safe_error=null,updated_at=$3 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
-  async failTaskMessage(input:TaskDeliveryFailureInput):Promise<PersistedTaskMessage|null>{const rows=await this.queryRows<TaskMessageRow>(`update task_messages set delivery_status='failed',safe_error=$3,lease_expires_at=null,updated_at=$4 where id=$1 and delivery_status='dispatching' and claim_token=$2 and deleted_at is null returning *`,[input.id,input.claimToken,input.safeError,input.updatedAt]);return rows[0]?mapPersistedTaskMessage(rows[0]):null;}
+  async claimTaskMessage(input:TaskRunLlmClaimInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{
+    const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+    const run=await selectSandboxRunWithClient(client,input.runId,true);
+    if(!task||task.deleted_at||task.current_run_id!==input.runId||!run||run.taskId!==input.taskId||run.state!=="active"||run.fencingToken!==input.expectedFencingToken||run.currentLlmMessageId)return null;
+    const rows=await client.query<TaskMessageRow>(`update task_messages target set delivery_status='dispatching',claim_token=$2,claimed_at=$3,lease_expires_at=$4,safe_error=null,updated_at=$3 where target.id=$1 and target.task_id=$5 and target.delivery_status='pending' and target.claim_token is null and target.deleted_at is null and exists (select 1 from task_interaction_changes interaction where interaction.task_id=target.task_id and interaction.source_kind='product' and interaction.source_id='message:'||target.id) and not exists (select 1 from task_messages older where older.task_id=target.task_id and older.deleted_at is null and older.delivery_status in ('pending','dispatching') and (older.created_at,older.id)<(target.created_at,target.id) and exists (select 1 from task_interaction_changes older_interaction where older_interaction.task_id=older.task_id and older_interaction.source_kind='product' and older_interaction.source_id='message:'||older.id)) returning target.*`,[input.id,input.claimToken,input.claimedAt,input.leaseExpiresAt,input.taskId]);
+    if(!rows.rows[0])return null;
+    await client.query("update sandbox_runs set current_llm_message_id=$2,updated_at=$3 where run_id=$1",[input.runId,input.id,input.claimedAt]);
+    return mapPersistedTaskMessage(rows.rows[0]);
+  });}
+  async acceptTaskMessage(input:TaskRunLlmMessageInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{
+    const rows=await client.query<TaskMessageRow>(`update task_messages message set delivery_status='accepted',lease_expires_at=null,safe_error=null,updated_at=$4 from agent_tasks task,sandbox_runs run where message.id=$1 and message.task_id=$2 and message.delivery_status='dispatching' and message.claim_token=$3 and message.deleted_at is null and task.id=$2 and task.current_run_id=$5 and task.deleted_at is null and run.run_id=$5 and run.task_id=$2 and run.state='active' and run.current_llm_message_id=$1 returning message.*`,[input.id,input.taskId,input.claimToken,input.updatedAt,input.runId]);
+    return rows.rows[0]?mapPersistedTaskMessage(rows.rows[0]):null;
+  });}
+  async settleTaskRunLlmOwner(input:TaskRunLlmSettlementInput):Promise<PersistedTaskMessage|null>{return transaction(this.pool,async(client)=>{
+    const task=(await client.query<AgentTaskRow>("select * from agent_tasks where id=$1 for update",[input.taskId])).rows[0];
+    const run=await selectSandboxRunWithClient(client,input.runId,true);
+    if(!task||task.deleted_at||task.current_run_id!==input.runId||!run||run.state!=="active"||run.fencingToken!==input.expectedFencingToken||run.currentLlmMessageId!==input.messageId)return null;
+    const rows=await client.query<TaskMessageRow>(input.observedInput
+      ? "update task_messages set delivery_status='accepted',lease_expires_at=null,safe_error=null,updated_at=$3 where id=$1 and task_id=$2 and deleted_at is null returning *"
+      : "update task_messages set delivery_status=case when delivery_status='dispatching' then 'failed' else delivery_status end,lease_expires_at=null,safe_error=case when delivery_status='dispatching' then $4 else safe_error end,updated_at=$3 where id=$1 and task_id=$2 and deleted_at is null returning *",
+      input.observedInput?[input.messageId,input.taskId,input.updatedAt]:[input.messageId,input.taskId,input.updatedAt,input.safeError]);
+    if(!rows.rows[0])return null;
+    await client.query("update sandbox_runs set current_llm_message_id=null,updated_at=$2 where run_id=$1",[input.runId,input.updatedAt]);
+    return mapPersistedTaskMessage(rows.rows[0]);
+  });}
+  async authorizeTaskRunLlmActor(input:TaskRunLlmAuthorizationInput):Promise<{actorId:string;messageId:string}|null>{
+    const rows=await this.queryRows<{actor_id:string;message_id:string}>(`select message.actor_id,message.id as message_id from agent_tasks task join sandbox_runs run on run.run_id=task.current_run_id and run.task_id=task.id join task_messages message on message.id=run.current_llm_message_id and message.task_id=task.id where task.id=$1 and task.current_run_id=$2 and task.deleted_at is null and run.state='active' and message.deleted_at is null and message.actor_id is not null`,[input.taskId,input.runId]);
+    return rows[0]?{actorId:rows[0].actor_id,messageId:rows[0].message_id}:null;
+  }
 
 
   private async queryRows<T>(sql: string, values: unknown[] = []): Promise<T[]> {
@@ -2697,7 +2744,7 @@ const SANDBOX_RUN_COLUMNS = [
   "run_id","workspace_id","project_id","task_id","file_library_id","started_by_user_id","state",
   "namespace","image","pvc_name","project_sub_path","file_library_root_sub_path","botified_port",
   "resource_names","service_key_secret_ref","directories","resource_limits","resource_snapshot","model_ca",
-  "timeline_cursor","terminal_failure","failure_code","failure_cause","fencing_token","startup_ready_at","startup_config_map_name","startup_config_hash","startup_pod_uid","startup_pod_ip","startup_action_deadline_at","startup_claim_token","startup_lease_expires_at","cleanup_claimed_at",
+  "timeline_cursor","current_llm_message_id","terminal_failure","failure_code","failure_cause","fencing_token","startup_ready_at","startup_config_map_name","startup_config_hash","startup_pod_uid","startup_pod_ip","startup_action_deadline_at","startup_claim_token","startup_lease_expires_at","cleanup_claimed_at",
   "cleanup_attempts","last_cleanup_at","last_cleanup_error","release_reason","started_at","release_requested_at",
   "failed_at","released_at","created_at","updated_at"
 ] as const;
@@ -2708,7 +2755,7 @@ function sandboxRunValues(run:PersistedSandboxRunState):unknown[] {
     run.namespace,run.image,run.pvcName,run.projectSubPath,run.fileLibraryRootSubPath,run.botifiedPort,
     JSON.stringify(run.resourceNames),JSON.stringify(run.serviceKeySecretRef),JSON.stringify(run.directories),
     JSON.stringify(run.resourceLimits),JSON.stringify(run.resourceSnapshot),null,
-    run.timelineCursor??null,run.terminalFailure?JSON.stringify(run.terminalFailure):null,run.failureCode,run.failureCause,run.fencingToken,
+    run.timelineCursor??null,run.currentLlmMessageId??null,run.terminalFailure?JSON.stringify(run.terminalFailure):null,run.failureCode,run.failureCause,run.fencingToken,
     run.startupReadyAt,run.startupConfigMapName??null,run.startupConfigHash??null,run.startupPodUid??null,run.startupPodIp??null,run.startupActionDeadlineAt,run.startupClaimToken??null,run.startupLeaseExpiresAt??null,run.cleanupClaimedAt??null,run.cleanupAttempts??0,run.lastCleanupAt??null,
     run.lastCleanupError?JSON.stringify(run.lastCleanupError):null,run.releaseReason??null,run.startedAt,
     run.releaseRequestedAt,run.failedAt,run.releasedAt,run.createdAt,run.updatedAt
@@ -2749,6 +2796,52 @@ async function insertPersistedTaskMessageWithClient(client: PoolClient, message:
     message.id,message.taskId,message.actorId??null,message.content,message.claimToken??null,message.deliveryStatus??"pending",message.claimedAt??null,message.leaseExpiresAt??null,message.safeError??null,message.createdAt,message.updatedAt??message.createdAt,message.deletedAt??null
   ]);
   return inserted.rows[0]!;
+}
+
+async function failOwnedRunLlmMessageWithClient(client:PoolClient,run:PersistedSandboxRunState,updatedAt:string):Promise<PersistedTaskMessage|null>{
+  if(!run.currentLlmMessageId)return null;
+  const locked=await client.query<TaskMessageRow>(
+    "select * from task_messages where id=$1 and task_id=$2 and deleted_at is null for update",
+    [run.currentLlmMessageId,run.taskId]
+  );
+  const current=locked.rows[0];
+  if(!current)return null;
+  if(!["dispatching","accepted"].includes(current.delivery_status))return mapPersistedTaskMessage(current);
+  const settled=current.delivery_status==="accepted"
+    ? mapPersistedTaskMessage(current)
+    : mapPersistedTaskMessage((await client.query<TaskMessageRow>(
+      "update task_messages set delivery_status='failed',lease_expires_at=null,safe_error=$3,updated_at=$4 where id=$1 and task_id=$2 returning *",
+      [current.id,run.taskId,"Sandbox Run ended before message delivery completed.",updatedAt]
+    )).rows[0]!);
+  const previous=(await client.query<TaskInteractionChangeRow>(
+    "select * from task_interaction_changes where task_id=$1 and source_kind='product' and source_id=$2 order by source_revision desc limit 1",
+    [run.taskId,`message:${current.id}`]
+  )).rows[0];
+  if(previous){
+    const mapped=mapTaskInteractionChange(previous);
+    if(mapped.interaction.kind==="user_message"){
+      const status=settled.deliveryStatus==="accepted"?"accepted" as const:"failed" as const;
+      const interaction=mapped.interaction.status===status
+        ? mapped.interaction
+        : {...mapped.interaction,revision:mapped.interaction.revision+1,status,updatedAt};
+      if(mapped.interaction.status!==status)await persistTaskInteractionChangesWithClient(client,run.taskId,[{
+        sourceKind:"product",sourceId:`message:${current.id}`,sourceRevision:mapped.sourceRevision+1,interaction
+      }]);
+      const receipts=await client.query<TaskIdempotencyRow>(
+        "select * from task_idempotency_records where project_id=$1 and operation='message' and resource_id=$2 for update",
+        [run.projectId,current.id]
+      );
+      for(const receipt of receipts.rows){
+        const responseBody=settledTaskMessageEnvelope(receipt.response_body,settled,interaction);
+        if(!responseBody)continue;
+        await client.query(
+          "update task_idempotency_records set status='completed',response_status=200,response_body=$5::jsonb,updated_at=$6 where actor_id=$1 and project_id=$2 and operation=$3 and idempotency_key=$4",
+          [receipt.actor_id,receipt.project_id,receipt.operation,receipt.idempotency_key,JSON.stringify(responseBody),updatedAt]
+        );
+      }
+    }
+  }
+  return settled;
 }
 
 interface UserRow {
@@ -2913,7 +3006,7 @@ interface SandboxRunRow {
   run_id:string;workspace_id:string;project_id:string;task_id:string;file_library_id:string;started_by_user_id:string;
   state:PersistedSandboxRunState["state"];namespace:string;image:string;pvc_name:string;project_sub_path:string;
   file_library_root_sub_path:string;botified_port:number;resource_names:unknown;service_key_secret_ref:unknown;
-  directories:unknown;resource_limits:unknown;resource_snapshot:unknown;model_ca:unknown|null;timeline_cursor:string|null;
+  directories:unknown;resource_limits:unknown;resource_snapshot:unknown;model_ca:unknown|null;timeline_cursor:string|null;current_llm_message_id:string|null;
   terminal_failure:unknown|null;failure_code:PersistedSandboxRunState["failureCode"];failure_cause:string|null;fencing_token:string|number;
   startup_ready_at:unknown|null;startup_config_map_name:string|null;startup_config_hash:string|null;startup_pod_uid:string|null;startup_pod_ip:string|null;startup_action_deadline_at:unknown|null;startup_claim_token:string|null;startup_lease_expires_at:unknown|null;cleanup_claimed_at:unknown|null;cleanup_attempts:number;last_cleanup_at:unknown|null;last_cleanup_error:unknown|null;
   release_reason:PersistedSandboxRunState["releaseReason"];started_at:unknown|null;release_requested_at:unknown|null;
@@ -3155,7 +3248,7 @@ function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
     directories:asRecord(row.directories) as unknown as PersistedSandboxRunState["directories"],
     resourceLimits:asRecord(row.resource_limits) as unknown as PersistedSandboxRunState["resourceLimits"],
     resourceSnapshot:asRecord(row.resource_snapshot) as unknown as PersistedSandboxRunState["resourceSnapshot"],
-    timelineCursor:row.timeline_cursor,
+    timelineCursor:row.timeline_cursor,currentLlmMessageId:row.current_llm_message_id,
     terminalFailure:row.terminal_failure?asRecord(row.terminal_failure) as unknown as NonNullable<PersistedSandboxRunState["terminalFailure"]>:null,
     failureCode:row.failure_code??null,failureCause:row.failure_cause,fencingToken:Number(row.fencing_token),
     startupReadyAt:row.startup_ready_at?toIso(row.startup_ready_at):null,startupConfigMapName:row.startup_config_map_name,startupConfigHash:row.startup_config_hash,startupPodUid:row.startup_pod_uid,startupPodIp:row.startup_pod_ip,startupActionDeadlineAt:row.startup_action_deadline_at?toIso(row.startup_action_deadline_at):null,startupClaimToken:row.startup_claim_token,startupLeaseExpiresAt:row.startup_lease_expires_at?toIso(row.startup_lease_expires_at):null,
@@ -3166,6 +3259,39 @@ function mapSandboxRun(row:SandboxRunRow):PersistedSandboxRunState {
     releaseRequestedAt:row.release_requested_at?toIso(row.release_requested_at):null,failedAt:row.failed_at?toIso(row.failed_at):null,
     releasedAt:row.released_at?toIso(row.released_at):null,createdAt:toIso(row.created_at),updatedAt:toIso(row.updated_at)
   };
+}
+
+function settledTaskMessageEnvelope(value:unknown,message:PersistedTaskMessage,interaction:TaskInteractionItem):unknown|null{
+  if(!value||typeof value!=="object"||Array.isArray(value))return null;
+  const envelope=value as Record<string,unknown>;
+  if(envelope.kind!=="task_message"||envelope.messageId!==message.id||!envelope.receipt||typeof envelope.receipt!=="object"||Array.isArray(envelope.receipt))return null;
+  const receipt=envelope.receipt as Record<string,unknown>;
+  if(message.deliveryStatus==="accepted"){
+    const {safeError:_,...preservedReceipt}=receipt;
+    return structuredClone({
+      ...envelope,
+      receipt:{
+        ...preservedReceipt,messageId:message.id,disposition:"accepted_by_active_run",
+        duplicate:false,queuedMessage:null,interaction
+      }
+    });
+  }
+  const safeError=message.safeError??"Sandbox Run ended before message delivery completed.";
+  return structuredClone({
+    ...envelope,
+    receipt:{
+      ...receipt,
+      messageId:message.id,
+      disposition:"failed",
+      duplicate:false,
+      queuedMessage:{
+        id:message.id,content:message.content,deliveryStatus:"failed",
+        editable:false,deletable:true,safeError,updatedAt:message.updatedAt??message.createdAt
+      },
+      interaction,
+      safeError
+    }
+  });
 }
 function validateTaskRunReservation(input:AtomicTaskCreateInput):void{const expectedRunId=input.sandboxRun?.runId??null;const reservesActive=input.sandboxRun!==undefined&&input.sandboxRun.state!=="released";const run=input.sandboxRun;if(input.task.currentRunId!==expectedRunId||input.reserveActive!==reservesActive||(run!==undefined&&(input.task.id!==run.taskId||input.task.workspaceId!==run.workspaceId||input.task.projectId!==run.projectId||input.task.fileLibraryId!==run.fileLibraryId)))throw new Error("Task Run reservation is inconsistent")}
 

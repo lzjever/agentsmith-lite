@@ -8,7 +8,7 @@ import type { PoolClient } from "pg";
 import { PostgresProductStore } from "../../packages/adapters-postgres/src/postgresProductStore.js";
 import { createCredentialCrypto, credentialAad } from "../../packages/application/src/credentialCrypto.js";
 import { createApplicationServices } from "../../packages/application/src/factory.js";
-import type { ProjectAlertRule } from "../../packages/contracts/src/api.js";
+import type { ProjectAlertRule, TaskInteractionItem } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import type { AtomicTaskMessageEditInput, AtomicTaskMessageInput, BeginTaskIdempotencyInput, BeginTerminalStartInput, CompleteTaskIdempotencyInput, PersistedAgentTask, PersistedSandboxRunState, PersistedTaskArtifact, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 import { readPostgresTestUrl } from "./postgres-test-database.js";
@@ -848,21 +848,9 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     try{
       const read=store.readTaskInteractionChangePage(task.id,0,20);
       await reachedChanges;
-      const claimedAt="2026-07-23T00:01:00.000Z";
-      const claimToken="claim_change_snapshot";
-      assert.ok(await writer.claimTaskMessage({
-        id:pending.id,
-        claimToken,
-        claimedAt,
-        leaseExpiresAt:"2026-07-23T00:06:00.000Z"
-      }));
-      assert.ok(await writer.acceptTaskMessage({
-        id:pending.id,
-        claimToken,
-        updatedAt:"2026-07-23T00:02:00.000Z"
-      }));
       await writer.persistTaskInteractionMutation({
         taskId:task.id,
+        canonicalAcceptedMessageIds:[pending.id],
         changes:[{
           sourceKind:"product",
           sourceId:`message:${pending.id}`,
@@ -1654,7 +1642,8 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
     await store.createTaskMessage(orphan);
     assert.deepEqual(await store.listTaskMessagesDue("2026-07-23T00:02:00.000Z",10),[]);
     assert.equal(await store.claimTaskMessage({
-      id:orphan.id,claimToken:"orphan-claim",claimedAt:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:03:00.000Z"
+      id:orphan.id,taskId:task.id,runId:"missing-run",expectedFencingToken:1,
+      claimToken:"orphan-claim",claimedAt:"2026-07-23T00:02:00.000Z",leaseExpiresAt:"2026-07-23T00:03:00.000Z"
     }),null);
 
     const durable={...message("message_dispatch_durable",task.id),createdAt:"2026-07-23T00:02:00.000Z",updatedAt:"2026-07-23T00:02:00.000Z"};
@@ -1663,9 +1652,53 @@ postgresDescribe("postgres Phase 3 Task atomicity",()=>{
       interaction:{id:"interaction_dispatch_durable",taskId:task.id,kind:"user_message",revision:1,position:1,occurredAt:durable.createdAt,updatedAt:durable.updatedAt!,title:"You",actorId:"user_atomic",body:durable.content,contentMode:"full",status:"pending"}
     }));
     assert.deepEqual((await store.listTaskMessagesDue("2026-07-23T00:03:00.000Z",10)).map((candidate)=>candidate.id),[durable.id]);
-    assert.equal((await store.claimTaskMessage({
-      id:durable.id,claimToken:"durable-claim",claimedAt:"2026-07-23T00:03:00.000Z",leaseExpiresAt:"2026-07-23T00:04:00.000Z"
-    }))?.id,durable.id);
+    assert.equal(await store.claimTaskMessage({
+      id:durable.id,taskId:task.id,runId:"missing-run",expectedFencingToken:1,
+      claimToken:"durable-claim",claimedAt:"2026-07-23T00:03:00.000Z",leaseExpiresAt:"2026-07-23T00:04:00.000Z"
+    }),null);
+  });
+
+  it("claims one PostgreSQL Run LLM owner and authorizes its immutable message actor",async()=>{
+    const task={...taskRecord("task_llm_owner","library_llm_owner","run_llm_owner"),currentRunId:"run_llm_owner"};
+    const sandbox={...run(task,"run_llm_owner","starting"),state:"active" as const,startedAt:at,startupReadyAt:at};
+    const pending={...message("message_llm_owner",task.id),actorId:"user_atomic"};
+    const now="2026-07-23T00:01:00.000Z";
+    assert.equal((await store.createTaskAtomically({
+      task,reserveActive:true,admission:{namespace:"agentsmith",namespaceLimit:100},
+      idempotency:{actorId:"user_atomic",projectId:task.projectId,operation:"create",key:"llm-owner",requestHash:"llm-owner",resourceId:task.id,claimToken:"llm-owner",now,leaseExpiresAt:"2026-07-23T00:02:00.000Z"},
+      rejectionPresentation:null,
+      rejectedAuditEvent:{id:"audit_llm_owner_rejected",projectId:task.projectId,actorId:"user_atomic",action:"task.create",status:"rejected",resourceKind:"task",resourceId:task.id,detail:{taskId:task.id,trigger:"task_create"},createdAt:now},
+      newFileLibrary:library(task.fileLibraryId!,"LLM owner"),sandboxRun:sandbox,initialMessage:pending,
+      initialInteractionChange:{sourceKind:"product",sourceId:`message:${pending.id}`,sourceRevision:0,interaction:{id:"interaction_llm_owner",taskId:task.id,kind:"user_message",revision:1,position:1,occurredAt:now,updatedAt:now,title:"You",actorId:"user_atomic",body:pending.content,contentMode:"full",status:"pending"}}
+    })).kind,"created");
+    const messageOwnership={actorId:"user_atomic",projectId:task.projectId,operation:"message" as const,key:"llm-owner-message",requestHash:"llm-owner-message",resourceId:pending.id,claimToken:"llm-owner-message",now,leaseExpiresAt:"2026-07-23T00:03:00.000Z"};
+    assert.equal((await store.beginTaskIdempotency(messageOwnership)).kind,"claimed");
+    const initialReceipt={kind:"task_message",messageId:pending.id,taskId:task.id,projectId:task.projectId,actorId:"user_atomic",receipt:{messageId:pending.id,disposition:"queued_for_active_run",duplicate:false,queuedMessage:null,interaction:null,presentation:{}}};
+    assert.equal(await store.completeTaskIdempotency({...messageOwnership,responseStatus:200,responseBody:initialReceipt,updatedAt:now}),true);
+    const competing=new PostgresProductStore(postgresUrl!);
+    try{
+      const claims=await Promise.all([
+        store.claimTaskMessage({id:pending.id,taskId:task.id,runId:sandbox.runId,expectedFencingToken:sandbox.fencingToken,claimToken:"claim-a",claimedAt:now,leaseExpiresAt:"2026-07-23T00:03:00.000Z"}),
+        competing.claimTaskMessage({id:pending.id,taskId:task.id,runId:sandbox.runId,expectedFencingToken:sandbox.fencingToken,claimToken:"claim-b",claimedAt:now,leaseExpiresAt:"2026-07-23T00:03:00.000Z"})
+      ]);
+      assert.equal(claims.filter(Boolean).length,1);
+      assert.deepEqual(await store.authorizeTaskRunLlmActor({taskId:task.id,runId:sandbox.runId}),{actorId:"user_atomic",messageId:pending.id});
+      assert.ok(await store.failSandboxRun({runId:sandbox.runId,expectedFencingToken:sandbox.fencingToken,code:"runner_failed",message:"runner failed",failedAt:"2026-07-23T00:02:00.000Z",auditEvent:{id:"audit_llm_owner_failed",projectId:task.projectId,actorId:null,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:task.id,createdAt:"2026-07-23T00:02:00.000Z"}}));
+      assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"failed");
+      const failedInteraction=await store.findLatestTaskInteractionChange(task.id,"interaction_llm_owner");
+      assert.equal(failedInteraction?.interaction.kind==="user_message"?failedInteraction.interaction.status:null,"failed");
+      const acceptedInteraction={...(failedInteraction!.interaction as Extract<TaskInteractionItem,{kind:"user_message"}>),revision:failedInteraction!.interaction.revision+1,status:"accepted" as const,updatedAt:"2026-07-23T00:03:00.000Z"};
+      const acceptedReceipt={...initialReceipt,receipt:{...initialReceipt.receipt,disposition:"accepted_by_active_run",interaction:acceptedInteraction}};
+      await store.persistTaskInteractionMutation({
+        taskId:task.id,changes:[{sourceKind:"botified",sourceId:"cursor:llm-owner",sourceRevision:0,interaction:acceptedInteraction}],
+        canonicalAcceptedMessageIds:[pending.id],
+        idempotencyCompletions:[{projectId:task.projectId,operation:"message",resourceId:pending.id,responseStatus:200,responseBody:acceptedReceipt,updatedAt:"2026-07-23T00:03:00.000Z"}],
+        sourceSync:{expectedSourceCursor:null,sourceCursor:"cursor:llm-owner",historyStatus:"complete",lastSyncedAt:"2026-07-23T00:03:00.000Z"}
+      });
+      assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"accepted");
+      const replay=await store.findTaskIdempotency({actorId:"user_atomic",projectId:task.projectId,operation:"message",key:"llm-owner-message",requestHash:"llm-owner-message"});
+      assert.deepEqual(replay?.kind==="replay"?replay.responseBody:null,acceptedReceipt);
+    }finally{await competing.close();}
   });
 
   it("completes resource idempotency only for the matching Project and operation",async()=>{

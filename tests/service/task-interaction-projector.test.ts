@@ -101,6 +101,20 @@ describe("canonical Botified timeline parsing", () => {
 });
 
 describe("task interaction projection", () => {
+  it("lets canonical acceptance correct an ambiguous local failure",()=>{
+    const failed=projectProduct({
+      sourceKind:"product",type:"message_delivery",taskId:"task-1",sourceId:"message:message-1",
+      sourceRevision:1,occurredAt:"2026-07-13T10:00:00.000Z",position:1,messageId:"message-1",
+      actorId:"actor-a",content:"hello",status:"failed"
+    });
+    const accepted=projectBotified(canonicalEvent(2,"input.accepted",{
+      input_id:"message-1",source:"user",text:"hello"
+    }),state(failed));
+    assert.equal(accepted.interaction?.kind,"user_message");
+    assert.equal(accepted.interaction?.status,"accepted");
+    assert.equal(accepted.interaction?.actorId,"actor-a");
+  });
+
   it("projects the command field emitted by the Botified timeline", () => {
     const projected = projectBotified(canonicalEvent(
       1,

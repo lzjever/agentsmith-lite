@@ -359,6 +359,14 @@ describe("task interactions API", () => {
     await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
     const run=await store.sandboxRuns.get(current.currentRunId);assert.ok(run);
+    const ownerMessage=await store.createPendingTaskMessage(
+      {id:"message_abort_owner",taskId:task.id,actorId:task.createdByUserId??null,content:"still running",deliveryStatus:"pending",createdAt:new Date().toISOString()},
+      {sourceKind:"product",sourceId:"message:message_abort_owner",sourceRevision:0,interaction:{id:"interaction_message_abort_owner",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"still running",contentMode:"full",position:Date.now(),occurredAt:new Date().toISOString(),updatedAt:new Date().toISOString(),actorId:task.createdByUserId??null,status:"pending"}}
+    );assert.ok(ownerMessage);
+    assert.ok(await store.claimTaskMessage({
+      id:ownerMessage.id,taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:"abort-owner",claimedAt:new Date().toISOString(),leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
+    }));
     const presentation=(await auth.requestJson("GET",`/api/v1/tasks/${task.id}/interactions`)).presentation;
     assert.equal(presentation.currentTurn.state,"running");
     assert.equal(Object.hasOwn(presentation.currentTurn,"turnId"),false);
@@ -404,6 +412,16 @@ describe("task interactions API", () => {
     const task=await store.findTask(created.task.id as string);assert.ok(task);
     await makeTaskRunActive(store,task,"http://botified.internal");
     const current=await store.findTask(task.id);assert.ok(current?.currentRunId);
+    const run=await store.sandboxRuns.get(current.currentRunId);assert.ok(run);
+    const ownerAt=new Date().toISOString();
+    const ownerMessage=await store.createPendingTaskMessage(
+      {id:"message_ambiguous_abort_owner",taskId:task.id,actorId:task.createdByUserId??null,content:"still running",deliveryStatus:"pending",createdAt:ownerAt},
+      {sourceKind:"product",sourceId:"message:message_ambiguous_abort_owner",sourceRevision:0,interaction:{id:"interaction_message_ambiguous_abort_owner",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"still running",contentMode:"full",position:Date.now(),occurredAt:ownerAt,updatedAt:ownerAt,actorId:task.createdByUserId??null,status:"pending"}}
+    );assert.ok(ownerMessage);
+    assert.ok(await store.claimTaskMessage({
+      id:ownerMessage.id,taskId:task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+      claimToken:"ambiguous-abort-owner",claimedAt:new Date().toISOString(),leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
+    }));
 
     const response=await auth.request("POST",`/api/v1/tasks/${task.id}/turn/abort`,{
       expectedRunId:current.currentRunId
@@ -412,6 +430,7 @@ describe("task interactions API", () => {
     assert.equal((await response.json()).code,"botified_abort_outcome_unknown");
     assert.equal(botified.abortCalls.length,1);
     assert.equal((await store.sandboxRuns.get(current.currentRunId))?.state,"active");
+    assert.equal((await store.sandboxRuns.get(current.currentRunId))?.currentLlmMessageId,ownerMessage.id);
 
     await createApplicationServices({
       store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
@@ -421,7 +440,7 @@ describe("task interactions API", () => {
     assert.equal(botified.abortCalls.length,1);
   });
 
-  it("never reposts an ambiguous or expired dispatching message",async()=>{
+  it("keeps an ambiguous message owned and never reposts it after restart",async()=>{
     const store=createLocalInMemoryProductStore();
     const botified=new FakeBotifiedClient([]);
     api=await createApiServer({
@@ -445,31 +464,64 @@ describe("task interactions API", () => {
     botified.postMessageError=new TypeError("response lost after dispatch");
     const services=()=>createApplicationServices({
       store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      taskDeliveryLeaseMs:1,
       botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
       providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
     });
 
     await services().tasks.syncActiveTasksOnce();
     assert.equal(botified.postMessageCalls.length,1);
-    assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"failed");
+    assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"dispatching");
+    const ownedTask=await store.findTask(task.id);assert.ok(ownedTask?.currentRunId);
+    assert.equal((await store.sandboxRuns.get(ownedTask.currentRunId))?.currentLlmMessageId,pending.id);
     await services().tasks.syncActiveTasksOnce();
     assert.equal(botified.postMessageCalls.length,1);
-
-    const expired=await store.createPendingTaskMessage(
-      {id:"message_expired_dispatch",taskId:task.id,actorId:task.createdByUserId??null,content:"must not post",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:new Date(Date.now()-60_000).toISOString(),updatedAt:timestamp,deletedAt:null},
-      {sourceKind:"product",sourceId:"message:message_expired_dispatch",sourceRevision:0,interaction:{id:"interaction_message_expired_dispatch",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"must not post",contentMode:"full",position:2,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
-    );
-    assert.ok(expired);
-    assert.ok(await store.claimTaskMessage({
-      id:expired.id,claimToken:"legacy-dispatch",claimedAt:timestamp,
-      leaseExpiresAt:new Date(Date.now()-1_000).toISOString()
-    }));
-    botified.postMessageError=undefined;
-
+    await new Promise((resolve)=>setTimeout(resolve,2));
+    botified.forceIdle=true;
     await services().tasks.syncActiveTasksOnce();
-    const failed=await store.findTaskMessage(expired.id);
-    assert.equal(failed?.deliveryStatus,"failed");
-    assert.match(failed?.safeError??"",/outcome is unknown/i);
+    assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"failed");
+    assert.equal((await store.sandboxRuns.get(ownedTask.currentRunId))?.currentLlmMessageId,null);
+    assert.equal(botified.postMessageCalls.length,1);
+  });
+
+  it("corrects an ambiguous message from canonical acceptance without reposting",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const botified=new FakeBotifiedClient([]);
+    api=await createApiServer({
+      port:0,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,runtimeTickIntervalMs:60_000,store
+    });
+    const auth=await createProjectWithEndpoint(api.baseUrl);
+    const created=await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+      prompt:"canonical ambiguity",endpointId:auth.endpointId,
+      fileLibrary:{mode:"create_new",name:"Canonical ambiguity files"}
+    });
+    const task=await store.findTask(created.task.id as string);assert.ok(task);
+    await makeTaskRunActive(store,task,"http://botified.internal");
+    botified.postMessageCalls.length=0;
+    const timestamp=new Date(Date.now()-120_000).toISOString();
+    const pending=await store.createPendingTaskMessage(
+      {id:"message_canonical_ambiguous",taskId:task.id,actorId:task.createdByUserId??null,content:"run once",claimToken:null,deliveryStatus:"pending",claimedAt:null,leaseExpiresAt:null,safeError:null,createdAt:timestamp,updatedAt:timestamp,deletedAt:null},
+      {sourceKind:"product",sourceId:"message:message_canonical_ambiguous",sourceRevision:0,interaction:{id:"interaction_message_canonical_ambiguous",revision:1,taskId:task.id,kind:"user_message",title:"You",body:"run once",contentMode:"full",position:1,occurredAt:timestamp,updatedAt:timestamp,actorId:task.createdByUserId??null,status:"pending"}}
+    );assert.ok(pending);
+    botified.postMessageError=new TypeError("response lost after dispatch");
+    const services=createApplicationServices({
+      store,dataRoot,builtinAdminPassword:"admin-password",sandboxNamespaceLimit:100,
+      botifiedClient:botified,botifiedServiceKeyFactory:({taskId})=>taskId,
+      providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
+    });
+    await services.tasks.syncActiveTasksOnce();
+    botified.forceIdle=true;
+    botified.runtimeTimelineCursor="evt_proc1_1";
+    botified.enqueueTimeline({status:"ok",events:[{
+      version:"botified.timeline.v1",cursor:"evt_proc1_1",seq:1,time:new Date().toISOString(),
+      session_id:task.id,type:"input.accepted",trace:{cycle_id:"cycle-1"},item:{id:pending.id,type:"input",status:"accepted"},
+      data:{input_id:pending.id,source:"user",text:pending.content}
+    }],nextCursor:"evt_proc1_1"});
+    await services.tasks.syncActiveTasksOnce();
+    assert.equal((await store.findTaskMessage(pending.id))?.deliveryStatus,"accepted");
+    const active=await store.findTask(task.id);assert.ok(active?.currentRunId);
+    assert.equal((await store.sandboxRuns.get(active.currentRunId))?.currentLlmMessageId,null);
     assert.equal(botified.postMessageCalls.length,1);
   });
 
@@ -2777,6 +2829,8 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   previewWaitForAbort = false;
   timelineSessionId: string | undefined;
   stateSessionId: string | undefined;
+  forceIdle = false;
+  runtimeTimelineCursor="idle-cursor";
 
   constructor(private readonly timelineReads: BotifiedTimelineReadResult[]) {}
 
@@ -2802,10 +2856,17 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
   async readState(baseUrl: string, serviceKey: string) {
     this.readStateCalls.push({ baseUrl, serviceKey });
     const sessionId=this.stateSessionId??serviceKey;
+    const idle=this.forceIdle||this.postMessageCalls.length===0;
     return{
       sessionId,
-      snapshot:{session_id:sessionId},
-      state:"running" as const
+      snapshot:{
+        session_id:sessionId,queue_length:idle?0:1,
+        tasks:{running:idle?0:1,cancelling:0,pending_callbacks:0,pending_asks:0},
+        active_items:[]
+      },
+      state:idle?"idle" as const:"running" as const,
+      timelineCursor:this.runtimeTimelineCursor,
+      activeItems:[]
     };
   }
 
@@ -2816,12 +2877,11 @@ class FakeBotifiedClient implements BotifiedRuntimeHttpClient {
       if (next.status === "gap") return next;
       return { ...next, events: next.events.map((event) => ({ ...(event as Record<string,unknown>), session_id: this.timelineSessionId??serviceKey })) };
     }
-    const result: BotifiedTimelineReadResult = { status: "ok", events: [] };
-    if (cursor !== undefined) {
-      result.nextCursor = cursor;
-    }
+    const result: BotifiedTimelineReadResult = { status: "ok", events: [], nextCursor:cursor??"idle-cursor" };
     return result;
   }
+
+  enqueueTimeline(result:BotifiedTimelineReadResult):void{this.timelineReads.push(result);}
 
   async uploadFile(_baseUrl: string, _serviceKey: string, _file: BotifiedUploadFileInput): Promise<BotifiedUploadFileResult> {
     return { files: [] };

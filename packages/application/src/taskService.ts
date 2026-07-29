@@ -78,6 +78,7 @@ import {
 } from "../../sandbox-controller/src/kubernetesPort.js";
 import { sandboxResourceNamesForTask, sandboxServiceNameForTask } from "../../sandbox-controller/src/resourceNames.js";
 import { APP_KUBERNETES_SERVICE_NAME } from "../../sandbox-controller/src/appManifestRenderer.js";
+
 import {
   reconcileSandboxRuns,
   sandboxIdentityLabels,
@@ -86,6 +87,13 @@ import {
 } from "../../sandbox-controller/src/reconciler.js";
 import { sandboxRuntimeConfigMapName } from "../../sandbox-controller/src/manifestRenderer.js";
 import { EndpointService } from "./endpointService.js";
+
+interface TaskTimelineSyncResult {
+  task:PersistedAgentTask;
+  state:BotifiedRuntimeStateResult;
+  timelineCursor:string|null;
+  canonicalAcceptedMessageIds:Set<string>;
+}
 import {
   type SandboxKubernetesInventoryPort,
   type SandboxLifecycleService
@@ -1184,13 +1192,20 @@ export class TaskService {
     };
     await this.reconcileTaskPreparations(result.failedTaskIds);
     await this.reconcileTerminalStartups(result.failedTaskIds);
-    for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){try{await this.dispatchTaskMessage(message,true);}catch{result.failedTaskIds.push(message.taskId);}}
+    for(const message of await this.store.listTaskMessagesDue(nowIso(),100)){
+      try{
+        const task=await this.store.findTask(message.taskId);
+        const actorId=message.actorId??task?.createdByUserId;
+        if(task&&actorId)await this.ensureLiveSandbox(actorId,task);
+      }catch{result.failedTaskIds.push(message.taskId);}
+    }
     const activeSandboxes = await this.store.listActiveTasks();
     result.activeTaskCount=activeSandboxes.length;
     for (const task of activeSandboxes) {
       try {
         if(!await this.activeSandboxRun(task))continue;
-        await this.syncTaskTimeline(task);
+        const synced=await this.syncTaskTimeline(task);
+        await this.reconcileTaskRunLlmOwner(synced);
         result.syncedTaskIds.push(task.id);
       } catch {
         result.failedTaskIds.push(task.id);
@@ -1198,6 +1213,30 @@ export class TaskService {
     }
     result.syncedTaskIds=[...new Set(result.syncedTaskIds)];result.failedTaskIds=[...new Set(result.failedTaskIds)];
     return result;
+  }
+
+  private async reconcileTaskRunLlmOwner(synced:TaskTimelineSyncResult):Promise<void>{
+    if(!isBotifiedSessionQuiescent(synced.state,synced.timelineCursor))return;
+    let run=synced.task.currentRunId?await this.store.sandboxRuns.get(synced.task.currentRunId):null;
+    if(!run||run.state!=="active"||!taskMatchesExactSandboxRun(synced.task,run))return;
+    if(run.currentLlmMessageId){
+      const message=await this.store.findTaskMessage(run.currentLlmMessageId);
+      const observed=synced.canonicalAcceptedMessageIds.has(run.currentLlmMessageId)||message?.deliveryStatus==="accepted";
+      if(!observed&&(!message?.leaseExpiresAt||message.leaseExpiresAt>nowIso()))return;
+      const settled=await this.store.settleTaskRunLlmOwner({
+        taskId:synced.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+        messageId:run.currentLlmMessageId,observedInput:observed,
+        safeError:"Message delivery outcome was not observed by the canonical runtime.",
+        updatedAt:nowIso()
+      });
+      if(!settled)return;
+      await this.persistMessageInteraction(settled);
+      if(isSettledMessage(settled))await this.completeMessageIdempotency(settled);
+      run=await this.store.sandboxRuns.get(run.runId);
+      if(!run||run.currentLlmMessageId)return;
+    }
+    const pending=(await this.store.listTaskMessages(synced.task.id)).find((message)=>message.deliveryStatus==="pending");
+    if(pending)await this.dispatchTaskMessage(pending,true);
   }
 
   private async reconcileTaskPreparations(failedTaskIds:string[]):Promise<void>{
@@ -1274,12 +1313,7 @@ export class TaskService {
     let source=await this.store.findTask(message.taskId);
     if (!source) throw new ProductError("Task not found", 404);
     if (message.deliveryStatus === "dispatching") {
-      if(!message.claimToken||!message.leaseExpiresAt||message.leaseExpiresAt>nowIso())return message;
-      return this.failClaimedTaskMessage(
-        message,
-        "Message delivery outcome is unknown; it was not sent again.",
-        completeIdempotency
-      );
+      return message;
     }
 
     const firstWaiting=(await this.store.listTaskMessages(source.id))
@@ -1294,11 +1328,13 @@ export class TaskService {
       const runtime=await this.readRuntimeState(source,serviceKey);
       const run=source.currentRunId?await this.store.sandboxRuns.get(source.currentRunId):null;
       if(!run||!taskMatchesExactSandboxRun(source,run)||run.state!=="active"||run.startupReadyAt===null)return message;
-      await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
+      const botifiedState=await this.readVerifiedBotifiedState(source,runtime.baseUrl,serviceKey);
+      const snapshot=await this.store.readTaskInteractionSnapshot(source.id,null,1);
+      if(!snapshot||!isBotifiedSessionQuiescent(botifiedState,snapshot.sourceCursor))return message;
 
       const timestamp=nowIso();
       const claimed=await this.store.claimTaskMessage({
-        id:message.id,
+        id:message.id,taskId:source.id,runId:run.runId,expectedFencingToken:run.fencingToken,
         claimToken:newId("delivery_claim"),
         claimedAt:timestamp,
         leaseExpiresAt:deadlineIso(timestamp,this.deliveryLeaseMs())
@@ -1309,7 +1345,7 @@ export class TaskService {
 
       await this.botified.postMessage(runtime.baseUrl,serviceKey,{messageId:message.id,text:message.content});
       const accepted=await this.store.acceptTaskMessage({
-        id:message.id,
+        id:message.id,taskId:source.id,runId:run.runId,
         claimToken:message.claimToken!,
         updatedAt:nowIso()
       });
@@ -1320,21 +1356,8 @@ export class TaskService {
       return accepted;
     }catch(error){
       if(message.deliveryStatus!=="dispatching"||!message.claimToken)throw error;
-      return this.failClaimedTaskMessage(
-        message,
-        `Message delivery outcome is unknown: ${safeTaskStageError(error)}`,
-        completeIdempotency
-      );
+      return message;
     }
-  }
-
-  private async failClaimedTaskMessage(message:PersistedTaskMessage,safeError:string,completeIdempotency:boolean):Promise<PersistedTaskMessage>{
-    if(!message.claimToken)return await this.store.findTaskMessage(message.id)??message;
-    const failed=await this.store.failTaskMessage({id:message.id,claimToken:message.claimToken,safeError,updatedAt:nowIso()});
-    const settled=failed??await this.store.findTaskMessage(message.id)??message;
-    if(failed)await this.persistMessageInteraction(failed);
-    if(completeIdempotency&&isSettledMessage(settled))await this.completeMessageIdempotency(settled);
-    return settled;
   }
 
   private deliveryLeaseMs():number{return resolveDurationMs(this.config.deliveryLeaseMs,DEFAULT_DELIVERY_LEASE_MS);}
@@ -1595,6 +1618,7 @@ export class TaskService {
   private projectStartupFailedRun(run:PersistedSandboxRunState,failedAt:string):PersistedSandboxRunState{
     return{
       ...run,
+      currentLlmMessageId:null,
       state:"failed",
       failureCode:"startup_failed",
       failureCause:"Sandbox startup did not complete. Retry release to remove its resources.",
@@ -1617,7 +1641,7 @@ export class TaskService {
     return{task,run};
   }
 
-  private async syncTaskTimeline(task: PersistedAgentTask): Promise<PersistedAgentTask> {
+  private async syncTaskTimeline(task: PersistedAgentTask): Promise<TaskTimelineSyncResult> {
     const previous = this.taskTimelineSyncs.get(task.id) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
@@ -1631,7 +1655,7 @@ export class TaskService {
     }
   }
 
-  private async syncTaskTimelineUnlocked(task: PersistedAgentTask): Promise<PersistedAgentTask> {
+  private async syncTaskTimelineUnlocked(task: PersistedAgentTask): Promise<TaskTimelineSyncResult> {
     const serviceKey = this.serviceKeyForTask(task);
     const state = await this.readRuntimeState(task, serviceKey);
     const snapshot = await this.store.readTaskInteractionSnapshot(task.id, null, INTERACTION_LOOKUP_LIMIT);
@@ -1645,6 +1669,10 @@ export class TaskService {
     const inBatchCorrelations = new Map<string, TaskInteractionProjectionState>();
     const artifactProjections: PersistTaskArtifactProjectionInput[] = [];
     const newlyWrittenArtifactPaths: string[] = [];
+    const canonicalAcceptedMessageIds=new Set(timeline.events.flatMap((event)=>
+      (event.type==="input.accepted"||event.type==="input.queued")&&stringValue(event.data.input_id)
+        ?[stringValue(event.data.input_id)!]:[]
+    ));
     const candidateArtifactFileIds=[...new Set(timeline.events.flatMap((event)=>{
       const fileId=stringValue(event.data.file_id)??(event.item?.type==="file"?event.item.id:undefined);
       return fileId?[fileId]:[];
@@ -1679,11 +1707,27 @@ export class TaskService {
       }
     }
     const syncedAt = nowIso();
+    const acceptedMessages=messages
+      .filter((message)=>canonicalAcceptedMessageIds.has(message.id)&&message.actorId)
+      .map((message)=>({...message,deliveryStatus:"accepted" as const,leaseExpiresAt:null,safeError:null,updatedAt:syncedAt}));
+    const receiptMessages=messages.map((message)=>acceptedMessages.find((accepted)=>accepted.id===message.id)??message);
+    const idempotencyCompletions=[];
+    for(const message of acceptedMessages){
+      const seeded=projectTaskInteraction(messageProductSource(message),null,redaction).interaction;
+      const interaction=seeded?latest.get(seeded.id)??seeded:null;
+      const receipt=await this.messageReceiptFromState(message.actorId!,task,message,false,receiptMessages,interaction);
+      idempotencyCompletions.push({
+        projectId:task.projectId,operation:taskOperation("message"),resourceId:message.id,
+        responseStatus:200,responseBody:taskMessageIdempotencyEnvelope(message,task,message.actorId!,receipt),updatedAt:syncedAt
+      });
+    }
     try {
       if(artifactProjections.length)await this.reconcileTaskLibraryBytes(task);
       await this.store.persistTaskInteractionMutation({
         taskId: task.id,
         changes,
+        ...(canonicalAcceptedMessageIds.size?{canonicalAcceptedMessageIds:[...canonicalAcceptedMessageIds]}:{}),
+        ...(idempotencyCompletions.length?{idempotencyCompletions}:{}),
         ...(artifactProjections.length ? { artifactProjections } : {}),
         sourceSync: {
           expectedSourceCursor: snapshot.sourceCursor,
@@ -1698,8 +1742,9 @@ export class TaskService {
       throw error;
     }
     await this.writeRuntimeState(task.id, { ...state, lastSyncedAt:syncedAt });
+    const botifiedState=await this.readVerifiedBotifiedState(task,state.baseUrl,serviceKey);
     const updated = await this.store.findTask(task.id) ?? task;
-    return updated;
+    return {task:updated,state:botifiedState,timelineCursor:timeline.nextCursor,canonicalAcceptedMessageIds};
   }
 
   private async readCanonicalTimeline(task:PersistedAgentTask,baseUrl: string, serviceKey: string, sourceCursor: string | null, historyStatus: TaskHistoryStatus): Promise<{ events: BotifiedTimelineEvent[]; nextCursor: string | null; historyStatus: TaskHistoryStatus }> {
@@ -2001,6 +2046,8 @@ export class TaskService {
     if (!run||run.runId!==runId||run.state!=="active") {
       throw new ProductError("Botified task is not active", 409);
     }
+    const llmOwner=await this.store.authorizeTaskRunLlmActor({taskId,runId});
+    if(!llmOwner)throw new ProductError("Botified Task has no active LLM message owner",409);
     const endpoint = await this.endpoints.requireHealthyCredentialEndpoint(task.projectId, task.endpointId);
     requireTaskEndpointCapabilities(endpoint);
     const credentials = this.config.credentials;
@@ -2011,7 +2058,7 @@ export class TaskService {
     if (endpointBaseUrl !== credentialBaseUrl) {
       throw new ProductError("Endpoint baseUrl does not match the configured credential binding");
     }
-    return { endpoint, apiKey: credential.apiKey, projectId: task.projectId, actorId:task.createdByUserId??null };
+    return { endpoint, apiKey: credential.apiKey, projectId: task.projectId, actorId:llmOwner.actorId };
   }
 
   private buildLiveSandboxRun(input: {

@@ -61,9 +61,10 @@ import type {
   TaskStoreListPage,
   TaskArtifactStoreListQuery,
   TaskArtifactStoreListPage,
-  TaskDeliveryClaimInput,
-  TaskDeliverySuccessInput,
-  TaskDeliveryFailureInput,
+  TaskRunLlmClaimInput,
+  TaskRunLlmMessageInput,
+  TaskRunLlmSettlementInput,
+  TaskRunLlmAuthorizationInput,
   BeginTaskIdempotencyInput,
   TaskIdempotencyBeginResult,
   CompleteTaskIdempotencyInput,
@@ -900,6 +901,7 @@ export class InMemoryProductStore implements ProductStore {
       const existing=this.sandboxUsageSettlements.get(input.runId);
       if(existing&&!sameSettlement(existing,input.settlement))throw new Error("Sandbox usage settlement conflict");
       if(replay){if(!existing)throw new Error("Sandbox usage settlement conflict");}
+      this.failOwnedRunLlmMessage(input.run,input.run.updatedAt);
       const restoreReceipt=this.terminalizeTerminalStartOwner(input.run,input.run.updatedAt);
       if(input.releaseReceipt){
         for(const [key,record] of this.taskIdempotency){
@@ -921,7 +923,10 @@ export class InMemoryProductStore implements ProductStore {
     }));}catch(error){if(error instanceof Error&&(error.message==="Sandbox usage settlement conflict"||error.message==="Sandbox usage task conflict"))return"conflict";throw error}
   }
   async failSandboxRun(input:SandboxRunFailureInput):Promise<PersistedSandboxRunState|null>{
-    return this.sandboxRunRecords.fail(input,(event,failed)=>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const ownedRun=await this.sandboxRunRecords.get(input.runId);
+      return this.sandboxRunRecords.fail(input,(event,failed)=>{
+      this.failOwnedRunLlmMessage(ownedRun??failed,input.failedAt);
       const restoreReceipt=this.terminalizeTerminalStartOwner(failed,input.failedAt);
       try{
         if(!this.auditEvents.some((current)=>current.id===event.id))this.auditEvents.push(clone({...event,detail:sanitizeProjectAuditDetail(event.detail)}));
@@ -929,6 +934,7 @@ export class InMemoryProductStore implements ProductStore {
         restoreReceipt();
         throw error;
       }
+      });
     });
   }
   async failTaskSandboxStartupAtomically(input:FailTaskSandboxStartupAtomicallyInput):Promise<FailTaskSandboxStartupAtomicallyResult>{
@@ -1536,6 +1542,7 @@ export class InMemoryProductStore implements ProductStore {
       )return"conflict" as const;
       return this.sandboxRunRecords.requestExplicitCleanup(input,(current,requested)=>{
         if(!taskRunScopeMatches(task,current))throw new Error("Sandbox release Task scope changed");
+        this.failOwnedRunLlmMessage(current,input.idempotency.updatedAt);
         this.terminalizeTerminalStartOwner(requested,input.idempotency.updatedAt);
         if(current.state==="released"){
           this.taskIdempotency.set(key,{
@@ -1546,7 +1553,7 @@ export class InMemoryProductStore implements ProductStore {
       });
     });
   }
-  async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.projectId!==input.projectId||record.operation!==input.operation||record.resourceId!==input.resourceId||record.status!=="in_progress")continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.responseStatus,responseBody:clone(input.responseBody),updatedAt:input.updatedAt});completed+=1;}return completed;}
+  async completeTaskIdempotencyForResource(input:CompleteTaskIdempotencyForResourceInput):Promise<number>{let completed=0;for(const [key,record] of this.taskIdempotency){if(record.projectId!==input.projectId||record.operation!==input.operation||record.resourceId!==input.resourceId)continue;this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:input.responseStatus,responseBody:clone(input.responseBody),updatedAt:input.updatedAt});completed+=1;}return completed;}
 
   async persistTaskInteractionMutation(input: PersistTaskInteractionMutationInput): Promise<PersistTaskInteractionMutationResult> {
     const task = this.tasks.get(input.taskId);
@@ -1557,6 +1564,7 @@ export class InMemoryProductStore implements ProductStore {
     const previousTasks = [...this.tasks.entries()].map(([id, value]) => [id, clone(value)] as const);
     const previousMessages = this.messages.map(clone);
     const previousUsage = [...this.usage.entries()].map(([id, value]) => [id, clone(value)] as const);
+    const previousIdempotency = [...this.taskIdempotency.entries()].map(([id,value]) => [id,clone(value)] as const);
     const previousSync = clone(this.interactionSync.get(input.taskId));
     try {
       const sync = this.interactionSync.get(input.taskId) ?? { sourceCursor: null, historyStatus: "gap" as const, lastSyncedAt: null };
@@ -1573,9 +1581,23 @@ export class InMemoryProductStore implements ProductStore {
         }
         if (!this.auditEvents.some((event) => event.id === projection.auditEvent.id)) this.auditEvents.push(clone({...projection.auditEvent,detail:sanitizeProjectAuditDetail(projection.auditEvent.detail)}));
       }
+      for(const messageId of input.canonicalAcceptedMessageIds??[]){
+        const index=this.messages.findIndex((message)=>message.id===messageId&&message.taskId===input.taskId&&!message.deletedAt);
+        const message=this.messages[index];
+        if(message&&message.deliveryStatus!=="accepted"){
+          this.messages[index]=clone({...message,deliveryStatus:"accepted",leaseExpiresAt:null,safeError:null,updatedAt:input.sourceSync?.lastSyncedAt??message.updatedAt??message.createdAt});
+        }
+      }
       const inserted = this.appendInteractionChanges(input.taskId, input.changes);
       if (input.sourceSync) {
         this.interactionSync.set(input.taskId, { sourceCursor: input.sourceSync.sourceCursor, historyStatus: input.sourceSync.historyStatus, lastSyncedAt: input.sourceSync.lastSyncedAt });
+      }
+      for(const completion of input.idempotencyCompletions??[]){
+        if(completion.projectId!==task.projectId||completion.operation!=="message"||
+          !this.messages.some((message)=>message.id===completion.resourceId&&message.taskId===input.taskId)){
+          throw new Error("Task interaction idempotency completion mismatch");
+        }
+        await this.completeTaskIdempotencyForResource(completion);
       }
       const nextSeq = this.interactionChanges.filter((value) => value.interaction.taskId === input.taskId).reduce((maximum, value) => Math.max(maximum, value.changeSeq), 0);
       const storedSync = this.interactionSync.get(input.taskId) ?? sync;
@@ -1589,6 +1611,8 @@ export class InMemoryProductStore implements ProductStore {
       this.messages.splice(0, this.messages.length, ...previousMessages);
       this.usage.clear();
       for (const [id, value] of previousUsage) this.usage.set(id, value);
+      this.taskIdempotency.clear();
+      for (const [id,value] of previousIdempotency) this.taskIdempotency.set(id,value);
       if (previousSync) this.interactionSync.set(input.taskId, previousSync);
       else this.interactionSync.delete(input.taskId);
       throw error;
@@ -1709,30 +1733,89 @@ export class InMemoryProductStore implements ProductStore {
       message.deliveryStatus === "dispatching" && Boolean(message.leaseExpiresAt && message.leaseExpiresAt <= now)
     )).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)).slice(0, limit).map(clone);
   }
-  async claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === input.id);
-    const current = this.messages[index];
-    const source=current?this.tasks.get(current.taskId):undefined;
-    if (!current || !source || source.deletedAt || current.deletedAt || !hasPersistedMessageInteraction(this.interactionChanges,current) || (current.deliveryStatus ?? "pending") !== "pending" || current.claimToken || hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current)) return null;
-    const updated: PersistedTaskMessage = { ...current, deliveryStatus: "dispatching", claimToken: input.claimToken, claimedAt: input.claimedAt, leaseExpiresAt: input.leaseExpiresAt, safeError: null, updatedAt: input.claimedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
+  async claimTaskMessage(input: TaskRunLlmClaimInput): Promise<PersistedTaskMessage | null> {
+    return this.atomicTaskMessageMutation([],async()=>{
+      const index=this.messages.findIndex((value)=>value.id===input.id);
+      const current=this.messages[index],source=current?this.tasks.get(current.taskId):undefined;
+      const run=await this.sandboxRunRecords.get(input.runId);
+      if(!current||!source||source.deletedAt||source.id!==input.taskId||source.currentRunId!==input.runId||
+        !run||run.taskId!==input.taskId||run.state!=="active"||run.fencingToken!==input.expectedFencingToken||
+        run.currentLlmMessageId||current.deletedAt||!hasPersistedMessageInteraction(this.interactionChanges,current)||
+        (current.deliveryStatus??"pending")!=="pending"||current.claimToken||
+        hasOlderUnresolvedMessage(this.messages,this.interactionChanges,current))return null;
+      const updated:PersistedTaskMessage={...current,deliveryStatus:"dispatching",claimToken:input.claimToken,claimedAt:input.claimedAt,leaseExpiresAt:input.leaseExpiresAt,safeError:null,updatedAt:input.claimedAt};
+      this.messages[index]=clone(updated);
+      await this.sandboxRunRecords.put({...run,currentLlmMessageId:current.id,updatedAt:input.claimedAt});
+      return clone(updated);
+    });
   }
-  async acceptTaskMessage(input: TaskDeliverySuccessInput): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === input.id);
-    const current = this.messages[index];
-    if (!current || current.deletedAt || current.deliveryStatus!=="dispatching" || current.claimToken !== input.claimToken) return null;
-    const updated: PersistedTaskMessage = { ...current, deliveryStatus:"accepted", leaseExpiresAt:null, safeError:null, updatedAt:input.updatedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
+  async acceptTaskMessage(input:TaskRunLlmMessageInput):Promise<PersistedTaskMessage|null>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const index=this.messages.findIndex((value)=>value.id===input.id);
+      const current=this.messages[index],task=this.tasks.get(input.taskId);
+      const run=await this.sandboxRunRecords.get(input.runId);
+      if(!current||current.taskId!==input.taskId||!task||task.currentRunId!==input.runId||
+        !run||run.state!=="active"||run.taskId!==input.taskId||run.currentLlmMessageId!==input.id||
+        current.deletedAt||current.deliveryStatus!=="dispatching"||current.claimToken!==input.claimToken)return null;
+      const updated:PersistedTaskMessage={...current,deliveryStatus:"accepted",leaseExpiresAt:null,safeError:null,updatedAt:input.updatedAt};
+      this.messages[index]=clone(updated);
+      return clone(updated);
+    });
   }
-  async failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null> {
-    const index = this.messages.findIndex((value) => value.id === input.id);
-    const current = this.messages[index];
-    if (!current || current.deletedAt || current.deliveryStatus !== "dispatching" || current.claimToken !== input.claimToken) return null;
-    const updated: PersistedTaskMessage = { ...current, deliveryStatus: "failed", safeError: input.safeError, leaseExpiresAt: null, updatedAt: input.updatedAt };
-    this.messages[index] = clone(updated);
-    return clone(updated);
+  async settleTaskRunLlmOwner(input:TaskRunLlmSettlementInput):Promise<PersistedTaskMessage|null>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const task=this.tasks.get(input.taskId),run=await this.sandboxRunRecords.get(input.runId);
+      const index=this.messages.findIndex((message)=>message.id===input.messageId),message=this.messages[index];
+      if(!task||task.currentRunId!==input.runId||!run||run.state!=="active"||run.fencingToken!==input.expectedFencingToken||
+        run.currentLlmMessageId!==input.messageId||!message||message.taskId!==input.taskId||message.deletedAt)return null;
+      let settled=message;
+      if(input.observedInput&&message.deliveryStatus!=="accepted")settled={...message,deliveryStatus:"accepted",leaseExpiresAt:null,safeError:null,updatedAt:input.updatedAt};
+      else if(!input.observedInput&&message.deliveryStatus==="dispatching")settled={...message,deliveryStatus:"failed",leaseExpiresAt:null,safeError:input.safeError,updatedAt:input.updatedAt};
+      this.messages[index]=clone(settled);
+      await this.sandboxRunRecords.put({...run,currentLlmMessageId:null,updatedAt:input.updatedAt});
+      return clone(settled);
+    });
+  }
+  async authorizeTaskRunLlmActor(input:TaskRunLlmAuthorizationInput):Promise<{actorId:string;messageId:string}|null>{
+    return this.atomicTaskMessageMutation([],async()=>{
+      const task=this.tasks.get(input.taskId),run=await this.sandboxRunRecords.get(input.runId);
+      if(!task||task.deletedAt||task.currentRunId!==input.runId||!run||run.state!=="active"||run.taskId!==input.taskId||!run.currentLlmMessageId)return null;
+      const message=this.messages.find((candidate)=>candidate.id===run.currentLlmMessageId&&!candidate.deletedAt);
+      return message?.taskId===input.taskId&&message.actorId?{actorId:message.actorId,messageId:message.id}:null;
+    });
+  }
+
+  private failOwnedRunLlmMessage(run:PersistedSandboxRunState,updatedAt:string):PersistedTaskMessage|null{
+    if(!run.currentLlmMessageId)return null;
+    const index=this.messages.findIndex((message)=>message.id===run.currentLlmMessageId&&message.taskId===run.taskId&&!message.deletedAt);
+    const current=this.messages[index];
+    if(!current||!["dispatching","accepted"].includes(current.deliveryStatus??""))return current??null;
+    const settled=current.deliveryStatus==="accepted"
+      ? current
+      : {...current,deliveryStatus:"failed" as const,leaseExpiresAt:null,safeError:"Sandbox Run ended before message delivery completed.",updatedAt};
+    this.messages[index]=clone(settled);
+    const previous=this.interactionChanges
+      .filter((change)=>change.interaction.taskId===run.taskId&&change.sourceKind==="product"&&change.sourceId===`message:${current.id}`)
+      .sort((left,right)=>right.sourceRevision-left.sourceRevision)[0];
+    if(previous?.interaction.kind==="user_message"){
+      const status=settled.deliveryStatus==="accepted"?"accepted" as const:"failed" as const;
+      const interaction=previous.interaction.status===status
+        ? previous.interaction
+        : {...previous.interaction,revision:previous.interaction.revision+1,status,updatedAt};
+      if(previous.interaction.status!==status)this.appendInteractionChanges(run.taskId,[{
+        sourceKind:"product",sourceId:`message:${current.id}`,sourceRevision:previous.sourceRevision+1,interaction
+      }]);
+      this.updateOwnedMessageReceipts(run.projectId,settled,interaction);
+    }
+    return clone(settled);
+  }
+
+  private updateOwnedMessageReceipts(projectId:string,message:PersistedTaskMessage,interaction:TaskInteractionItem):void{
+    for(const [key,record] of this.taskIdempotency){
+      if(record.projectId!==projectId||record.operation!=="message"||record.resourceId!==message.id)continue;
+      const responseBody=settledTaskMessageEnvelope(record.responseBody,message,interaction);
+      if(responseBody)this.taskIdempotency.set(key,{...record,status:"completed",responseStatus:200,responseBody,updatedAt:message.updatedAt??message.createdAt});
+    }
   }
 
   private appendInteractionChanges(taskId: string, changes: TaskInteractionChangeInput[]): PersistedTaskInteractionChange[] {
@@ -2008,8 +2091,9 @@ class InMemorySandboxRunStore {
       if(!current||current.taskId!==input.taskId||current.runId!==input.runId)return"conflict";
       const already=current.state==="release_requested"||current.state==="released";
       if(current.fencingToken!==input.expectedFencingToken)return"conflict";
-      const requested=current.state==="released"?current:{
+      const requested=current.state==="released"?{...current,currentLlmMessageId:null}:{
         ...current,
+        currentLlmMessageId:null,
         state:"release_requested" as const,
         releaseReason:current.releaseReason??(current.state==="failed"?"failed":"requested"),
         releaseRequestedAt:current.releaseRequestedAt??input.intent.requestedAt,
@@ -2029,7 +2113,7 @@ class InMemorySandboxRunStore {
     return this.serializeMutation(async()=>{
       const current=this.runs.get(input.runId);
       if(!current||current.fencingToken!==input.expectedFencingToken||input.startupClaimToken!==undefined&&current.startupClaimToken!==input.startupClaimToken||!["starting","active"].includes(current.state))return null;
-      const failed:PersistedSandboxRunState={...current,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
+      const failed:PersistedSandboxRunState={...current,currentLlmMessageId:null,state:"failed",failureCode:input.code,failureCause:input.message,terminalFailure:input.terminalFailure??current.terminalFailure??null,releaseReason:"failed",failedAt:current.failedAt??input.failedAt,releaseRequestedAt:current.releaseRequestedAt??input.failedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,fencingToken:current.fencingToken+1,updatedAt:input.failedAt};
       this.runs.set(input.runId,clone(failed));
       try{commit(input.auditEvent,failed);return clone(failed);}catch(error){this.runs.set(input.runId,clone(current));throw error;}
     });
@@ -2140,7 +2224,7 @@ class InMemorySandboxRunStore {
     return this.serializeMutation(async()=>{
       const run=this.runs.get(input.runId),task=readTask();
       if(!run||!task||run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||run.startupClaimToken!==input.claimToken||run.startupActionDeadlineAt!==input.actionDeadlineAt||input.actionDeadlineAt>input.drainedAt||run.cleanupClaimedAt===null||task.currentRunId!==run.runId||!taskRunScopeMatches(task,run))return null;
-      const drained={...run,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
+      const drained={...run,currentLlmMessageId:null,state:"failed" as const,failureCode:input.failureCode,failureCause:input.failureMessage,releaseReason:"failed" as const,failedAt:run.failedAt??input.drainedAt,releaseRequestedAt:run.releaseRequestedAt??input.drainedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:input.drainedAt,lastCleanupError:null,fencingToken:run.fencingToken+1,updatedAt:input.drainedAt};
       this.runs.set(run.runId,clone(drained));
       try{commit(input.auditEvent,drained);return clone(drained);}catch(error){this.runs.set(run.runId,clone(run));throw error;}
     });
@@ -2179,7 +2263,7 @@ class InMemorySandboxRunStore {
       if(current.state==="released"){commit(true);return"already_applied";}
       if(current.startupActionDeadlineAt&&current.startupActionDeadlineAt>input.run.updatedAt)return"conflict";
       if(current.fencingToken!==input.expectedFencingToken||input.run.fencingToken!==current.fencingToken+1||input.run.state!=="released"||input.run.startupActionDeadlineAt!==null||!settlementMatchesRun(input.settlement,current,input.run))return"conflict";
-      try{this.runs.set(input.runId,clone(input.run));commit(false);return"applied";}catch(error){this.runs.set(current.runId,clone(current));throw error}
+      try{this.runs.set(input.runId,clone({...input.run,currentLlmMessageId:null}));commit(false);return"applied";}catch(error){this.runs.set(current.runId,clone(current));throw error}
     });
   }
 
@@ -2397,6 +2481,39 @@ function normalizeStoredMessage(message: PersistedTaskMessage): PersistedTaskMes
     updatedAt: message.updatedAt ?? message.createdAt,
     deletedAt: message.deletedAt ?? null
   };
+}
+
+function settledTaskMessageEnvelope(value:unknown,message:PersistedTaskMessage,interaction:TaskInteractionItem):unknown|null{
+  if(!value||typeof value!=="object"||Array.isArray(value))return null;
+  const envelope=value as Record<string,unknown>;
+  if(envelope.kind!=="task_message"||envelope.messageId!==message.id||!envelope.receipt||typeof envelope.receipt!=="object"||Array.isArray(envelope.receipt))return null;
+  const receipt=envelope.receipt as Record<string,unknown>;
+  if(message.deliveryStatus==="accepted"){
+    const {safeError:_,...preservedReceipt}=receipt;
+    return clone({
+      ...envelope,
+      receipt:{
+        ...preservedReceipt,messageId:message.id,disposition:"accepted_by_active_run",
+        duplicate:false,queuedMessage:null,interaction
+      }
+    });
+  }
+  const safeError=message.safeError??"Sandbox Run ended before message delivery completed.";
+  return clone({
+    ...envelope,
+    receipt:{
+      ...receipt,
+      messageId:message.id,
+      disposition:"failed",
+      duplicate:false,
+      queuedMessage:{
+        id:message.id,content:message.content,deliveryStatus:"failed",
+        editable:false,deletable:true,safeError,updatedAt:message.updatedAt??message.createdAt
+      },
+      interaction,
+      safeError
+    }
+  });
 }
 
 function validateInteractionChange(taskId: string, change: PersistTaskInteractionMutationInput["changes"][number]): void {

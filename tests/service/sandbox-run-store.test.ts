@@ -4,6 +4,78 @@ import { createLocalInMemoryProductStore } from "../../packages/adapters-postgre
 import type { AtomicTaskMessageInput, CompleteTaskIdempotencyInput, PersistedSandboxRunState, PersistedTaskMessage } from "../../packages/ports/src/store.js";
 
 describe("sandbox Run store", () => {
+  it("owns one shared-Task LLM actor until quiescent settlement",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({state:"active",startedAt:runTimestamp(0),startupReadyAt:runTimestamp(0)});
+    await createTaskWithRun(store,run);
+    const interaction=(id:string,actorId:string,position:number)=>({
+      sourceKind:"product" as const,sourceId:`message:${id}`,sourceRevision:0,
+      interaction:{id:`interaction_${id}`,taskId:run.taskId,kind:"user_message" as const,revision:1,position,occurredAt:runTimestamp(position),updatedAt:runTimestamp(position),title:"You",actorId,body:id,contentMode:"full" as const,status:"pending" as const}
+    });
+    const first=await store.createPendingTaskMessage({id:"message_a",taskId:run.taskId,actorId:"actor_a",content:"A",deliveryStatus:"pending",createdAt:runTimestamp(1)},interaction("message_a","actor_a",1));
+    const messageBIdempotency={actorId:"actor_b",projectId:run.projectId,operation:"message" as const,key:"message-b",requestHash:"message-b",resourceId:"message_b",claimToken:"message-b",now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)};
+    assert.equal((await store.beginTaskIdempotency(messageBIdempotency)).kind,"claimed");
+    assert.equal(await store.completeTaskIdempotency({...messageBIdempotency,responseStatus:200,responseBody:{kind:"task_message",messageId:"message_b",taskId:run.taskId,projectId:run.projectId,actorId:"actor_b",receipt:{messageId:"message_b",disposition:"queued_for_active_run",duplicate:false,queuedMessage:null,interaction:null,presentation:{}}},updatedAt:runTimestamp(1)}),true);
+    const second=await store.createPendingTaskMessage({id:"message_b",taskId:run.taskId,actorId:"actor_b",content:"B",deliveryStatus:"pending",createdAt:runTimestamp(2)},interaction("message_b","actor_b",2));
+    assert.ok(first&&second);
+    const claim={taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,claimedAt:runTimestamp(3),leaseExpiresAt:runTimestamp(5)};
+    assert.ok(await store.claimTaskMessage({...claim,id:first.id,claimToken:"claim_a"}));
+    assert.equal(await store.claimTaskMessage({...claim,id:second.id,claimToken:"claim_b"}),null);
+    assert.deepEqual(await store.authorizeTaskRunLlmActor({taskId:run.taskId,runId:run.runId}),{actorId:"actor_a",messageId:first.id});
+    assert.ok(await store.acceptTaskMessage({id:first.id,taskId:run.taskId,runId:run.runId,claimToken:"claim_a",updatedAt:runTimestamp(4)}));
+    assert.deepEqual(await store.authorizeTaskRunLlmActor({taskId:run.taskId,runId:run.runId}),{actorId:"actor_a",messageId:first.id});
+    assert.ok(await store.settleTaskRunLlmOwner({taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,messageId:first.id,observedInput:true,safeError:"unused",updatedAt:runTimestamp(5)}));
+    assert.ok(await store.claimTaskMessage({...claim,id:second.id,claimToken:"claim_b",claimedAt:runTimestamp(6),leaseExpiresAt:runTimestamp(8)}));
+    assert.deepEqual(await store.authorizeTaskRunLlmActor({taskId:run.taskId,runId:run.runId}),{actorId:"actor_b",messageId:second.id});
+    const release=await beginRelease(store,"llm-owner-release",(await store.sandboxRuns.get(run.runId))!);
+    assert.equal(await store.requestTaskSandboxRelease(release),"applied");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.currentLlmMessageId,null);
+    assert.equal(await store.authorizeTaskRunLlmActor({taskId:run.taskId,runId:run.runId}),null);
+    assert.equal((await store.findTaskMessage(second.id))?.deliveryStatus,"failed");
+    const releasedInteraction=(await store.findLatestTaskInteractionChange(run.taskId,"interaction_message_b"))?.interaction;
+    assert.equal(releasedInteraction?.kind==="user_message"?releasedInteraction.status:null,"failed");
+    const replay=await store.findTaskIdempotency({actorId:"actor_b",projectId:run.projectId,operation:"message",key:"message-b",requestHash:"message-b"});
+    assert.equal(replay?.kind,"replay");
+    assert.equal(replay?.kind==="replay"?(replay.responseBody as any).receipt.disposition:null,"failed");
+  });
+
+  it("fails an owned dispatching message in the same Run failure mutation",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({state:"active",startedAt:runTimestamp(0),startupReadyAt:runTimestamp(0)});
+    await createTaskWithRun(store,run);
+    const message=await store.createPendingTaskMessage(
+      {id:"message_failure_owner",taskId:run.taskId,actorId:run.startedByUserId,content:"work",deliveryStatus:"pending",createdAt:runTimestamp(1)},
+      {sourceKind:"product",sourceId:"message:message_failure_owner",sourceRevision:0,interaction:{id:"interaction_message_failure_owner",taskId:run.taskId,kind:"user_message",revision:1,position:1,occurredAt:runTimestamp(1),updatedAt:runTimestamp(1),title:"You",actorId:run.startedByUserId,body:"work",contentMode:"full",status:"pending"}}
+    );assert.ok(message);
+    assert.ok(await store.claimTaskMessage({id:message.id,taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,claimToken:"failure-owner",claimedAt:runTimestamp(2),leaseExpiresAt:runTimestamp(4)}));
+    assert.ok(await store.failSandboxRun({runId:run.runId,expectedFencingToken:run.fencingToken,code:"runner_failed",message:"runner failed",failedAt:runTimestamp(3),auditEvent:{id:"audit_failure_owner",projectId:run.projectId,actorId:null,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,createdAt:runTimestamp(3)}}));
+    assert.equal((await store.findTaskMessage(message.id))?.deliveryStatus,"failed");
+    const failedInteraction=(await store.findLatestTaskInteractionChange(run.taskId,"interaction_message_failure_owner"))?.interaction;
+    assert.equal(failedInteraction?.kind==="user_message"?failedInteraction.status:null,"failed");
+    assert.equal((await store.sandboxRuns.get(run.runId))?.currentLlmMessageId,null);
+  });
+
+  it("settles an owned accepted message before Release clears its owner",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({state:"active",startedAt:runTimestamp(0),startupReadyAt:runTimestamp(0)});
+    const message=await createAcceptedOwnedMessage(store,run,"release");
+    const release=await beginRelease(store,"accepted-owner-release",(await store.sandboxRuns.get(run.runId))!);
+    assert.equal(await store.requestTaskSandboxRelease(release),"applied");
+    await assertAcceptedOwnerSettlement(store,run,message);
+  });
+
+  it("settles an owned accepted message before Run failure clears its owner",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const run=sandboxRun({state:"active",startedAt:runTimestamp(0),startupReadyAt:runTimestamp(0)});
+    const message=await createAcceptedOwnedMessage(store,run,"failure");
+    assert.ok(await store.failSandboxRun({
+      runId:run.runId,expectedFencingToken:run.fencingToken,code:"runner_failed",message:"runner failed",
+      failedAt:runTimestamp(4),
+      auditEvent:{id:"audit_accepted_owner_failure",projectId:run.projectId,actorId:null,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:run.taskId,createdAt:runTimestamp(4)}
+    }));
+    await assertAcceptedOwnerSettlement(store,run,message);
+  });
+
   it("does not expose raw Run insertion and terminalizes capacity rejection for exact replay",async()=>{
     const store=createLocalInMemoryProductStore();
     assert.equal("put" in store.sandboxRuns,false);
@@ -1223,6 +1295,64 @@ async function createTaskWithRun(store:ReturnType<typeof createLocalInMemoryProd
   });
   assert.equal(created.kind,"created");
   return task;
+}
+
+async function createAcceptedOwnedMessage(
+  store:ReturnType<typeof createLocalInMemoryProductStore>,
+  run:PersistedSandboxRunState,
+  suffix:string
+):Promise<PersistedTaskMessage>{
+  await createTaskWithRun(store,run);
+  const id=`message_accepted_owner_${suffix}`;
+  const interaction={
+    sourceKind:"product" as const,sourceId:`message:${id}`,sourceRevision:0,
+    interaction:{id:`interaction_${id}`,taskId:run.taskId,kind:"user_message" as const,revision:1,position:1,occurredAt:runTimestamp(1),updatedAt:runTimestamp(1),title:"You",actorId:run.startedByUserId,body:"work",contentMode:"full" as const,status:"dispatching" as const}
+  };
+  const message=await store.createPendingTaskMessage(
+    {id,taskId:run.taskId,actorId:run.startedByUserId,content:"work",deliveryStatus:"pending",createdAt:runTimestamp(1)},
+    interaction
+  );
+  assert.ok(message);
+  const idempotency={
+    actorId:run.startedByUserId,projectId:run.projectId,operation:"message" as const,key:`accepted-owner-${suffix}`,
+    requestHash:`accepted-owner-${suffix}`,resourceId:id,claimToken:`accepted-owner-${suffix}`,
+    now:runTimestamp(1),leaseExpiresAt:runTimestamp(4)
+  };
+  assert.equal((await store.beginTaskIdempotency(idempotency)).kind,"claimed");
+  assert.equal(await store.completeTaskIdempotency({
+    ...idempotency,responseStatus:200,
+    responseBody:{kind:"task_message",messageId:id,taskId:run.taskId,projectId:run.projectId,actorId:run.startedByUserId,receipt:{messageId:id,disposition:"queued_for_active_run",duplicate:false,queuedMessage:null,interaction:null,presentation:{}}},
+    updatedAt:runTimestamp(1)
+  }),true);
+  const claimToken=`claim_${suffix}`;
+  assert.ok(await store.claimTaskMessage({
+    id,taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,claimToken,
+    claimedAt:runTimestamp(2),leaseExpiresAt:runTimestamp(5)
+  }));
+  const accepted=await store.acceptTaskMessage({
+    id,taskId:run.taskId,runId:run.runId,claimToken,updatedAt:runTimestamp(3)
+  });
+  assert.equal(accepted?.deliveryStatus,"accepted");
+  return accepted!;
+}
+
+async function assertAcceptedOwnerSettlement(
+  store:ReturnType<typeof createLocalInMemoryProductStore>,
+  run:PersistedSandboxRunState,
+  message:PersistedTaskMessage
+):Promise<void>{
+  assert.equal((await store.findTaskMessage(message.id))?.deliveryStatus,"accepted");
+  assert.equal((await store.sandboxRuns.get(run.runId))?.currentLlmMessageId,null);
+  const interaction=(await store.findLatestTaskInteractionChange(run.taskId,`interaction_${message.id}`))?.interaction;
+  assert.equal(interaction?.kind==="user_message"?interaction.status:null,"accepted");
+  const replay=await store.findTaskIdempotency({
+    actorId:run.startedByUserId,projectId:run.projectId,operation:"message",
+    key:message.id.endsWith("release")?"accepted-owner-release":"accepted-owner-failure",
+    requestHash:message.id.endsWith("release")?"accepted-owner-release":"accepted-owner-failure"
+  });
+  assert.equal(replay?.kind,"replay");
+  assert.equal(replay?.kind==="replay"?(replay.responseBody as any).receipt.disposition:null,"accepted_by_active_run");
+  assert.equal(replay?.kind==="replay"?(replay.responseBody as any).receipt.interaction.status:null,"accepted");
 }
 
 async function createTaskWithoutRun(store:ReturnType<typeof createLocalInMemoryProductStore>){

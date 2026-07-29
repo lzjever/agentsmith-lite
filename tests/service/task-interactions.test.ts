@@ -230,24 +230,10 @@ async function acceptMessage(
   setup: Awaited<ReturnType<typeof createSetup>>,
   message: PersistedTaskMessage
 ): Promise<void> {
-  const claimedAt = "2026-07-26T12:00:02.000Z";
-  const claimToken = `claim_${message.id}`;
-  const claimed = await setup.store.claimTaskMessage({
-    id: message.id,
-    claimToken,
-    claimedAt,
-    leaseExpiresAt: "2026-07-26T12:01:02.000Z"
-  });
-  assert.ok(claimed);
   const acceptedAt = "2026-07-26T12:00:03.000Z";
-  const accepted = await setup.store.acceptTaskMessage({
-    id: message.id,
-    claimToken,
-    updatedAt: acceptedAt
-  });
-  assert.ok(accepted);
   await setup.store.persistTaskInteractionMutation({
     taskId: message.taskId,
+    canonicalAcceptedMessageIds:[message.id],
     changes: [{
       sourceKind: "product",
       sourceId: `message:${message.id}`,

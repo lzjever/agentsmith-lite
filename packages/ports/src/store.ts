@@ -221,6 +221,8 @@ export interface PersistTaskInteractionMutationInput {
   taskId: string;
   changes: TaskInteractionChangeInput[];
   artifactProjections?: PersistTaskArtifactProjectionInput[];
+  canonicalAcceptedMessageIds?: string[];
+  idempotencyCompletions?: CompleteTaskIdempotencyForResourceInput[];
   sourceSync?: TaskInteractionSyncMutation;
 }
 
@@ -338,6 +340,7 @@ export interface PersistedSandboxRunState {
   resourceSnapshot: SandboxResourceSnapshot;
   releaseReason?: SandboxReleaseReason | null;
   timelineCursor?: string | null;
+  currentLlmMessageId?: string | null;
   terminalFailure?: PersistedSandboxTerminalFailure | null;
   failureCode: SandboxFailureCode | null;
   failureCause: string | null;
@@ -861,9 +864,10 @@ export interface ProductStore {
   listTaskMessages(taskId: string): Promise<PersistedTaskMessage[]>;
   findTaskMessage(id: string): Promise<PersistedTaskMessage | null>;
   listTaskMessagesDue(now: string, limit: number): Promise<PersistedTaskMessage[]>;
-  claimTaskMessage(input: TaskDeliveryClaimInput): Promise<PersistedTaskMessage | null>;
-  acceptTaskMessage(input: TaskDeliverySuccessInput): Promise<PersistedTaskMessage | null>;
-  failTaskMessage(input: TaskDeliveryFailureInput): Promise<PersistedTaskMessage | null>;
+  claimTaskMessage(input: TaskRunLlmClaimInput): Promise<PersistedTaskMessage | null>;
+  acceptTaskMessage(input: TaskRunLlmMessageInput): Promise<PersistedTaskMessage | null>;
+  settleTaskRunLlmOwner(input: TaskRunLlmSettlementInput): Promise<PersistedTaskMessage | null>;
+  authorizeTaskRunLlmActor(input: TaskRunLlmAuthorizationInput): Promise<{ actorId:string; messageId:string } | null>;
 }
 
 export interface AtomicTaskCreateInput {
@@ -1064,25 +1068,39 @@ export interface TaskArtifactStoreListPage {
   hasMore: boolean;
 }
 
-export interface TaskDeliveryClaimInput {
+export interface TaskRunLlmClaimInput {
   id: string;
+  taskId: string;
+  runId: string;
+  expectedFencingToken: number;
   claimToken: string;
   claimedAt: string;
   leaseExpiresAt: string;
 }
 
-export interface TaskDeliverySuccessInput {
+export interface TaskRunLlmMessageInput {
   id: string;
+  taskId: string;
+  runId: string;
   claimToken: string;
   updatedAt: string;
 }
 
-export interface TaskDeliveryFailureInput {
-  id: string;
-  claimToken: string;
+export interface TaskRunLlmSettlementInput {
+  taskId: string;
+  runId: string;
+  expectedFencingToken: number;
+  messageId: string;
+  observedInput: boolean;
   safeError: string;
   updatedAt: string;
 }
+
+export interface TaskRunLlmAuthorizationInput {
+  taskId: string;
+  runId: string;
+}
+
 
 
 export type TaskIdempotencyOperation = "create" | "message" | "terminal-start" | "message-edit" | "message-delete" | "release-sandbox" | "edit" | "archive" | "delete" | "workspace.create" | "workspace.member.add" | "workspace.member.change" | "workspace.member.remove" | "workspace.settings.update" | "workspace.context.save" | "workspace.context.delete" | "workspace.archive" | "workspace.unarchive" | "workspace.owner.transfer" | "workspace.delete" | "project.create" | "project.member.add" | "project.member.change" | "project.member.remove" | "project.credential.create" | "project.credential.rotate" | "project.credential.delete" | "project.endpoint.create" | "project.endpoint.update" | "project.endpoint.models" | "project.endpoint.recheck" | "project.endpoint.delete" | "project.context.save" | "project.context.delete" | "project.policy.update" | "project.alert.transition" | "project.alert.acknowledge" | "project.alert.silence" | "project.alert-rule.create" | "project.alert-rule.update" | "project.alert-rule.delete" | "project.file-library.create" | "project.file-library.update" | "project.file-library.delete" | "project.file.upload" | "project.file.delete" | "project.settings.update" | "project.archive" | "project.unarchive" | "project.owner.transfer" | "project.delete";

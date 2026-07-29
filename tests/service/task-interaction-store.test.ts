@@ -107,7 +107,8 @@ describe("task interaction store", () => {
 
     assert.deepEqual(await store.listTaskMessagesDue(timestamp(2),10),[]);
     assert.equal(await store.claimTaskMessage({
-      id:message.id,claimToken:"claim-must-not-stick",claimedAt:timestamp(2),leaseExpiresAt:timestamp(5)
+      id:message.id,taskId:"task_interactions",runId:"missing-run",expectedFencingToken:1,
+      claimToken:"claim-must-not-stick",claimedAt:timestamp(2),leaseExpiresAt:timestamp(5)
     }),null);
     const persisted=await store.findTaskMessage(message.id);
     assert.equal(persisted?.deliveryStatus,"pending");
@@ -119,9 +120,10 @@ describe("task interaction store", () => {
     );
     assert.ok(later);
     assert.deepEqual((await store.listTaskMessagesDue(timestamp(4),10)).map((candidate)=>candidate.id),[later.id]);
-    assert.equal((await store.claimTaskMessage({
-      id:later.id,claimToken:"valid-later-claim",claimedAt:timestamp(4),leaseExpiresAt:timestamp(6)
-    }))?.id,later.id);
+    assert.equal(await store.claimTaskMessage({
+      id:later.id,taskId:"task_interactions",runId:"missing-run",expectedFencingToken:1,
+      claimToken:"valid-later-claim",claimedAt:timestamp(4),leaseExpiresAt:timestamp(6)
+    }),null);
   });
 
   it("completes resource idempotency only for the matching Project and operation",async()=>{
@@ -169,6 +171,62 @@ describe("task interaction store", () => {
     assert.equal((await store.queryTaskArtifacts("task_interactions",{kind:null,mediaType:null,previewOnly:false,limit:100})).items[0]?.fileId,"botified-file");
     assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"turn-cursor");
     assert.equal((await store.findTaskMessage("pending-message"))?.deliveryStatus,"pending");
+  });
+
+  it("commits canonical message, interaction, cursor, and receipt atomically and idempotently",async()=>{
+    const store=createLocalInMemoryProductStore();
+    await store.createProject(project());
+    await createTask(store);
+    const message={id:"message_canonical_atomic",taskId:"task_interactions",actorId:"user",content:"work",deliveryStatus:"dispatching" as const,claimToken:"claim",claimedAt:timestamp(1),leaseExpiresAt:timestamp(4),createdAt:timestamp(1)};
+    const pendingInteraction:Extract<TaskInteractionItem,{kind:"user_message"}>={
+      id:"canonical-user",revision:1,taskId:"task_interactions",kind:"user_message",title:"canonical-user",
+      actorId:"user",body:"work",contentMode:"full",position:1,occurredAt:timestamp(1),updatedAt:timestamp(1),status:"dispatching"
+    };
+    await store.createPendingTaskMessage(
+      {...message,deliveryStatus:"pending",claimToken:null,claimedAt:null,leaseExpiresAt:null},
+      change("product",`message:${message.id}`,0,pendingInteraction)
+    );
+    const ownership={actorId:"user",projectId:"project",operation:"message" as const,key:"canonical",requestHash:"canonical",resourceId:message.id,claimToken:"receipt",now:timestamp(1),leaseExpiresAt:timestamp(4)};
+    assert.equal((await store.beginTaskIdempotency(ownership)).kind,"claimed");
+    const initialBody={kind:"task_message",messageId:message.id,taskId:message.taskId,projectId:"project",actorId:"user",receipt:{messageId:message.id,disposition:"queued_for_active_run",duplicate:false,queuedMessage:null,interaction:null,presentation:{}}};
+    assert.equal(await store.completeTaskIdempotency({...ownership,responseStatus:200,responseBody:initialBody,updatedAt:timestamp(1)}),true);
+    const acceptedInteraction:Extract<TaskInteractionItem,{kind:"user_message"}>={...pendingInteraction,revision:2,status:"accepted",updatedAt:timestamp(2)};
+    const acceptedBody={...initialBody,receipt:{...initialBody.receipt,disposition:"accepted_by_active_run",interaction:acceptedInteraction}};
+    const mutation={
+      taskId:"task_interactions",changes:[change("botified","cursor:canonical",0,acceptedInteraction)],
+      canonicalAcceptedMessageIds:[message.id],
+      idempotencyCompletions:[{projectId:"project",operation:"message" as const,resourceId:message.id,responseStatus:200,responseBody:acceptedBody,updatedAt:timestamp(2)}],
+      sourceSync:{expectedSourceCursor:null,sourceCursor:"cursor:canonical",historyStatus:"complete" as const,lastSyncedAt:timestamp(2)}
+    };
+    await store.persistTaskInteractionMutation(mutation);
+    assert.equal((await store.findTaskMessage(message.id))?.deliveryStatus,"accepted");
+    assert.equal((await store.readTaskInteractionSnapshot("task_interactions",null,10))?.sourceCursor,"cursor:canonical");
+    const replay=await store.findTaskIdempotency({actorId:"user",projectId:"project",operation:"message",key:"canonical",requestHash:"canonical"});
+    assert.deepEqual(replay?.kind==="replay"?replay.responseBody:null,acceptedBody);
+    await store.persistTaskInteractionMutation({...mutation,sourceSync:{...mutation.sourceSync,expectedSourceCursor:"cursor:canonical"}});
+
+    const rollbackMessage=await store.createPendingTaskMessage(
+      {id:"message_canonical_rollback",taskId:"task_interactions",actorId:"user",content:"rollback",deliveryStatus:"pending",createdAt:timestamp(3)},
+      change("product","message:message_canonical_rollback",0,{...pendingInteraction,id:"canonical-rollback",revision:1,body:"rollback",position:2,occurredAt:timestamp(3),updatedAt:timestamp(3),status:"pending"})
+    );
+    assert.ok(rollbackMessage);
+    const before=await store.readTaskInteractionSnapshot("task_interactions",null,10);
+    const changedBody={...acceptedBody,receipt:{...acceptedBody.receipt,duplicate:true}};
+    await assert.rejects(store.persistTaskInteractionMutation({
+      taskId:"task_interactions",changes:[change("botified","cursor:tail",0,{...interaction("tail",1,2,"assistant_message")})],
+      canonicalAcceptedMessageIds:[rollbackMessage.id],
+      idempotencyCompletions:[
+        {...mutation.idempotencyCompletions[0]!,responseBody:changedBody},
+        {...mutation.idempotencyCompletions[0]!,projectId:"other"}
+      ],
+      sourceSync:{expectedSourceCursor:"cursor:canonical",sourceCursor:"cursor:tail",historyStatus:"complete",lastSyncedAt:timestamp(3)}
+    }),/completion mismatch/);
+    const after=await store.readTaskInteractionSnapshot("task_interactions",null,10);
+    assert.equal(after?.sourceCursor,before?.sourceCursor);
+    assert.equal(after?.latestChangeSeq,before?.latestChangeSeq);
+    assert.equal((await store.findTaskMessage(rollbackMessage.id))?.deliveryStatus,"pending");
+    assert.equal(await store.findLatestTaskInteractionChange("task_interactions","tail"),null);
+    assert.deepEqual((await store.findTaskIdempotency({actorId:"user",projectId:"project",operation:"message",key:"canonical",requestHash:"canonical"}))?.kind==="replay"?(await store.findTaskIdempotency({actorId:"user",projectId:"project",operation:"message",key:"canonical",requestHash:"canonical"}) as any).responseBody:null,acceptedBody);
   });
 
   it("defines authoritative state events without a durable interaction cursor", () => {

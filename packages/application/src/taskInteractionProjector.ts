@@ -219,7 +219,7 @@ function projectInput(
     actorId: old?.actorId ?? null,
     body: body.text ?? old?.body ?? null,
     contentMode: body.text === null ? old?.contentMode ?? "none" : body.mode,
-    status: monotonicUserStatus(old?.status, status)
+    status: canonicalUserStatus(old?.status, status)
   };
   return { interaction };
 }
@@ -943,6 +943,14 @@ function monotonicUserStatus(
     pending: 0, dispatching: 1, queued: 2, accepted: 3, rejected: 3, failed: 3
   };
   return rank[incoming] < rank[current] || rank[current] >= 3 ? current : incoming;
+}
+
+function canonicalUserStatus(
+  current: TaskUserMessageInteraction["status"] | undefined,
+  incoming: TaskUserMessageInteraction["status"]
+):TaskUserMessageInteraction["status"]{
+  if(current==="failed"&&(incoming==="queued"||incoming==="accepted"))return incoming;
+  return monotonicUserStatus(current,incoming);
 }
 
 function terminalAssistantStatus(

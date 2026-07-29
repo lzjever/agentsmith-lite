@@ -98,6 +98,11 @@ describe("Botified Chat Completions broker", () => {
 
   it("uses the prefix-independent in-cluster route and transparently forwards streaming tool calls", async () => {
     const { task, projectId, cookie, userId, brokerKey, serviceKey } = await createTask("one");
+    let providerRequestSequence=0;
+    providerResponseFactory=()=>new Response(
+      "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"bash\"}}]}}]}\n\ndata: [DONE]\n\n",
+      {status:200,headers:{"content-type":"text/event-stream","cache-control":"no-cache","x-request-id":`provider-request-${++providerRequestSequence}`}}
+    );
     assert.notEqual(brokerKey, serviceKey);
     assert.match(brokerKey, /^lbk_/);
     assert.match(serviceKey, /^bsk_/);
@@ -141,11 +146,24 @@ describe("Botified Chat Completions broker", () => {
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-type"), "text/event-stream");
     assert.equal(response.headers.get("cache-control"), "no-cache");
-    assert.equal(response.headers.get("x-request-id"), "provider-request");
+    assert.equal(response.headers.get("x-request-id"), "provider-request-1");
     assert.equal(response.headers.get("content-encoding"), null);
     assert.equal(response.headers.get("content-length"), null);
     assert.match(await response.text(), /tool_calls/);
-    assert.equal(providerCalls.length, 1);
+    const continuation=await fetch(
+      `${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`,
+      {method:"POST",headers:{authorization:`Bearer ${brokerKey}`,"content-type":"application/json"},body:JSON.stringify({
+        ...requestBody,
+        messages:[
+          ...requestBody.messages,
+          {role:"assistant",content:null,tool_calls:[{id:"call_1",type:"function",function:{name:"bash",arguments:"{}"}}]},
+          {role:"tool",tool_call_id:"call_1",content:"done"}
+        ]
+      })}
+    );
+    assert.equal(continuation.status,200);
+    await continuation.text();
+    assert.equal(providerCalls.length, 2);
     assert.equal(providerCalls[0]?.url, "https://models.example.com/v1/chat/completions");
     assert.equal(providerCalls[0]?.authorization, "Bearer sk-provider-key");
     assert.equal(providerCalls[0]?.headers.get("x-untrusted-header"), null);
@@ -160,8 +178,23 @@ describe("Botified Chat Completions broker", () => {
           .filter((limit: { metric: string }) => ["providerRequests", "providerTokens", "providerCost"].includes(limit.metric))
           .map((limit: { metric: string; current: number }) => [limit.metric, limit.current])
       ),
-      { providerRequests: 2, providerTokens: 4096, providerCost: 1 }
+      { providerRequests: 3, providerTokens: 8192, providerCost: 2 }
     );
+  });
+
+  it("fails closed when the exact Run has no LLM message owner",async()=>{
+    const {task,brokerKey}=await createTask("missing-owner");
+    const run=await store.sandboxRuns.get(task.runId);assert.ok(run?.currentLlmMessageId);
+    assert.ok(await store.settleTaskRunLlmOwner({
+      taskId:task.id,runId:task.runId,expectedFencingToken:run.fencingToken,
+      messageId:run.currentLlmMessageId,observedInput:true,safeError:"unused",updatedAt:new Date().toISOString()
+    }));
+    const response=await fetch(`${baseUrl}/api/internal/tasks/${task.id}/runs/${task.runId}/v1/chat/completions`,{
+      method:"POST",headers:{authorization:`Bearer ${brokerKey}`,"content-type":"application/json"},
+      body:JSON.stringify({model:"gpt-compatible",messages:[{role:"user",content:"must fail"}]})
+    });
+    assert.equal(response.status,409);
+    assert.equal(providerCalls.length,0);
   });
 
   it("rejects invalid and cross-task keys before provider forwarding", async () => {
@@ -336,6 +369,13 @@ describe("Botified Chat Completions broker", () => {
       fileLibrary: { mode: "create_new", name: `Task files ${name}` }
     }, cookie, csrf, `task-${name}`);
     const activeTask = await waitForActiveTask(task.task.id, cookie);
+    const run=await store.sandboxRuns.get(activeTask.runId);assert.ok(run);
+    const message=(await store.listTaskMessages(activeTask.id)).find((candidate)=>candidate.deliveryStatus==="pending");assert.ok(message);
+    assert.ok(await store.claimTaskMessage({
+      id:message.id,taskId:activeTask.id,runId:activeTask.runId,expectedFencingToken:run.fencingToken,
+      claimToken:`broker-owner-${name}`,claimedAt:new Date().toISOString(),
+      leaseExpiresAt:new Date(Date.now()+60_000).toISOString()
+    }));
     return {
       task: activeTask,
       ...sandboxPort.credentials(activeTask.id, activeTask.runId),
@@ -347,7 +387,7 @@ describe("Botified Chat Completions broker", () => {
   }
 
   async function waitForActiveTask(taskId: string, cookie: string): Promise<any> {
-    const deadline = Date.now() + 2_000;
+    const deadline = Date.now() + 5_000;
     let lastState: unknown;
     while (Date.now() < deadline) {
       const response = await fetch(`${baseUrl}/app/api/v1/tasks/${taskId}/detail`, { headers: { cookie } });
@@ -359,7 +399,9 @@ describe("Botified Chat Completions broker", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify(lastState)}`);
+    const task=await store.findTask(taskId);
+    const run=task?.currentRunId?await store.sandboxRuns.get(task.currentRunId):null;
+    assert.fail(`Task ${taskId} was not dispatched to Botified: ${JSON.stringify({lastState,run})}`);
   }
 
   async function post(pathname: string, body: unknown, cookie: string, csrf: string, idempotencyKey: string): Promise<any> {

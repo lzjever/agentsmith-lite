@@ -338,6 +338,26 @@ postgresDescribe("postgres migrations", { concurrency: false }, () => {
     });
   });
 
+  it("rejects migration 081 while any Sandbox Run is unreleased without changing schema",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"081_shared_task_llm_actor",async(client,migrationSql)=>{
+      await insertMigration077TerminalReceipts(client);
+      await assert.rejects(client.query(migrationSql),/requires every existing Sandbox Run to be released first/);
+      assert.equal((await client.query("select 1 from information_schema.columns where table_schema=current_schema() and table_name='sandbox_runs' and column_name='current_llm_message_id'")).rowCount,0);
+    });
+  });
+
+  it("applies migration 081 when every existing Sandbox Run is released",async()=>{
+    assert.ok(postgresUrl);
+    await withPendingMigrationDatabase(postgresUrl,"081_shared_task_llm_actor",async(client,migrationSql)=>{
+      await insertMigration077TerminalReceipts(client);
+      await client.query("update agent_tasks set current_run_id=null where current_run_id in (select run_id from sandbox_runs where state <> 'released')");
+      await client.query("delete from sandbox_runs where state <> 'released'");
+      await client.query(migrationSql);
+      assert.equal((await client.query("select 1 from information_schema.columns where table_schema=current_schema() and table_name='sandbox_runs' and column_name='current_llm_message_id'")).rowCount,1);
+    });
+  });
+
   it("upgrades an applied migration 069 with actor-scoped Alerts and orphan cleanup in migration 070",async()=>{
     assert.ok(postgresUrl);
     await withPendingMigrationDatabase(postgresUrl,"070_actor_scoped_alerts_and_orphan_cleanup",async(client,migrationSql)=>{
