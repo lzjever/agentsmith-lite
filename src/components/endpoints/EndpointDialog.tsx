@@ -1,7 +1,7 @@
 "use client";
 
 import { RefreshCw, Save, X } from "lucide-react";
-import { type FormEvent, useId } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 import {
   Banner,
   Button,
@@ -75,7 +75,10 @@ export function EndpointDialog({
   const handleOpenChange = (next: boolean) => {
     if (!saving && !discovering) onOpenChange(next);
   };
-  const timeoutValid=isValidEndpointRequestTimeout(input.requestTimeoutSecs);
+  const timeoutParentValid=isValidEndpointRequestTimeout(input.requestTimeoutSecs);
+  const [timeoutRawValid,setTimeoutRawValid]=useState(timeoutParentValid);
+  useEffect(()=>setTimeoutRawValid(timeoutParentValid),[open,input.requestTimeoutSecs,timeoutParentValid]);
+  const timeoutValid=timeoutParentValid&&timeoutRawValid;
   const handleSubmit=(event:FormEvent<HTMLFormElement>)=>{
     if(!timeoutValid){
       event.preventDefault();
@@ -171,7 +174,15 @@ export function EndpointDialog({
               <NumberInput
                 label="Timeout (seconds)"
                 value={input.requestTimeoutSecs}
-                onChange={(value) => set("requestTimeoutSecs", value)}
+                onChange={(value) => {
+                  setTimeoutRawValid(true);
+                  set("requestTimeoutSecs", value);
+                }}
+                onInput={(event) => {
+                  const raw=(event.currentTarget as HTMLInputElement).value.trim();
+                  setTimeoutRawValid(raw.length>0&&isValidEndpointRequestTimeout(Number(raw)));
+                }}
+                onBlur={() => setTimeoutRawValid(timeoutParentValid)}
                 min={1}
                 max={600}
                 isIntegerOnly
