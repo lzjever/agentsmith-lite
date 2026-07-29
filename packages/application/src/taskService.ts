@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, chown, lstat, mkdir, open, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, rmdir, stat, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -3917,13 +3917,18 @@ function isAlreadyExists(error: unknown): boolean {
 
 async function prepareRunnerWritableDirectory(directory: string): Promise<void> {
   await mkdir(directory, { recursive: true, mode: BOTIFIED_RUNNER_DIRECTORY_MODE });
-  const chowned = await tryChownForRunner(directory);
-  await chmod(directory, chowned ? BOTIFIED_RUNNER_DIRECTORY_MODE : BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE);
+  const handle=await open(directory,fsConstants.O_RDONLY|fsConstants.O_DIRECTORY|fsConstants.O_NOFOLLOW);
+  try{
+    const chowned = await tryChownForRunner(handle);
+    await handle.chmod(chowned ? BOTIFIED_RUNNER_DIRECTORY_MODE : BOTIFIED_RUNNER_FALLBACK_DIRECTORY_MODE);
+  }finally{
+    await handle.close();
+  }
 }
 
-async function tryChownForRunner(directory: string): Promise<boolean> {
+async function tryChownForRunner(directory: FileHandle): Promise<boolean> {
   try {
-    await chown(directory, BOTIFIED_RUNNER_UID, BOTIFIED_RUNNER_GID);
+    await directory.chown(BOTIFIED_RUNNER_UID, BOTIFIED_RUNNER_GID);
     return true;
   } catch (error) {
     if (isChownUnavailable(error)) {

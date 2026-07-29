@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
@@ -2093,7 +2093,7 @@ describe("task interactions API", () => {
     }
   });
 
-  it("prepares the Task-private Botified agents directory before sandbox apply",async()=>{
+  it("rejects a Botified agents symlink before apply and prepares an ordinary private directory",async()=>{
     const previousPostgresUrl=process.env.POSTGRES_APP_URL;
     process.env.POSTGRES_APP_URL="postgresql://app:secret@db/app";
     const store=createLocalInMemoryProductStore();
@@ -2125,13 +2125,19 @@ describe("task interactions API", () => {
         botifiedServiceKeyFactory:({taskId})=>taskId,liveSandbox:{port:livePort}
       });
       const auth=await createProjectWithEndpoint(api.baseUrl,"production-admin-password");
-      const created=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
-        prompt:"prepare Botified agents directory",endpointId:auth.endpointId,
-        fileLibrary:{mode:"create_new",name:"Agents directory files"}
+      const blockedCreated=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"reject Botified agents symlink",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Blocked agents directory files"}
       })).task;
-      const task=await store.findTask(created.id as string);assert.ok(task?.fileLibraryId);
-      const project=await store.findProject(task.projectId);assert.ok(project);
-      const library=await store.findFileLibrary(task.fileLibraryId);assert.ok(library);
+      const blockedTask=await store.findTask(blockedCreated.id as string);assert.ok(blockedTask?.currentRunId);
+      const project=await store.findProject(blockedTask.projectId);assert.ok(project);
+      const externalTarget=path.join(dataRoot,"external-agents-target");
+      const blockedBotifiedDirectory=path.join(dataRoot,project.rootPath,"tasks",blockedTask.id,"botified");
+      await mkdir(externalTarget,{recursive:true});
+      await chmod(externalTarget,0o750);
+      await mkdir(blockedBotifiedDirectory,{recursive:true});
+      await symlink(externalTarget,path.join(blockedBotifiedDirectory,"agents"));
+      const externalBefore=await stat(externalTarget);
 
       const background=createApplicationServices({
         store,dataRoot,builtinAdminPassword:"production-admin-password",sessionSecret:validProductionSessionSecret,
@@ -2140,11 +2146,30 @@ describe("task interactions API", () => {
         providerClient:{async validateEndpoint(){return{status:"healthy" as const};},async completeChat(){throw new Error("not used");}}
       });
       await background.tasks.syncActiveTasksOnce();
+      const blockedRun=await store.sandboxRuns.get(blockedTask.currentRunId);
+      const externalAfter=await stat(externalTarget);
+      assert.equal(blockedRun?.state,"failed");
+      assert.equal(resources.length,0);
+      assert.deepEqual(
+        {uid:externalAfter.uid,gid:externalAfter.gid,mode:externalAfter.mode&0o777},
+        {uid:externalBefore.uid,gid:externalBefore.gid,mode:externalBefore.mode&0o777}
+      );
 
-      const agentsDirectory=path.join(dataRoot,project.rootPath,"tasks",task.id,"botified","agents");
+      const normalCreated=(await auth.requestJson("POST",`/api/v1/projects/${auth.projectId}/tasks`,{
+        prompt:"prepare ordinary Botified agents directory",endpointId:auth.endpointId,
+        fileLibrary:{mode:"create_new",name:"Ordinary agents directory files"}
+      })).task;
+      const normalTask=await store.findTask(normalCreated.id as string);assert.ok(normalTask?.fileLibraryId);
+      const library=await store.findFileLibrary(normalTask.fileLibraryId);assert.ok(library);
+      await background.tasks.syncActiveTasksOnce();
+
+      const normalRun=await store.sandboxRuns.get(normalTask.currentRunId!);
+      const agentsDirectory=path.join(dataRoot,project.rootPath,"tasks",normalTask.id,"botified","agents");
       const libraryHome=path.join(dataRoot,project.rootPath,library.rootSubPath);
       const agentsDirectoryStat=await stat(agentsDirectory);
       const agentsDirectoryMode=agentsDirectoryStat.mode&0o777;
+      assert.equal(normalRun?.state,"active");
+      assert.equal(resources.every((resource)=>resource.metadata.labels?.["agentsmith-lite/task-id"]===normalTask.id),true);
       assert.equal(agentsDirectoryStat.isDirectory(),true);
       assert.equal(path.relative(libraryHome,agentsDirectory).startsWith(`..${path.sep}`),true);
       assert.equal(agentsDirectoryStat.uid===10001
