@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import https, { type RequestOptions } from "node:https";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, it } from "node:test";
+import type { DetailedPeerCertificate } from "node:tls";
 import type { ChatMessage, ModelEndpoint } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
-import { FetchOpenAICompatibleClient } from "../../packages/openai-compatible-client/src/index.js";
+import { FetchOpenAICompatibleClient, type ProviderNetworkPolicy } from "../../packages/openai-compatible-client/src/index.js";
 
 describe("FetchOpenAICompatibleClient", () => {
   const servers: http.Server[] = [];
@@ -72,7 +76,15 @@ describe("FetchOpenAICompatibleClient", () => {
 
   it("blocks private provider targets unless operations explicitly allow the hostname", async () => {
     let calls = 0;
-    const providerFetch: typeof fetch = async (_url, init) => { calls += 1; assert.equal(init?.redirect, "error"); return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } }); };
+    let requestedUrl: string | undefined;
+    let requestedSignal: AbortSignal | null | undefined;
+    const providerFetch: typeof fetch = async (url, init) => {
+      calls += 1;
+      requestedUrl = url.toString();
+      requestedSignal = init?.signal;
+      assert.equal(init?.redirect, "error");
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } });
+    };
     const endpoint = endpointFixture({ baseUrl: "https://provider.internal/v1" });
     const resolvePrivate = async () => [{ address: "10.20.30.40", family: 4 as const }];
 
@@ -82,6 +94,179 @@ describe("FetchOpenAICompatibleClient", () => {
     const response = await new FetchOpenAICompatibleClient(providerFetch, { privateHosts: ["provider.internal"], resolve: resolvePrivate }).completeChat(endpoint, [{ role: "user", content: "hi" }], { apiKey: "secret" });
     assert.equal(response.message.content, "ok");
     assert.equal(calls, 1);
+    assert.equal(requestedUrl, "https://provider.internal/v1/chat/completions");
+    assert.ok(requestedSignal instanceof AbortSignal);
+  });
+
+  it("keeps an explicitly supplied custom fetch after public DNS approval", async () => {
+    let resolutionCalls = 0;
+    let fetchCalls = 0;
+    let requestedUrl: string | undefined;
+    let requestedRedirect: RequestRedirect | undefined;
+    let requestedSignal: AbortSignal | null | undefined;
+    const providerFetch: typeof fetch = async (url, init) => {
+      fetchCalls += 1;
+      requestedUrl = url.toString();
+      requestedRedirect = init?.redirect;
+      requestedSignal = init?.signal;
+      return chatCompletionResponse();
+    };
+    const client = clientWithHttpsRequest(
+      providerFetch,
+      {
+        resolve: async () => {
+          resolutionCalls += 1;
+          return [{ address: "93.184.216.34", family: 4 }];
+        }
+      },
+      (() => {
+        throw new Error("custom fetch must remain the transport");
+      }) as typeof https.request
+    );
+
+    const response = await client.completeChat(
+      endpointFixture({ baseUrl: "https://provider.example.test/v1" }),
+      [{ role: "user", content: "hi" }],
+      { apiKey: "secret" }
+    );
+
+    assert.equal(response.message.content, "ok");
+    assert.equal(resolutionCalls, 1);
+    assert.equal(fetchCalls, 1);
+    assert.equal(requestedUrl, "https://provider.example.test/v1/chat/completions");
+    assert.equal(requestedRedirect, "error");
+    assert.ok(requestedSignal instanceof AbortSignal);
+  });
+
+  it("uses the one approved DNS address for the HTTPS connection carrying Authorization", async () => {
+    let resolutionCalls = 0;
+    let providerFetchCalls = 0;
+    let authorizationReachedUnapprovedAddress = false;
+    let requestOptions: RequestOptions | undefined;
+    const resolve = async () => {
+      resolutionCalls += 1;
+      return resolutionCalls === 1
+        ? [{ address: "93.184.216.34", family: 4 as const }]
+        : [{ address: "10.20.30.40", family: 4 as const }];
+    };
+    const providerFetch: typeof fetch = async (_url, init) => {
+      providerFetchCalls += 1;
+      const secondResolution = await resolve();
+      assert.equal(secondResolution[0]?.address, "10.20.30.40");
+      authorizationReachedUnapprovedAddress = new Headers(init?.headers).has("authorization");
+      return chatCompletionResponse();
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = providerFetch;
+    try {
+      const providerHttpsRequest = stubHttpsRequest(async (options) => {
+        requestOptions = options;
+        return { body: JSON.stringify({ choices: [{ message: { content: "pinned" } }] }) };
+      });
+      const client = clientWithHttpsRequest(providerFetch, { resolve }, providerHttpsRequest);
+
+      const response = await client.completeChat(
+        endpointFixture({ baseUrl: "https://provider.example.test/v1" }),
+        [{ role: "user", content: "hi" }],
+        { apiKey: "sk-pinned-secret" }
+      );
+
+      assert.equal(resolutionCalls, 1);
+      assert.equal(providerFetchCalls, 0);
+      assert.equal(authorizationReachedUnapprovedAddress, false);
+      assert.equal(requestOptions?.hostname, "93.184.216.34");
+      assert.equal(new Headers(requestOptions?.headers as HeadersInit).get("authorization"), "Bearer sk-pinned-secret");
+      assert.equal(response.message.content, "pinned");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("tries approved addresses in order before TLS commitment and sends the body once", async () => {
+    let resolutionCalls = 0;
+    const attempts: StubTlsAttempt[] = [];
+    const providerHttpsRequest = stubTlsHttpsRequest(
+      ["fail-before-secure", "respond"],
+      attempts
+    );
+    const client = clientWithHttpsRequest(
+      globalThis.fetch,
+      {
+        resolve: async () => {
+          resolutionCalls += 1;
+          return [
+            { address: "2606:4700:4700::1111", family: 6 },
+            { address: "93.184.216.34", family: 4 }
+          ];
+        }
+      },
+      providerHttpsRequest
+    );
+
+    const response = await client.completeChat(
+      endpointFixture({ baseUrl: "https://provider.example.test:8443/v1" }),
+      [{ role: "user", content: "hi" }],
+      { apiKey: "secret" }
+    );
+
+    assert.equal(response.message.content, "fallback");
+    assert.equal(resolutionCalls, 1);
+    assert.deepEqual(attempts.map(({ options }) => [options.hostname, options.family]), [
+      ["2606:4700:4700::1111", 6],
+      ["93.184.216.34", 4]
+    ]);
+    assert.deepEqual(attempts.map(({ bodies }) => bodies), [
+      [],
+      [JSON.stringify({ model: "gpt-compatible", messages: [{ role: "user", content: "hi" }] })]
+    ]);
+    assert.equal(attempts.some(({ endedBeforeSecure }) => endedBeforeSecure), false);
+    for (const { options } of attempts) {
+      assert.equal(options.agent, false);
+      assert.equal(options.servername, "provider.example.test");
+      assert.equal(new Headers(options.headers as HeadersInit).get("host"), "provider.example.test:8443");
+      assert.equal(
+        options.checkServerIdentity?.(
+          String(options.hostname),
+          { subject: { CN: "provider.example.test" }, subjectaltname: "DNS:provider.example.test" } as DetailedPeerCertificate
+        ),
+        undefined
+      );
+      assert.match(
+        options.checkServerIdentity?.(
+          String(options.hostname),
+          { subject: { CN: "other.example.test" }, subjectaltname: "DNS:other.example.test" } as DetailedPeerCertificate
+        )?.message ?? "",
+        /provider\.example\.test/
+      );
+    }
+  });
+
+  it("does not try another approved address after TLS commitment", async () => {
+    const attempts: StubTlsAttempt[] = [];
+    const client = clientWithHttpsRequest(
+      globalThis.fetch,
+      {
+        resolve: async () => [
+          { address: "2606:4700:4700::1111", family: 6 },
+          { address: "93.184.216.34", family: 4 }
+        ]
+      },
+      stubTlsHttpsRequest(["fail-after-secure", "respond"], attempts)
+    );
+
+    await assertProviderError(
+      () => client.completeChat(
+        endpointFixture({ baseUrl: "https://provider.example.test/v1" }),
+        [{ role: "user", content: "hi" }],
+        { apiKey: "sk-post-secure-secret" }
+      ),
+      502,
+      "sk-post-secure-secret"
+    );
+
+    assert.deepEqual(attempts.map(({ options }) => options.hostname), ["2606:4700:4700::1111"]);
+    assert.deepEqual(attempts.map(({ bodies }) => bodies.length), [1]);
+    assert.equal(attempts[0]?.endedBeforeSecure, false);
   });
 
   it("discovers a bounded, de-duplicated provider model list without creating a catalog", async () => {
@@ -206,6 +391,133 @@ describe("FetchOpenAICompatibleClient", () => {
     return `http://127.0.0.1:${address.port}`;
   }
 });
+
+interface StubHttpsResponse {
+  statusCode?: number;
+  headers?: http.IncomingHttpHeaders;
+  body: string;
+}
+
+interface StubTlsAttempt {
+  options: RequestOptions;
+  bodies: string[];
+  endedBeforeSecure: boolean;
+}
+
+type StubTlsAction = "fail-before-secure" | "fail-after-secure" | "respond";
+
+function clientWithHttpsRequest(
+  providerFetch: typeof fetch,
+  networkPolicy: ProviderNetworkPolicy,
+  providerHttpsRequest: typeof https.request
+): FetchOpenAICompatibleClient {
+  const InternalClient = FetchOpenAICompatibleClient as unknown as new (
+    providerFetch: typeof fetch,
+    networkPolicy: ProviderNetworkPolicy,
+    providerHttpsRequest: typeof https.request
+  ) => FetchOpenAICompatibleClient;
+  return new InternalClient(providerFetch, networkPolicy, providerHttpsRequest);
+}
+
+function stubHttpsRequest(handler: (options: RequestOptions, body: string) => Promise<StubHttpsResponse>): typeof https.request {
+  return ((options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+    const request = new EventEmitter() as EventEmitter & {
+      write(chunk: string | Uint8Array): boolean;
+      end(chunk?: string | Uint8Array): void;
+      destroy(error?: Error): void;
+    };
+    const chunks: Buffer[] = [];
+    request.write = (chunk) => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+      return true;
+    };
+    request.end = (chunk) => {
+      if (chunk !== undefined) request.write(chunk);
+      queueMicrotask(() => {
+        handler(options, Buffer.concat(chunks).toString("utf8")).then(({ statusCode = 200, headers = { "content-type": "application/json" }, body }) => {
+          const response = new PassThrough() as PassThrough & IncomingMessage;
+          response.statusCode = statusCode;
+          response.statusMessage = "OK";
+          response.headers = headers;
+          callback(response);
+          if (!response.destroyed) response.end(body);
+        }, (error: unknown) => request.emit("error", error));
+      });
+    };
+    request.destroy = (error) => {
+      if (error) queueMicrotask(() => request.emit("error", error));
+    };
+    const signal = options.signal;
+    const abort = () => request.emit("error", Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    if (signal?.aborted) queueMicrotask(abort);
+    else signal?.addEventListener("abort", abort, { once: true });
+    const socket = new EventEmitter();
+    queueMicrotask(() => {
+      request.emit("socket", socket);
+      socket.emit("secureConnect");
+    });
+    return request;
+  }) as typeof https.request;
+}
+
+function stubTlsHttpsRequest(actions: readonly StubTlsAction[], attempts: StubTlsAttempt[]): typeof https.request {
+  return ((options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+    const action = actions[attempts.length];
+    assert.ok(action, "unexpected HTTPS request attempt");
+    const attempt: StubTlsAttempt = { options, bodies: [], endedBeforeSecure: false };
+    attempts.push(attempt);
+    const request = new EventEmitter() as EventEmitter & {
+      write(chunk: string | Uint8Array): boolean;
+      end(chunk?: string | Uint8Array): void;
+      destroy(error?: Error): void;
+    };
+    const socket = new EventEmitter();
+    let secure = false;
+    request.write = (chunk) => {
+      if (!secure) attempt.endedBeforeSecure = true;
+      attempt.bodies.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    };
+    request.end = (chunk) => {
+      if (!secure) attempt.endedBeforeSecure = true;
+      if (chunk !== undefined) request.write(chunk);
+      if (action === "fail-after-secure") {
+        queueMicrotask(() => request.emit("error", new Error("request failed after secureConnect")));
+      } else if (action === "respond") {
+        queueMicrotask(() => {
+          const response = new PassThrough() as PassThrough & IncomingMessage;
+          response.statusCode = 200;
+          response.statusMessage = "OK";
+          response.headers = { "content-type": "application/json" };
+          callback(response);
+          response.end(JSON.stringify({ choices: [{ message: { content: "fallback" } }] }));
+        });
+      }
+    };
+    request.destroy = (error) => {
+      if (error) queueMicrotask(() => request.emit("error", error));
+    };
+    const abort = () => request.emit("error", Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    if (options.signal?.aborted) queueMicrotask(abort);
+    else options.signal?.addEventListener("abort", abort, { once: true });
+    queueMicrotask(() => {
+      request.emit("socket", socket);
+      if (action === "fail-before-secure") {
+        request.emit("error", new Error("TLS connection failed"));
+      } else {
+        secure = true;
+        socket.emit("secureConnect");
+      }
+    });
+    return request;
+  }) as typeof https.request;
+}
+
+function chatCompletionResponse(): Response {
+  return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+    headers: { "content-type": "application/json" }
+  });
+}
 
 function endpointFixture(overrides: Partial<ModelEndpoint> = {}): ModelEndpoint {
   return {

@@ -1,5 +1,8 @@
 import { lookup } from "node:dns/promises";
+import https, { type RequestOptions } from "node:https";
 import { BlockList } from "node:net";
+import { Readable } from "node:stream";
+import { checkServerIdentity } from "node:tls";
 import type { ChatMessage, ChatResponse, DiscoverEndpointModelsInput, EndpointHealthErrorCategory, EndpointModelDiscovery, ModelEndpoint } from "../../contracts/src/api.js";
 import { ProductError } from "../../domain/src/errors.js";
 
@@ -20,7 +23,17 @@ export interface OpenAICompatibleClient {
 
 
 export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
-  constructor(private readonly providerFetch: typeof fetch = fetch, private readonly networkPolicy?: ProviderNetworkPolicy) {
+  private readonly providerFetch: typeof fetch;
+  private readonly networkPolicy: ProviderNetworkPolicy | undefined;
+  private readonly providerHttpsRequest: typeof https.request;
+  private readonly usePinnedHttps: boolean;
+
+  constructor(providerFetch?: typeof fetch, networkPolicy?: ProviderNetworkPolicy);
+  constructor(providerFetch: typeof fetch = fetch, networkPolicy?: ProviderNetworkPolicy, providerHttpsRequest: typeof https.request = https.request) {
+    this.providerFetch = providerFetch;
+    this.networkPolicy = networkPolicy;
+    this.providerHttpsRequest = providerHttpsRequest;
+    this.usePinnedHttps = providerFetch === globalThis.fetch;
     networkPolicy?.privateHosts?.forEach(normalizeConfiguredProviderHost);
   }
 
@@ -88,7 +101,6 @@ export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
   }
 
   private async requestProvider(url: string, timeoutSecs: number, init: RequestInit, externalSignal?: AbortSignal): Promise<Response> {
-    if (this.networkPolicy) await assertProviderTargetAllowed(url, this.networkPolicy);
     const controller = new AbortController();
     const onExternalAbort = () => controller.abort();
     externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
@@ -105,7 +117,12 @@ export class FetchOpenAICompatibleClient implements OpenAICompatibleClient {
       release();
     }, timeoutSecs * 1000);
     try {
-      const response = await this.providerFetch(url, { ...init, redirect: "error", signal: controller.signal });
+      const approvedAddresses = this.networkPolicy
+        ? await approvedProviderAddresses(url, this.networkPolicy, controller.signal)
+        : undefined;
+      const response = approvedAddresses && this.usePinnedHttps
+        ? await requestPinnedProvider(url, init, approvedAddresses, controller.signal, this.providerHttpsRequest)
+        : await this.providerFetch(url, { ...init, redirect: "error", signal: controller.signal });
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
         throw providerStatusError(response.status);
@@ -153,21 +170,191 @@ export interface ProviderNetworkPolicy {
   resolve?: (hostname: string) => Promise<readonly { address: string; family: 4 | 6 }[]>;
 }
 
-const nonPublicAddresses = createNonPublicAddressList();
-
-async function assertProviderTargetAllowed(url: string, policy: ProviderNetworkPolicy): Promise<void> {
-  const hostname = normalizeHostname(new URL(url).hostname);
-  const allowed = new Set((policy.privateHosts ?? []).map(normalizeConfiguredProviderHost));
-  if (allowed.has(hostname)) return;
-  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) throw disallowedProviderHost();
-  let addresses: readonly { address: string; family: 4 | 6 }[];
-  try { addresses = await (policy.resolve ?? resolveProviderHost)(hostname); } catch { throw disallowedProviderHost(); }
-  if (addresses.length === 0 || addresses.some(({ address, family }) => nonPublicAddresses.check(address, family === 4 ? "ipv4" : "ipv6"))) throw disallowedProviderHost();
+interface ProviderAddress {
+  address: string;
+  family: 4 | 6;
 }
 
-async function resolveProviderHost(hostname: string): Promise<readonly { address: string; family: 4 | 6 }[]> {
+const nonPublicAddresses = createNonPublicAddressLists();
+
+async function approvedProviderAddresses(url: string, policy: ProviderNetworkPolicy, signal: AbortSignal): Promise<readonly ProviderAddress[] | undefined> {
+  const hostname = normalizeHostname(new URL(url).hostname);
+  const allowed = new Set((policy.privateHosts ?? []).map(normalizeConfiguredProviderHost));
+  if (allowed.has(hostname)) return undefined;
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) throw disallowedProviderHost();
+  let addresses: readonly ProviderAddress[];
+  try {
+    addresses = await abortableProviderResolution((policy.resolve ?? resolveProviderHost)(hostname), signal);
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    throw disallowedProviderHost();
+  }
+  if (addresses.length === 0 || addresses.some(({ address, family }) =>
+    family === 4
+      ? nonPublicAddresses.ipv4.check(address, "ipv4")
+      : nonPublicAddresses.ipv6.check(address, "ipv6")
+  )) throw disallowedProviderHost();
+  return addresses;
+}
+
+function abortableProviderResolution<T>(resolution: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    resolution.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function resolveProviderHost(hostname: string): Promise<readonly ProviderAddress[]> {
   const resolved = await lookup(hostname, { all: true, verbatim: true });
   return resolved.map(({ address, family }) => ({ address, family: family as 4 | 6 }));
+}
+
+async function requestPinnedProvider(
+  url: string,
+  init: RequestInit,
+  approvedAddresses: readonly ProviderAddress[],
+  signal: AbortSignal,
+  providerHttpsRequest: typeof https.request
+): Promise<Response> {
+  const parsed = new URL(url);
+  const headers = new Headers(init.headers);
+  headers.set("host", parsed.host);
+  const requestHeaders: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    requestHeaders[name] = value;
+  });
+  const body = init.body;
+  if (body !== undefined && body !== null && typeof body !== "string" && !(body instanceof Uint8Array)) {
+    throw new TypeError("Unsupported OpenAI-compatible provider request body");
+  }
+  let lastError: unknown;
+  for (const approvedAddress of approvedAddresses) {
+    let committed = false;
+    const options: RequestOptions = {
+      protocol: "https:",
+      hostname: approvedAddress.address,
+      family: approvedAddress.family,
+      port: parsed.port ? Number(parsed.port) : 443,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: init.method ?? "GET",
+      headers: requestHeaders,
+      servername: parsed.hostname,
+      checkServerIdentity: (_hostname, certificate) => checkServerIdentity(parsed.hostname, certificate),
+      agent: false,
+      signal
+    };
+    try {
+      return await requestPinnedProviderCandidate(
+        options,
+        body,
+        signal,
+        providerHttpsRequest,
+        () => {
+          committed = true;
+        }
+      );
+    } catch (error) {
+      if (committed || signal.aborted) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function requestPinnedProviderCandidate(
+  options: RequestOptions,
+  body: string | Uint8Array | null | undefined,
+  signal: AbortSignal,
+  providerHttpsRequest: typeof https.request,
+  onCommit: () => void
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    let request: ReturnType<typeof https.request> | undefined;
+    let committed = false;
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      if (!committed) request?.destroy();
+      reject(error);
+    };
+    const handleResponse = (providerResponse: import("node:http").IncomingMessage) => {
+      if (settled) {
+        providerResponse.destroy();
+        return;
+      }
+      const status = providerResponse.statusCode ?? 502;
+      if (status === 301 || status === 302 || status === 303 || status === 307 || status === 308) {
+        providerResponse.destroy();
+        fail(new Error("OpenAI-compatible provider redirect rejected"));
+        return;
+      }
+      const responseBody = status === 204 || status === 205 || status === 304
+        ? null
+        : Readable.toWeb(providerResponse) as ReadableStream<Uint8Array>;
+      try {
+        resolve(new Response(responseBody, {
+          status,
+          statusText: providerResponse.statusMessage ?? "",
+          headers: providerResponseHeaders(providerResponse.headers)
+        }));
+        settled = true;
+      } catch (error) {
+        providerResponse.destroy();
+        fail(error);
+      }
+    };
+    try {
+      request = providerHttpsRequest(options, handleResponse);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    request.once("error", fail);
+    request.once("socket", (socket) => {
+      socket.once("secureConnect", () => {
+        if (settled || committed) return;
+        if (signal.aborted) {
+          fail(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+          return;
+        }
+        committed = true;
+        onCommit();
+        try {
+          if (body === undefined || body === null) request?.end();
+          else request?.end(body);
+        } catch (error) {
+          fail(error);
+        }
+      });
+    });
+  });
+}
+
+function providerResponseHeaders(values: import("node:http").IncomingHttpHeaders): Headers {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(values)) {
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else if (value !== undefined) {
+      headers.set(name, value);
+    }
+  }
+  return headers;
 }
 
 function normalizeConfiguredProviderHost(value: string): string {
@@ -178,11 +365,23 @@ function normalizeConfiguredProviderHost(value: string): string {
 
 function normalizeHostname(value: string): string { return value.toLowerCase().replace(/\.$/, ""); }
 function disallowedProviderHost(): ProductError { return providerError("OpenAI-compatible provider host is not allowed", 502, "network"); }
-function createNonPublicAddressList(): BlockList {
-  const list = new BlockList();
-  for (const [network, prefix] of [["0.0.0.0",8],["10.0.0.0",8],["100.64.0.0",10],["127.0.0.0",8],["169.254.0.0",16],["172.16.0.0",12],["192.0.0.0",24],["192.0.2.0",24],["192.168.0.0",16],["198.18.0.0",15],["198.51.100.0",24],["203.0.113.0",24],["224.0.0.0",4],["240.0.0.0",4]] as const) list.addSubnet(network, prefix, "ipv4");
-  for (const [network, prefix] of [["::",128],["::1",128],["fc00::",7],["fe80::",10],["ff00::",8],["2001:db8::",32]] as const) list.addSubnet(network, prefix, "ipv6");
-  return list;
+function createNonPublicAddressLists(): { ipv4: BlockList; ipv6: BlockList } {
+  const ipv4 = new BlockList();
+  for (const [network, prefix] of [["0.0.0.0",8],["10.0.0.0",8],["100.64.0.0",10],["127.0.0.0",8],["169.254.0.0",16],["172.16.0.0",12],["192.0.0.0",24],["192.0.2.0",24],["192.88.99.0",24],["192.168.0.0",16],["198.18.0.0",15],["198.51.100.0",24],["203.0.113.0",24],["224.0.0.0",4],["240.0.0.0",4]] as const) ipv4.addSubnet(network, prefix, "ipv4");
+  const ipv6 = new BlockList();
+  for (const [network, prefix] of [
+    ["::",3],
+    ["4000::",2],
+    ["8000::",1],
+    ["2001::",32],
+    ["2001:2::",48],
+    ["2001:10::",28],
+    ["2001:20::",28],
+    ["2001:db8::",32],
+    ["2002::",16],
+    ["3fff::",20]
+  ] as const) ipv6.addSubnet(network, prefix, "ipv6");
+  return { ipv4, ipv6 };
 }
 
 function providerStatusError(status: number): ProductError {
