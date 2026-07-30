@@ -153,7 +153,7 @@ export function TaskCreateDialog({
     aria-label="Create task"
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title="Create task" subtitle="Describe the agent work for this Sandbox." hasDivider {...(!busy ? { onOpenChange: handleOpenChange } : {})} />
+      <DialogHeader className="p-4 sm:p-5" title="Create task" subtitle="Describe the agent work for this Sandbox." hasDivider {...(!busy ? { onOpenChange: handleOpenChange } : {})} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
       <form id="task-create-form" onSubmit={(event) => void submit(event)} aria-label="Create task">
         <div className="grid gap-5">

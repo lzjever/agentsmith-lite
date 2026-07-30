@@ -99,6 +99,7 @@ export function EndpointDialog({
       aria-label={title}
     >
       <DialogHeader
+        className="p-4 sm:px-6"
         title={title}
         subtitle="Configure an OpenAI-compatible model connection."
         hasDivider

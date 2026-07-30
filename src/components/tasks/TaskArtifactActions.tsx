@@ -110,7 +110,7 @@ function ArtifactImageViewer({ taskId, artifact, open, onOpenChange }: { taskId:
     aria-label={`Preview ${artifact.name}`}
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} hasDivider onOpenChange={close} />
+      <DialogHeader className="p-4 sm:p-5" title={artifact.name} subtitle={`${formatArtifactBytes(artifact.bytes)} · ${artifact.mediaType}`} hasDivider onOpenChange={close} />
       <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {loading ? <div className="grid min-h-64 place-items-center text-secondary"><Spinner label="Loading image..." /></div> : null}
         {error ? <div className="p-5"><Banner status="error" title="Image preview unavailable" description={error} /><Button className="mt-4" label="Try again" onClick={() => { setError(null); setUrl(null); setReloadKey((key) => key + 1); }} /></div> : null}

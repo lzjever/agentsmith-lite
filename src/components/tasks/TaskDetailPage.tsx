@@ -534,7 +534,7 @@ function TaskDetail({ workspaceId, projectId, taskId }: { workspaceId: string; p
       aria-label="Task details"
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Task details" subtitle={task.id} hasDivider onOpenChange={changeDetailsOpen} />
+        <DialogHeader className="p-4 sm:p-5" title="Task details" subtitle={task.id} hasDivider onOpenChange={changeDetailsOpen} />
         <div className="min-h-0 min-w-0 flex-1 space-y-6 overflow-y-auto p-4 sm:p-5">
           <TaskWorkspaceSummary task={task} filesHref={filesHref} />
           <div><Heading level={6} accessibilityLevel={3}>Original prompt</Heading><Text display="block" type="supporting" color="secondary" className="mt-2 whitespace-pre-wrap break-words">{task.prompt}</Text></div>

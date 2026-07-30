@@ -5,7 +5,7 @@ import {
   DialogHeader,
   TextInput,
 } from "@astryxdesign/core";
-import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import { type FormEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { providerBaseUrlError } from "../providers/providerFormValidation";
 import { CredentialSecretField } from "./CredentialSecretField";
 
@@ -15,12 +15,10 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
   const [secret, setSecret] = useState("");
   const dialogRef = useRef<HTMLDialogElement>(null);
   const formId = useId();
-  useEffect(() => {
-    if (open) {
-      setName("");
-      setBaseUrl("");
-      setSecret("");
-    }
+  useLayoutEffect(() => {
+    setName("");
+    setBaseUrl("");
+    setSecret("");
   }, [open]);
   useEffect(() => {
     if (!open || includeName) return;
@@ -30,7 +28,13 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
     return () => cancelAnimationFrame(frame);
   }, [includeName, open]);
   const handleOpenChange = (next: boolean) => {
-    if (!busy) onOpenChange(next);
+    if (busy) return;
+    if (!next) {
+      setName("");
+      setBaseUrl("");
+      setSecret("");
+    }
+    onOpenChange(next);
   };
   const baseUrlValidationError = includeName&&baseUrl.length>0?providerBaseUrlError(baseUrl):null;
   const canSubmit = secret.length > 0 && (!includeName || name.trim().length > 0 && baseUrl.length > 0 && baseUrlValidationError===null);
@@ -54,6 +58,7 @@ export function CredentialDialog({ open, onOpenChange, title, busy, error, onSub
       aria-label={title}
     >
       <DialogHeader
+        className="p-4 sm:px-6"
         title={title}
         subtitle="The secret is sent once and is never displayed again."
         hasDivider

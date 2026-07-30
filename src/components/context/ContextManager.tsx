@@ -425,7 +425,7 @@ function ContextRouteManager({ workspaceId, projectId }: { workspaceId: string; 
       aria-label="Delete context entry"
       aria-describedby={deleteDescriptionId}
     >
-      <DialogHeader title="Delete context entry" hasDivider />
+      <DialogHeader className="p-4 sm:px-6" title="Delete context entry" hasDivider />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <Text id={deleteDescriptionId} as="p" display="block" color="secondary">{selected ? `Permanently delete ${selected.contextKey}? This cannot be undone.` : "This entry is no longer available."}</Text>
         <div className="mt-4">{deleteError ? <Banner status="error" title="Context entry could not be deleted" description={deleteError} /> : null}</div>

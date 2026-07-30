@@ -54,7 +54,7 @@ export function DeleteEndpointDialog({
       aria-label="Delete endpoint"
       aria-describedby={descriptionId}
     >
-      <DialogHeader title="Delete endpoint" hasDivider />
+      <DialogHeader className="p-4 sm:px-6" title="Delete endpoint" hasDivider />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <Text id={descriptionId} as="p" display="block" color="secondary">
           {endpoint

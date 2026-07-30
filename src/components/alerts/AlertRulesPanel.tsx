@@ -245,7 +245,7 @@ function DeleteAlertRuleDialog({ open, busy, error, onOpenChange, onConfirm }: {
       aria-label="Delete alert rule"
       aria-describedby={descriptionId}
     >
-      <DialogHeader title="Delete alert rule" hasDivider />
+      <DialogHeader className="p-4 sm:px-6" title="Delete alert rule" hasDivider />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
         <Text id={descriptionId} as="p" display="block" color="secondary">
           This permanently removes the rule from this project.

@@ -1045,7 +1045,7 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       aria-label={selected ? `${selected.type === "directory" ? "Folder" : "File"} details for ${selected.name}` : "Entry details"}
       style={{ height: "calc(100dvh - 1rem)" }}
     >
-      <DialogHeader title="Details" {...(selected ? { subtitle: selected.name } : {})} hasDivider onOpenChange={(open) => { if (!open) closeMobileDetails(); }} />
+      <DialogHeader className="p-4" title="Details" {...(selected ? { subtitle: selected.name } : {})} hasDivider onOpenChange={(open) => { if (!open) closeMobileDetails(); }} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4">
         <FileDetails entry={selected} projectId={projectId} library={selectedLibrary} mutationBusy={mutationBusy} previewState={previewState} onDelete={openDeleteFile} onPreview={openPreview} onClosePreview={clearPreview} />
       </div>
@@ -1139,7 +1139,7 @@ function LibraryNameDialog({ mode, open, name, error, pending, onOpenChange, onN
     aria-label={title}
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title={title} subtitle={subtitle} hasDivider {...(!pending ? { onOpenChange: handleOpenChange } : {})} />
+      <DialogHeader className="p-4 sm:px-6" title={title} subtitle={subtitle} hasDivider {...(!pending ? { onOpenChange: handleOpenChange } : {})} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
         {error ? <Banner className="mb-4" status="error" title={create ? "File Library could not be created" : "File Library could not be renamed"} description={error} /> : null}
         <form id={formId} onSubmit={onSubmit}><TextInput label="Library name" value={name} onChange={(value) => onNameChange(value.slice(0, 120))} isRequired hasAutoFocus data-autofocus="" isDisabled={pending} width="100%" /></form>
@@ -1287,7 +1287,7 @@ export function DeleteFileDialog({ entry, deleting, onCancel, onConfirm }: { ent
     aria-describedby={descriptionId}
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title={folder ? "Delete folder?" : "Delete file?"} hasDivider />
+      <DialogHeader className="p-4 sm:p-5" title={folder ? "Delete folder?" : "Delete file?"} hasDivider />
       <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
         <Text id={descriptionId} as="p" display="block" color="secondary">{folder ? "This permanently deletes the folder and everything inside it." : "This permanently deletes the file."}</Text>
         {entry ? <Text as="p" display="block" wordBreak="break-all">{objectLabel}: <Text weight="semibold">{entry.path}</Text></Text> : null}
@@ -1327,7 +1327,7 @@ function DeleteLibraryDialog({ library, pending, error, onOpenChange, onConfirm 
     aria-describedby={descriptionId}
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title={fileLibraryDeleteCopy.title} hasDivider />
+      <DialogHeader className="p-4 sm:p-5" title={fileLibraryDeleteCopy.title} hasDivider />
       <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
         <Text id={descriptionId} as="p" display="block" color="secondary">{fileLibraryDeleteCopy.body}</Text>
         {library ? <Text as="p" display="block" wordBreak="break-all">Library: <Text weight="semibold">{library.name}</Text></Text> : null}
@@ -1368,7 +1368,7 @@ function ReplaceFileDialog({ target, pending, error, onOpenChange, onConfirm }: 
     aria-describedby={descriptionId}
   >
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <DialogHeader title={title} hasDivider />
+      <DialogHeader className="p-4 sm:p-5" title={title} hasDivider />
       <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
         <Text id={descriptionId} as="p" display="block" color="secondary">A file with this name already exists in this folder. This permanently replaces its contents.</Text>
         {error ? <Banner status="error" title="File could not be replaced" description={error} /> : null}

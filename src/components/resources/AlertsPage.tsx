@@ -528,7 +528,7 @@ function ProjectAlertsPage({
         aria-label="Dismiss project alert"
         aria-describedby={dismissDescriptionId}
       >
-        <DialogHeader title="Dismiss project alert" hasDivider />
+        <DialogHeader className="p-4 sm:px-6" title="Dismiss project alert" hasDivider />
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
           <Text id={dismissDescriptionId} as="p" display="block" color="secondary">
             {dismiss

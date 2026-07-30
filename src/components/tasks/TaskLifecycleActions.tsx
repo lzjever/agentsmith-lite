@@ -33,12 +33,19 @@ export function TaskLifecycleActions({ task, capabilities, releaseRunId, release
 
   useEffect(() => {
     if (!capabilities.editTask) setRenameOpen(false);
-    if (!capabilities.archiveTask) setArchiveOpen(false);
+    if (!capabilities.archiveTask) {
+      setArchiveOpen(false);
+      setArchiveError("");
+    }
     if (!capabilities.releaseSandbox) {
       setReleaseOpen(false);
       setReleaseTargetRunId(null);
+      setReleaseError("");
     }
-    if (!capabilities.deleteTask) setDeleteOpen(false);
+    if (!capabilities.deleteTask) {
+      setDeleteOpen(false);
+      setDeleteError("");
+    }
   }, [capabilities.archiveTask, capabilities.deleteTask, capabilities.editTask, capabilities.releaseSandbox]);
   useEffect(() => onBusyChange?.(busy), [busy, onBusyChange]);
 
@@ -197,7 +204,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseRunId, release
       aria-label="Rename task"
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Rename task" subtitle="Use a concise title that makes this task easy to find." hasDivider {...(!busy && !disabled ? { onOpenChange: (open: boolean) => { if (!open) closeRename(); } } : {})} />
+        <DialogHeader className="p-4 sm:p-5" title="Rename task" subtitle="Use a concise title that makes this task easy to find." hasDivider {...(!busy && !disabled ? { onOpenChange: (open: boolean) => { if (!open) closeRename(); } } : {})} />
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
           <form id="task-rename-form" onSubmit={(event) => void rename(event)}>
             <div className="grid gap-4">
@@ -225,7 +232,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseRunId, release
       aria-describedby={archiveDescriptionId}
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Archive task?" hasDivider />
+        <DialogHeader className="p-4 sm:p-5" title="Archive task?" hasDivider />
         <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
           <Text id={archiveDescriptionId} as="p" display="block" color="secondary">This removes the task from the active list while keeping its conversation, File Library files, and artifacts available.</Text>
           {archiveError ? <Banner status="error" title="Task could not be archived" description={archiveError} /> : null}
@@ -249,7 +256,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseRunId, release
       aria-describedby={releaseDescriptionId}
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title={`${releaseLabel}?`} hasDivider />
+        <DialogHeader className="p-4 sm:p-5" title={`${releaseLabel}?`} hasDivider />
         <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
           <Text id={releaseDescriptionId} as="p" display="block" color="secondary">Releasing stops the agent, Terminal, tools, and processes unconditionally, which may lose unsaved information. The Task conversation, Library files, and published Artifacts remain available.</Text>
           {releaseError ? <Banner status="error" title="Sandbox could not be released" description={releaseError} /> : null}
@@ -273,7 +280,7 @@ export function TaskLifecycleActions({ task, capabilities, releaseRunId, release
       aria-describedby={deleteDescriptionId}
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Delete task?" hasDivider />
+        <DialogHeader className="p-4 sm:p-5" title="Delete task?" hasDivider />
         <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
           <Text id={deleteDescriptionId} as="p" display="block" color="secondary">This permanently removes the Task conversation, Botified session data, and Task Artifacts. Ordinary Library files are retained, and the Library becomes available after the purge completes.</Text>
           {deleteError ? <Banner status="error" title="Task could not be deleted" description={deleteError} /> : null}

@@ -192,7 +192,7 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
       aria-label="Edit queued message"
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Edit queued message" subtitle="Only messages the server still accepts can be changed." hasDivider {...(!messageBusy ? { onOpenChange: (open: boolean) => { if (!open) closeEdit(); } } : {})} />
+        <DialogHeader className="p-4 sm:p-5" title="Edit queued message" subtitle="Only messages the server still accepts can be changed." hasDivider {...(!messageBusy ? { onOpenChange: (open: boolean) => { if (!open) closeEdit(); } } : {})} />
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
           <form id="queued-message-edit-form" onSubmit={(event) => { event.preventDefault(); void saveEdit(); }}>
             <div className="grid gap-4">
@@ -220,7 +220,7 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
       aria-describedby={removeDescriptionId}
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <DialogHeader title="Delete queued message?" hasDivider />
+        <DialogHeader className="p-4 sm:p-5" title="Delete queued message?" hasDivider />
         <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
           <Text id={removeDescriptionId} as="p" display="block" color="secondary">This message has not started delivery and can be removed.</Text>
           {removeError ? <Banner status="error" title="Queued message could not be deleted" description={removeError} /> : null}

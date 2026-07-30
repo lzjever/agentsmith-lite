@@ -105,7 +105,7 @@ function CreateWorkspaceDialog({ open, onClose, onCreated }: { open: boolean; on
     onClose();
   };
   return <Dialog className="[&_button]:min-h-11 [&_button]:min-w-11" isOpen={open} onOpenChange={handleOpenChange} purpose="form" padding={0} width="min(34rem, calc(100dvw - 1rem))" maxHeight="calc(100dvh - 1rem)" aria-label="New workspace">
-    <DialogHeader title="New workspace" subtitle="Create a home for one or more projects." hasDivider {...(!saving ? { onOpenChange: handleOpenChange } : {})} />
+    <DialogHeader className="p-4 sm:px-6" title="New workspace" subtitle="Create a home for one or more projects." hasDivider {...(!saving ? { onOpenChange: handleOpenChange } : {})} />
     <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6"><form id="workspace-create-form" onSubmit={submit}><TextInput label="Name" value={name} onChange={(value) => setName(value.slice(0, 160))} isRequired hasAutoFocus data-autofocus="" isDisabled={saving} {...(error && { status: { type: "error", message: error } as const })} width="100%" /></form></div>
     <div className="grid min-w-0 shrink-0 grid-cols-1 gap-2 border-t border-border p-4 sm:flex sm:justify-end sm:px-6 [@media(max-height:20rem)]:!grid [@media(max-height:20rem)]:grid-cols-2 [@media(max-height:20rem)]:!p-2 [&>*]:min-w-0 [&>*]:w-full sm:[&>*]:w-auto [@media(max-height:20rem)]:[&>*]:w-full [&_button]:!h-auto [&_button]:min-w-0 [&_button]:whitespace-normal">
       <Button type="button" label="Cancel" variant="ghost" size="lg" isDisabled={saving} onClick={() => handleOpenChange(false)} />

@@ -633,7 +633,7 @@ function AuditDetailDialog({
       maxHeight="calc(100dvh - 1rem)"
       aria-label="Audit event detail"
     >
-      <DialogHeader title="Audit event detail" subtitle="Immutable event data for this project activity." hasDivider onOpenChange={(open) => !open && onClose()} />
+      <DialogHeader className="p-4 sm:px-6" title="Audit event detail" subtitle="Immutable event data for this project activity." hasDivider onOpenChange={(open) => !open && onClose()} />
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
         {event ? (
           <dl className="grid gap-3 sm:grid-cols-[8rem_1fr]">
