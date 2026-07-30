@@ -42,6 +42,7 @@ import {
   ApiError,
   apiClient,
   isReadOnlyMutationError,
+  type MemberRole,
   type ProjectAlert,
   type ProjectCapabilities
 } from "../../lib/api/client";
@@ -99,6 +100,7 @@ function ProjectAlertsPage({
     })
   );
   const [capabilities, setCapabilities] = useState<ProjectCapabilities>();
+  const [memberRole, setMemberRole] = useState<MemberRole>();
   const [capabilitiesError, setCapabilitiesError] = useState("");
   const mounted = useRef(true);
   const dismissDescriptionId = useId();
@@ -120,7 +122,10 @@ function ProjectAlertsPage({
   const loadSupport = useCallback(async () => {
     const generation = ++supportGeneration.current;
     setCapabilitiesError("");
-    const capabilitiesResult=await Promise.resolve(apiClient.projectCapabilities(projectId)).then((value)=>({status:"fulfilled" as const,value})).catch((reason)=>({status:"rejected" as const,reason}));
+    const [capabilitiesResult, overviewResult] = await Promise.all([
+      Promise.resolve(apiClient.projectCapabilities(projectId)).then((value)=>({status:"fulfilled" as const,value})).catch((reason)=>({status:"rejected" as const,reason})),
+      Promise.resolve(apiClient.projectOverview(projectId)).then((value)=>({status:"fulfilled" as const,value})).catch((reason)=>({status:"rejected" as const,reason}))
+    ]);
     if (!mounted.current || generation !== supportGeneration.current) return;
     if (capabilitiesResult.status === "fulfilled") {
       setCapabilities(capabilitiesResult.value);
@@ -130,6 +135,11 @@ function ProjectAlertsPage({
         "Alert permissions could not be loaded. Alerts are read-only until refreshed."
       );
     }
+    setMemberRole(
+      overviewResult.status === "fulfilled"
+        ? overviewResult.value.memberRole
+        : undefined
+    );
   }, [projectId]);
 
   useEffect(() => {
@@ -258,6 +268,7 @@ function ProjectAlertsPage({
   ]);
 
   const canManage = capabilities?.canManagePolicy === true;
+  const canViewAudit = memberRole === "owner" || memberRole === "admin";
   const dismiss = alertState.mutation.dismissAlert;
   const dismissBusy = Boolean(
     dismiss && alertState.mutation.busyId === dismiss.id
@@ -492,6 +503,7 @@ function ProjectAlertsPage({
           linkedSeparate={linkedSeparate}
           projectBasePath={projectBasePath}
           canManage={canManage}
+          canViewAudit={canViewAudit}
           onRetryList={() => dispatch({ type: "list_reload_requested" })}
           onRetryLookup={() =>
             dispatch({ type: "linked_lookup_retry_requested" })
@@ -559,6 +571,7 @@ function AlertInstances({
   linkedSeparate,
   projectBasePath,
   canManage,
+  canViewAudit,
   onRetryList,
   onRetryLookup,
   onFirstPage,
@@ -575,6 +588,7 @@ function AlertInstances({
   linkedSeparate: boolean;
   projectBasePath: string;
   canManage: boolean;
+  canViewAudit: boolean;
   onRetryList: () => void;
   onRetryLookup: () => void;
   onFirstPage: () => void;
@@ -632,6 +646,7 @@ function AlertInstances({
               alert={state.linkedAlert}
               projectBasePath={projectBasePath}
               canManage={canManage}
+              canViewAudit={canViewAudit}
               busyId={state.mutation.busyId}
               retry={state.mutation.retry}
               selectedAlertId={state.selectedAlertId}
@@ -690,6 +705,7 @@ function AlertInstances({
               alert={alert}
               projectBasePath={projectBasePath}
               canManage={canManage}
+              canViewAudit={canViewAudit}
               busyId={state.mutation.busyId}
               retry={state.mutation.retry}
               selectedAlertId={state.selectedAlertId}
@@ -737,6 +753,7 @@ function AlertRow({
   alert,
   projectBasePath,
   canManage,
+  canViewAudit,
   busyId,
   retry,
   selectedAlertId,
@@ -749,6 +766,7 @@ function AlertRow({
   alert: ProjectAlert;
   projectBasePath: string;
   canManage: boolean;
+  canViewAudit: boolean;
   busyId: string | null;
   retry: AlertMutationRetry | null;
   selectedAlertId: string | null;
@@ -760,7 +778,7 @@ function AlertRow({
 }) {
   const silenced =
     !!alert.silencedUntil && Date.parse(alert.silencedUntil) > Date.now();
-  const investigation = alertInvestigation(alert, projectBasePath);
+  const investigation = alertInvestigation(alert, projectBasePath, canViewAudit);
   const selected = selectedAlertId === alert.id;
   return (
     <li
@@ -835,24 +853,28 @@ function AlertRow({
             : ""}
         </Text>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <Link
-            href={investigation.href}
-            className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
-          >
-            <Gauge size={14} />
-            <Text type="supporting" color="secondary">
-              {investigation.label}
-            </Text>
-          </Link>
-          <Link
-            href={`${projectBasePath}/audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
-            className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
-          >
-            <ClipboardList size={14} />
-            <Text type="supporting" color="secondary">
-              View alert history
-            </Text>
-          </Link>
+          {investigation ? (
+            <Link
+              href={investigation.href}
+              className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
+            >
+              <Gauge size={14} />
+              <Text type="supporting" color="secondary">
+                {investigation.label}
+              </Text>
+            </Link>
+          ) : null}
+          {canViewAudit ? (
+            <Link
+              href={`${projectBasePath}/audit?resourceKind=alert&resourceId=${encodeURIComponent(alert.id)}`}
+              className="inline-flex items-center gap-1.5 text-secondary hover:text-primary"
+            >
+              <ClipboardList size={14} />
+              <Text type="supporting" color="secondary">
+                View alert history
+              </Text>
+            </Link>
+          ) : null}
         </div>
         {retry?.alert.id === alert.id ? (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-error" role="alert">
@@ -921,8 +943,9 @@ function alertElementId(alertId: string) {
 
 function alertInvestigation(
   alert: ProjectAlert,
-  projectBasePath: string
-): { href: string; label: string } {
+  projectBasePath: string,
+  canViewAudit: boolean
+): { href: string; label: string } | null {
   if (alert.type === "endpoint_failure") {
     return {
       href: `${projectBasePath}/endpoints${
@@ -934,16 +957,16 @@ function alertInvestigation(
     };
   }
   if (alert.type === "provider_failure") {
-    return {
+    return canViewAudit ? {
       href: `${projectBasePath}/audit?action=provider.request&status=rejected`,
       label: "View provider failures"
-    };
+    } : null;
   }
   if (alert.type === "sandbox_failure") {
-    return {
+    return canViewAudit ? {
       href: `${projectBasePath}/audit?action=sandbox.failed&status=accepted`,
       label: "View sandbox failures"
-    };
+    } : null;
   }
   return {
     href: alert.endpointId

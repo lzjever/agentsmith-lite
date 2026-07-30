@@ -30,6 +30,17 @@ describe("project Audit API",()=>{
       await store.appendProjectAuditEvent({id:"audit_null_subject",projectId:project.id,actorId:formerId,subjectUserId:null,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:"task_null_subject",createdAt:"2026-07-20T11:31:00.000Z"});
       await store.createUser({id:"audit_outsider",email:"outsider@example.test",emailVerified:true,passwordHash:"external:oidc",createdAt:"2026-07-20T00:00:00.000Z",updatedAt:"2026-07-20T00:00:00.000Z"});
       await store.createSession({id:"audit-outsider-session",userId:"audit_outsider",csrfToken:"audit-outsider-csrf",createdAt:"2026-07-20T00:00:00.000Z",expiresAt:"2999-01-01T00:00:00.000Z"});
+      const roleSessions = {
+        admin: "audit-admin-session",
+        member: "audit-member-session",
+        viewer: "audit-viewer-session"
+      } as const;
+      for (const role of ["admin", "member", "viewer"] as const) {
+        const userId = `audit_${role}`;
+        await store.createUser({id:userId,email:`${role}@example.test`,emailVerified:true,passwordHash:"external:oidc",createdAt:"2026-07-20T00:00:00.000Z",updatedAt:"2026-07-20T00:00:00.000Z"});
+        await store.upsertProjectMembership({projectId:project.id,userId,role,createdAt:"2026-07-20T00:00:00.000Z",updatedAt:"2026-07-20T00:00:00.000Z"});
+        await store.createSession({id:roleSessions[role],userId,csrfToken:`audit-${role}-csrf`,createdAt:"2026-07-20T00:00:00.000Z",expiresAt:"2999-01-01T00:00:00.000Z"});
+      }
       const tiedAt="2026-07-20T12:00:00.000Z";
       for(let index=0;index<23;index+=1)await store.appendProjectAuditEvent({id:`route_audit_${String(index).padStart(2,"0")}`,projectId:project.id,actorId:formerId,subjectUserId:user.id,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:`task_${index}`,createdAt:tiedAt});
       await store.appendProjectAuditEvent({id:"route_other",projectId:other.id,actorId:user.id,subjectUserId:formerId,action:"sandbox.failed",status:"accepted",resourceKind:"sandbox",resourceId:"task_other",createdAt:tiedAt});
@@ -75,6 +86,19 @@ describe("project Audit API",()=>{
       assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit?subjectUserId=system`,cookie)).status,400);
       assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit`,`asl_session=audit-outsider-session`)).status,403);
       assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit/identities?role=actor`,`asl_session=audit-outsider-session`)).status,403);
+      for (const role of ["member", "viewer"] as const) {
+        const roleCookie = `asl_session=${roleSessions[role]}`;
+        assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit`,roleCookie)).status,403);
+        assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit/identities?role=actor`,roleCookie)).status,403);
+      }
+      const adminCookie = `asl_session=${roleSessions.admin}`;
+      assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit`,adminCookie)).status,200);
+      assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit/identities?role=actor`,adminCookie)).status,200);
+      await store.setProjectLifecycleStatus(project.id,"archived","2026-07-20T13:00:00.000Z");
+      for (const roleCookie of [cookie, adminCookie]) {
+        assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit`,roleCookie)).status,200);
+        assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit/identities?role=actor`,roleCookie)).status,200);
+      }
       for(const query of ["role=any","role=actor&limit=51",`role=actor&q=${"x".repeat(121)}`,"role=actor&unknown=true"]){
         assert.equal((await get(api.baseUrl,`/api/v1/projects/${project.id}/audit/identities?${query}`,cookie)).status,400,query);
       }

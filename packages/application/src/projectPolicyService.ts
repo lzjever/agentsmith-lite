@@ -163,7 +163,7 @@ export class ProjectPolicyService {
     return runIdempotentMutation({ store: this.store, actorId: userId, scopeId: projectId, operation: "project.alert.transition", key: idempotencyKey, request: { alertId, status }, resourceId: alertId, failureMessage: "Alert could not be updated", run: transition });
   }
   async audit(userId:string,projectId:string,query:ProjectAuditQuery):Promise<import("../../contracts/src/api.js").ProjectAuditPage>{
-    await this.authorization.requireProject(userId, projectId);
+    await this.authorization.requireProjectMembership(userId, projectId, "admin");
     const limit=query.limit??20;
     if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new ProductError("Audit limit must be between 1 and 100");
     const filters=normalizeProjectAuditFilters(query);
@@ -174,7 +174,7 @@ export class ProjectPolicyService {
     return{items,nextCursor:page.hasMore&&last?encodeProjectAuditCursor({v:1,projectId,filters,key:{createdAt:last.createdAt,id:last.id}}):null};
   }
   async auditIdentities(userId:string,projectId:string,query:ProjectAuditIdentityQuery):Promise<ProjectAuditIdentityPage>{
-    await this.authorization.requireProject(userId,projectId);
+    await this.authorization.requireProjectMembership(userId,projectId,"admin");
     if(query.role!=="actor"&&query.role!=="subject")throw new ProductError("Audit identity role is invalid");
     const q=(query.q??"").trim().toLowerCase();
     if(q.length>120||/[\u0000-\u001f\u007f]/u.test(q))throw new ProductError("Audit identity query is invalid");

@@ -159,19 +159,21 @@ describe("v1 project membership API", () => {
     await store.appendProjectAuditEvent({id:"audit_actor_member_subject_owner",projectId,actorId:"user_member",subjectUserId:ownerUserId,action:"sandbox.released",status:"accepted",resourceKind:"sandbox",resourceId:"task_audit_2",detail:{taskId:"task_audit_2",runId:"run_audit_2",releaseReason:"requested"},createdAt:"2026-07-19T00:01:00.000Z"});
     const actorAudit=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit?actorId=${ownerUserId}&action=sandbox.released`,{headers:{cookie}});assert.equal(actorAudit.status,200);assert.deepEqual((await actorAudit.json() as {items:Array<{id:string}>}).items.map((item)=>item.id),["audit_actor_owner_subject_member"]);
     const subjectAudit=await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit?subjectUserId=user_member&action=sandbox.released`,{headers:{cookie}});assert.equal(subjectAudit.status,200);assert.deepEqual((await subjectAudit.json() as {items:Array<{id:string}>}).items.map((item)=>item.id),["audit_actor_owner_subject_member"]);
-    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit/identities?role=actor`,{headers:{cookie:`asl_session=${memberSession}`}})).status,200);
-    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit/identities?role=subject`,{headers:{cookie:`asl_session=${memberSession}`}})).status,200);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit/identities?role=actor`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
+    assert.equal((await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit/identities?role=subject`,{headers:{cookie:`asl_session=${memberSession}`}})).status,403);
 
     const visible = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/endpoints`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });
     assert.equal(visible.status, 200);
-    for (const resource of ["alerts", "audit"]) {
-      const response = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/${resource}`, {
-        headers: { cookie: `asl_session=${memberSession}` }
-      });
-      assert.equal(response.status, 200, `${resource} is visible to a project viewer`);
-    }
+    const visibleAlerts = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/alerts`, {
+      headers: { cookie: `asl_session=${memberSession}` }
+    });
+    assert.equal(visibleAlerts.status, 200, "alerts are visible to a project viewer");
+    const deniedAudit = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/audit`, {
+      headers: { cookie: `asl_session=${memberSession}` }
+    });
+    assert.equal(deniedAudit.status, 403, "Audit requires project admin permission");
     const capabilities = await fetch(`${api.baseUrl}/api/v1/projects/${projectId}/capabilities`, {
       headers: { cookie: `asl_session=${memberSession}` }
     });

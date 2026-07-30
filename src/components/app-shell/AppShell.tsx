@@ -3,7 +3,7 @@
 import { AppShell as AstryxAppShell, Button, Heading, MobileNav, Spinner, Text } from "@astryxdesign/core";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type ProjectDetail, type ProjectDirectoryItem, type WorkspaceDetail, type WorkspaceDirectoryItem } from "../../lib/api/client";
+import { ApiError, apiClient, DIRECTORY_CHANGED_EVENT, IDENTITY_CHANGED_EVENT, oidcStartUrlForReturnTo, SESSION_EXPIRED_EVENT, type CurrentUser, type MemberRole, type ProjectDetail, type ProjectDirectoryItem, type WorkspaceDetail, type WorkspaceDirectoryItem } from "../../lib/api/client";
 import { DocumentTitle } from "../layout/DocumentTitle";
 import { ThemeToggle } from "../theme/ThemeToggle";
 import { Logo } from "./Logo";
@@ -39,6 +39,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
   const [user,setUser]=useState<CurrentUser>();
   const [workspace,setWorkspace]=useState<WorkspaceDetail>();
   const [project,setProject]=useState<ProjectDetail>();
+  const [projectMemberRole,setProjectMemberRole]=useState<MemberRole>();
   const [quickWorkspaces,setQuickWorkspaces]=useState<WorkspaceDirectoryItem[]>([]);
   const [quickProjects,setQuickProjects]=useState<ProjectDirectoryItem[]>([]);
   const [workspaceIssue,setWorkspaceIssue]=useState<ExactReadIssue>();
@@ -65,10 +66,11 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     const request=++navigationRequest.current;
     const scope=navigationScope.current;
     if(!preservePage)setDirectoryState("loading");
-    const [workspacePage,workspaceResult,projectResult,projectPage]=await Promise.allSettled([
+    const [workspacePage,workspaceResult,projectResult,projectOverviewResult,projectPage]=await Promise.allSettled([
       apiClient.workspaces({limit:20}),
       scope.workspaceId?apiClient.workspace(scope.workspaceId):Promise.resolve(undefined),
       scope.projectId?apiClient.project(scope.projectId):Promise.resolve(undefined),
+      scope.projectId?apiClient.projectOverview(scope.projectId):Promise.resolve(undefined),
       scope.workspaceId?apiClient.workspaceProjects(scope.workspaceId,{limit:20}):Promise.resolve({items:[],nextCursor:null,total:0})
     ]);
     if(!mounted.current||request!==navigationRequest.current)return;
@@ -81,6 +83,7 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     else {setWorkspace(undefined);setWorkspaceIssue(nextWorkspaceIssue);}
     if(projectResult.status==="fulfilled"){setProject(projectResult.value);setProjectIssue(undefined);}
     else {setProject(undefined);setProjectIssue(nextProjectIssue);}
+    setProjectMemberRole(projectOverviewResult.status==="fulfilled"?projectOverviewResult.value?.memberRole:undefined);
     if(projectPage.status==="fulfilled")setQuickProjects(projectPage.value.items);
     else if(!preservePage)setQuickProjects([]);
     hasNavigation.current=true;
@@ -131,12 +134,12 @@ export function AppShell({children,workspaceId,projectId}:ShellProps) {
     variant="section"
     height="fill"
     topNav={<Topbar user={user!} workspaces={quickWorkspaces} projects={quickProjects} workspace={workspaceRecord} project={navigationProject} profileReturnTo={profileReturnTo}/>}
-    sideNav={<ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed}/>}
+    sideNav={<ShellNavigation workspace={workspaceRecord} project={navigationProject} memberRole={navigationProject?projectMemberRole:undefined} pathname={pathname} collapsed={collapsed} onCollapsedChange={setNavigationCollapsed}/>}
     mobileNav={{
       breakpoint:"lg",
       isOpen:mobileNavigationOpen,
       onOpenChange:setMobileNavigationOpen,
-      content:<MobileNav side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord?<div className="shrink-0 min-w-0 space-y-4 border-b border-border p-4"><WorkspaceSwitcher workspaces={quickWorkspaces} workspace={workspaceRecord} onSelect={(id)=>router.push(`/workspaces/${id}`)} onViewAll={()=>router.push("/")} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>{navigationProject?<ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>:null}</div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>
+      content:<MobileNav side="start" header="Navigation"><div className="flex min-h-full min-w-0 flex-col">{workspaceRecord?<div className="shrink-0 min-w-0 space-y-4 border-b border-border p-4"><WorkspaceSwitcher workspaces={quickWorkspaces} workspace={workspaceRecord} onSelect={(id)=>router.push(`/workspaces/${id}`)} onViewAll={()=>router.push("/")} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>{navigationProject?<ProjectSwitcher projects={quickProjects} project={navigationProject} workspaceId={workspaceRecord.id} mobile onNavigate={()=>setMobileNavigationOpen(false)}/>:null}</div>:null}<div className="min-h-0 min-w-0 flex-1"><ShellNavigation workspace={workspaceRecord} project={navigationProject} memberRole={navigationProject?projectMemberRole:undefined} pathname={pathname} onNavigate={()=>setMobileNavigationOpen(false)}/></div><ThemeToggle mobile/></div></MobileNav>
     }}
   ><CurrentUserProvider user={user!}><div ref={contentStart} tabIndex={-1} className="h-full min-h-0 outline-none">{directoryState==="error"?<DirectoryNotice onRetry={()=>loadNavigation(true)}/>:null}{contextError??children}</div></CurrentUserProvider></AstryxAppShell>;
 }

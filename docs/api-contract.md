@@ -158,12 +158,13 @@ Provider and failure rules default to 3600 seconds and accept only 60 through
 
 ## Project Audit
 
-`GET /api/v1/projects/{projectId}/audit` is a pure bounded read available to
-Project viewers. It accepts only `actorId`, `subjectUserId`, `action`, `status`,
-`resourceKind`, `resourceId`, `from`, `to`, `cursor`, and `limit`. The default
-limit is 20 and the maximum is 100. Filters are applied before the keyset and
-limit. Results are ordered by `createdAt` and ID descending, with tied IDs
-compared using PostgreSQL `C` collation.
+`GET /api/v1/projects/{projectId}/audit` is a pure bounded read available only
+to Project owners and admins, including when the Project or Workspace is
+archived. Members and viewers receive `403`. It accepts only `actorId`,
+`subjectUserId`, `action`, `status`, `resourceKind`, `resourceId`, `from`, `to`,
+`cursor`, and `limit`. The default limit is 20 and the maximum is 100. Filters
+are applied before the keyset and limit. Results are ordered by `createdAt` and
+ID descending, with tied IDs compared using PostgreSQL `C` collation.
 
 The response is `{ items, nextCursor }`. Each item projects
 `actorDisplayName`, `actorEmail`, `subjectDisplayName`, and `subjectEmail` in
@@ -173,7 +174,8 @@ v1 cursor binds the Project, every normalized filter, and the final
 `{ createdAt, id }` key; changing only `limit` is allowed. Malformed,
 noncanonical, cross-Project, or cross-filter cursors are rejected.
 
-`GET /api/v1/projects/{projectId}/audit/identities` accepts only
+`GET /api/v1/projects/{projectId}/audit/identities` has the same owner/admin
+access boundary and archived-resource behavior. It accepts only
 `role=actor|subject`, optional `q`, `cursor`, and `limit`. The default limit is
 20 and the maximum is 50; `q` is trimmed, limited to 120 characters, and
 matches ID, display name, or email case-insensitively. Only non-null IDs
