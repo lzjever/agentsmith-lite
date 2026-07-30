@@ -22,8 +22,10 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import { FileLibraryService } from "../../packages/application/src/fileLibraryService.js";
 import { FilePathValidationService } from "../../packages/application/src/filePathValidationService.js";
 import { FileService } from "../../packages/application/src/fileService.js";
+import type { KubernetesResource } from "../../packages/contracts/src/api.js";
 import { ProductError } from "../../packages/domain/src/errors.js";
 import { DryRunBotifiedRuntimeHttpClient, type BotifiedRuntimeHttpClient } from "../../packages/ports/src/botified.js";
+import type { PodReadiness } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 
 const roots: string[] = [];
 const execFileAsync=promisify(execFile);
@@ -709,16 +711,18 @@ describe("file library service", () => {
 
   it("aborts slow Botified readiness and immediately unblocks deadline cleanup",async()=>{
     let healthAborted=false;
+    let resolveHealthAbort!:()=>void;
+    const healthAbortObserved=new Promise<void>((resolve)=>{resolveHealthAbort=resolve;});
     const botified=new class extends DryRunBotifiedRuntimeHttpClient{
       override async health(_baseUrl?:string,_serviceKey?:string,signal?:AbortSignal):Promise<{status:"ok"}>{
         return new Promise<{status:"ok"}>((_resolve,reject)=>{
-          const abort=()=>{healthAborted=true;reject(signal?.reason);};
+          const abort=()=>{healthAborted=true;resolveHealthAbort();reject(signal?.reason);};
           if(signal?.aborted)abort();
           else signal?.addEventListener("abort",abort,{once:true});
         });
       }
     };
-    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:5});
+    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:100});
     const endpointId=await taskEndpoint(services,ownerId,projectId,"slow-health");
     const created=await services.tasks.createTask(ownerId,projectId,{
       endpointId,
@@ -732,12 +736,15 @@ describe("file library service", () => {
     store.findTaskPreparationOperation=async()=>null;
     store.listTaskMessagesDue=async()=>[];
     store.listActiveTasks=async()=>[];
-    await services.tasks.syncActiveTasksOnce();
+    const sync=services.tasks.syncActiveTasksOnce();
 
     assert.equal(receipt.outcome,"accepted_in_progress");
+    await waitForObservedAbort(healthAbortObserved,"Botified health");
+    await sync;
     assert.equal(healthAborted,true);
-    await new Promise<void>((resolve)=>setImmediate(resolve));
     assert.equal(services.tasks.hasLocalStartupOperation(task.currentRunId),false);
+    assert.notEqual((await store.sandboxRuns.get(task.currentRunId))?.startedAt,null);
+    assert.equal((await services.policies.getUsageOverview(ownerId,projectId)).sandbox.launches,1);
     const reaped=await services.sandboxLifecycle.reapSandboxRunsOnce({apply:true,runId:task.currentRunId});
     assert.deepEqual(reaped.errors,[]);
     assert.equal((await store.sandboxRuns.get(task.currentRunId))?.state,"failed");
@@ -745,16 +752,18 @@ describe("file library service", () => {
 
   it("aborts a slow final Botified state identity read and unblocks cleanup",async()=>{
     let stateReadAborted=false;
+    let resolveStateReadAbort!:()=>void;
+    const stateReadAbortObserved=new Promise<void>((resolve)=>{resolveStateReadAbort=resolve;});
     const botified=new class extends DryRunBotifiedRuntimeHttpClient{
       override async readState(_baseUrl?:string,_serviceKey?:string,signal?:AbortSignal){
         return new Promise<never>((_resolve,reject)=>{
-          const abort=()=>{stateReadAborted=true;reject(signal?.reason);};
+          const abort=()=>{stateReadAborted=true;resolveStateReadAbort();reject(signal?.reason);};
           if(signal?.aborted)abort();
           else signal?.addEventListener("abort",abort,{once:true});
         });
       }
     };
-    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:5});
+    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:100});
     const endpointId=await taskEndpoint(services,ownerId,projectId,"slow-state");
     const created=await services.tasks.createTask(ownerId,projectId,{
       endpointId,
@@ -768,11 +777,12 @@ describe("file library service", () => {
     store.findTaskPreparationOperation=async()=>null;
     store.listTaskMessagesDue=async()=>[];
     store.listActiveTasks=async()=>[];
-    await services.tasks.syncActiveTasksOnce();
+    const sync=services.tasks.syncActiveTasksOnce();
 
     assert.equal(receipt.outcome,"accepted_in_progress");
+    await waitForObservedAbort(stateReadAbortObserved,"final Botified state read");
+    await sync;
     assert.equal(stateReadAborted,true);
-    await new Promise<void>((resolve)=>setImmediate(resolve));
     assert.equal(services.tasks.hasLocalStartupOperation(task.currentRunId),false);
     const reaped=await services.sandboxLifecycle.reapSandboxRunsOnce({apply:true,runId:task.currentRunId});
     assert.deepEqual(reaped.errors,[]);
@@ -782,17 +792,19 @@ describe("file library service", () => {
   it("aborts the first Botified state rebuild without restoring the missing runtime document",async()=>{
     let stateReadAborted=false;
     let stateReadSignal:AbortSignal|undefined;
+    let resolveStateReadAbort!:()=>void;
+    const stateReadAbortObserved=new Promise<void>((resolve)=>{resolveStateReadAbort=resolve;});
     const botified=new class extends DryRunBotifiedRuntimeHttpClient{
       override async readState(_baseUrl?:string,_serviceKey?:string,signal?:AbortSignal){
         stateReadSignal=signal;
         return new Promise<never>((_resolve,reject)=>{
-          const abort=()=>{stateReadAborted=true;reject(signal?.reason);};
+          const abort=()=>{stateReadAborted=true;resolveStateReadAbort();reject(signal?.reason);};
           if(signal?.aborted)abort();
           else signal?.addEventListener("abort",abort,{once:true});
         });
       }
     };
-    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:5});
+    const {services,store,ownerId,projectId}=await fixture(true,100,{botifiedClient:botified,startupActionTimeoutMs:100});
     const endpointId=await taskEndpoint(services,ownerId,projectId,"slow-state-rebuild");
     const created=await services.tasks.createTask(ownerId,projectId,{
       endpointId,
@@ -808,14 +820,45 @@ describe("file library service", () => {
     store.findTaskPreparationOperation=async()=>null;
     store.listTaskMessagesDue=async()=>[];
     store.listActiveTasks=async()=>[];
-    await services.tasks.syncActiveTasksOnce();
+    const sync=services.tasks.syncActiveTasksOnce();
 
     assert.equal(receipt.outcome,"accepted_in_progress");
+    await waitForObservedAbort(stateReadAbortObserved,"initial Botified state rebuild");
+    await sync;
     assert.equal(stateReadSignal?.aborted,true);
     assert.equal(stateReadAborted,true);
-    await new Promise<void>((resolve)=>setImmediate(resolve));
     assert.equal(services.tasks.hasLocalStartupOperation(task.currentRunId),false);
     assert.equal(await store.jsonDocs.get("sandbox_runtime_state",task.id),null);
+  });
+
+  it("does not start runtime accounting when the Pod fails before readiness",async()=>{
+    const {services,store,ownerId,projectId}=await fixture(true,100,{
+      podReadiness:{state:"failed",podUid:"fixture-pod-uid"}
+    });
+    const endpointId=await taskEndpoint(services,ownerId,projectId,"pod-not-ready");
+    const created=await services.tasks.createTask(ownerId,projectId,{
+      endpointId,
+      prompt:"Pod fails before readiness",
+      fileLibrary:{mode:"create_new",name:"Pod not ready files"}
+    },"pod-not-ready-task");
+    const task=await store.findTask(created.task.id);assert.ok(task?.currentRunId);
+    const run=await store.sandboxRuns.get(task.currentRunId);assert.ok(run);
+
+    await services.tasks.startTaskTerminal(
+      ownerId,
+      task.id,
+      {expectedRunId:run.runId,expectedSandboxState:run.state},
+      "pod-not-ready-terminal"
+    );
+    store.findTaskPreparationOperation=async()=>null;
+    store.listTaskMessagesDue=async()=>[];
+    store.listActiveTasks=async()=>[];
+    await services.tasks.syncActiveTasksOnce();
+
+    assert.equal((await store.sandboxRuns.get(task.currentRunId))?.startedAt,null);
+    const usage=(await services.policies.getUsageOverview(ownerId,projectId)).sandbox;
+    assert.equal(usage.launches,0);
+    assert.equal(usage.totalDurationSeconds,"0");
   });
 
   it("does not prepare an existing Library before a rejected live admission",async()=>{
@@ -953,12 +996,15 @@ describe("file library service", () => {
 async function fixture(
   live=false,
   namespaceLimit:number|null=live?100:null,
-  options:{botifiedClient?:BotifiedRuntimeHttpClient;startupActionTimeoutMs?:number}={}
+  options:{botifiedClient?:BotifiedRuntimeHttpClient;startupActionTimeoutMs?:number;podReadiness?:PodReadiness}={}
 ) {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "asl-file-library-service-"));
   roots.push(dataRoot);
   const store = createLocalInMemoryProductStore();
   const builtinAdminPassword=live?"production-admin-password":"admin-password";
+  const resources=new Map<string,KubernetesResource>();
+  const resourceKey=(resource:Pick<KubernetesResource,"kind"|"metadata">)=>
+    `${resource.kind}/${resource.metadata.namespace??"default"}/${resource.metadata.name}`;
   const services = Object.assign(createApplicationServices({
     store,
     dataRoot,
@@ -972,12 +1018,38 @@ async function fixture(
       liveSandbox:{
         ...(options.startupActionTimeoutMs!==undefined?{startupActionTimeoutMs:options.startupActionTimeoutMs}:{}),
         port:{
-          async applyResource(){return"applied" as const;},
-          async deleteResource(){return"deleted" as const;},
-          async getPodReadiness(){return{state:"ready" as const,podUid:"fixture-pod-uid"};},
-          async getConfigMapData(){return"not_found" as const;},
-          async listManagedResources(){return[];},
-          async inspectResource(){return"not_found" as const;}
+          async applyResource(resource:KubernetesResource){
+            const uid=resource.kind==="Pod"?"fixture-pod-uid":`fixture-${resource.kind.toLowerCase()}-${resource.metadata.name}`;
+            resources.set(resourceKey(resource),structuredClone({
+              ...resource,
+              metadata:{...resource.metadata,uid}
+            }));
+            return"applied" as const;
+          },
+          async deleteResource(ref:{kind:string;namespace:string;name:string}){
+            const key=`${ref.kind}/${ref.namespace}/${ref.name}`;
+            return resources.delete(key)?"deleted" as const:"not_found" as const;
+          },
+          async getPodReadiness(namespace:string,name:string){
+            if(!resources.has(`Pod/${namespace}/${name}`))return"not_found" as const;
+            return options.podReadiness??{state:"ready" as const,podUid:"fixture-pod-uid",podIp:"10.0.0.2"};
+          },
+          async getConfigMapData(namespace:string,name:string){
+            const resource=resources.get(`ConfigMap/${namespace}/${name}`);
+            const data=resource?.data;
+            return data&&typeof data==="object"&&!Array.isArray(data)
+              ?{data:structuredClone(data) as Record<string,string>}
+              :"not_found" as const;
+          },
+          async listManagedResources(namespace:string){
+            return[...resources.values()]
+              .filter((resource)=>resource.metadata.namespace===namespace)
+              .map((resource)=>structuredClone(resource));
+          },
+          async inspectResource(ref:{kind:string;namespace:string;name:string}){
+            const resource=resources.get(`${ref.kind}/${ref.namespace}/${ref.name}`);
+            return resource?{state:"present" as const,resource:structuredClone(resource)}:"not_found" as const;
+          }
         }
       }
     }:{})
@@ -989,6 +1061,20 @@ async function fixture(
   const now = new Date().toISOString();
   await store.upsertProjectMembership({ projectId: project.id, userId: viewer.user.id, role: "viewer", createdAt: now, updatedAt: now });
   return { services, store, dataRoot, ownerId: owner.user.id, viewerId: viewer.user.id, projectId: project.id };
+}
+
+async function waitForObservedAbort(observed:Promise<void>,label:string):Promise<void>{
+  let timeout:ReturnType<typeof setTimeout>|undefined;
+  try{
+    await Promise.race([
+      observed,
+      new Promise<never>((_resolve,reject)=>{
+        timeout=setTimeout(()=>reject(new Error(`${label} was not aborted`)),1_000);
+      })
+    ]);
+  }finally{
+    if(timeout)clearTimeout(timeout);
+  }
 }
 
 async function taskEndpoint(

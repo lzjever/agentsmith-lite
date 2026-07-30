@@ -2249,10 +2249,11 @@ export class TaskService {
             :{resolved:false as const};
         }
       );
+      const podReadyAt=nowIso();
       const verified=await this.store.recordTaskSandboxStartupPod({
         taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,startupClaimToken,
         expectedConfigMapName:run.startupConfigMapName!,expectedConfigHash:run.startupConfigHash!,
-        podUid:ready.podUid,podIp:ready.podIp,observedAt:nowIso()
+        podUid:ready.podUid,podIp:ready.podIp,observedAt:podReadyAt,podReadyAt
       });
       if(!verified)throw new ProductError("Sandbox pod readiness identity changed",409,"sandbox_cleanup_intent_conflict");
       run=verified;
@@ -2275,8 +2276,9 @@ export class TaskService {
         open.actionDeadlineAt,input.signal
       );
     }catch(error){
+      const deadlineExpired=error instanceof ProductError&&error.code==="sandbox_startup_deadline_exceeded";
       if(
-        error instanceof ProductError&&error.code!=="sandbox_startup_deadline_exceeded"&&
+        error instanceof ProductError&&!deadlineExpired&&
         !(error instanceof BotifiedTaskPortError&&error.retryable)
       )throw error;
       if(live&&podLabels){
@@ -2285,10 +2287,12 @@ export class TaskService {
           throw new ProductError("Sandbox startup result is unknown and identity no longer matches",409,"sandbox_cleanup_intent_conflict");
         }
       }
-      await this.store.recoverSandboxStartupAction({
-        taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
-        claimToken:startupClaimToken,actionDeadlineAt:open.actionDeadlineAt,recoveredAt:nowIso()
-      });
+      if(!deadlineExpired){
+        await this.store.recoverSandboxStartupAction({
+          taskId:input.task.id,runId:run.runId,expectedFencingToken:run.fencingToken,
+          claimToken:startupClaimToken,actionDeadlineAt:open.actionDeadlineAt,recoveredAt:nowIso()
+        });
+      }
       throw new ProductError("Botified startup open result is unknown",504,"sandbox_startup_unknown_result");
     }
     if(finalPodIdentity){

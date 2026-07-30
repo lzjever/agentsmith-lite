@@ -2175,7 +2175,8 @@ class InMemorySandboxRunStore {
         input.startupClaimToken!==undefined&&run.startupClaimToken!==input.startupClaimToken||
         task.currentRunId!==run.runId||!taskRunScopeMatches(task,run)||task.deletedAt||task.archivedAt||
         run.startupConfigMapName!==input.expectedConfigMapName||
-        run.startupConfigHash!==input.expectedConfigHash||!input.podUid
+        run.startupConfigHash!==input.expectedConfigHash||!input.podUid||
+        input.podReadyAt!==undefined&&!input.podIp
       )return null;
       if(run.resourceNames.configMap!==run.startupConfigMapName)return null;
       if(run.startupPodUid&&run.startupPodUid!==input.podUid)return null;
@@ -2184,6 +2185,7 @@ class InMemorySandboxRunStore {
         ...run,
         startupPodUid:input.podUid,
         startupPodIp:run.startupPodIp??input.podIp,
+        startedAt:run.startedAt??input.podReadyAt??null,
         updatedAt:input.observedAt
       };
       this.runs.set(run.runId,clone(verified));

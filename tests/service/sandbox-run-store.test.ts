@@ -207,13 +207,20 @@ describe("sandbox Run store", () => {
     });
     assert.equal(firstPod?.startupPodUid,"pod-uid-1");
     assert.equal(firstPod?.startupPodIp,null);
+    assert.equal(firstPod?.startedAt,null);
     const readyPod=await store.recordTaskSandboxStartupPod({
       taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
       expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
-      podUid:"pod-uid-1",podIp:"10.42.0.17",observedAt:runTimestamp(3)
+      podUid:"pod-uid-1",podIp:"10.42.0.17",observedAt:runTimestamp(3),podReadyAt:runTimestamp(3)
     });
     assert.equal(readyPod?.startupPodUid,"pod-uid-1");
     assert.equal(readyPod?.startupPodIp,"10.42.0.17");
+    assert.equal(readyPod?.startedAt,runTimestamp(3));
+    assert.equal((await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
+      podUid:"pod-uid-1",podIp:"10.42.0.17",observedAt:runTimestamp(4),podReadyAt:runTimestamp(4)
+    }))?.startedAt,runTimestamp(3));
     assert.equal(await store.recordTaskSandboxStartupPod({
       taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
       expectedConfigMapName:"task-1-config-4f2a",expectedConfigHash:"sha256:4f2a",
@@ -363,6 +370,12 @@ describe("sandbox Run store", () => {
       taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,readyAt:runTimestamp(0)
     });
     assert.ok(ready);
+    const podReady=await store.recordTaskSandboxStartupPod({
+      taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
+      expectedConfigMapName:run.startupConfigMapName!,expectedConfigHash:run.startupConfigHash!,
+      podUid:run.startupPodUid!,podIp:run.startupPodIp??null,observedAt:runTimestamp(1),podReadyAt:runTimestamp(1)
+    });
+    assert.equal(podReady?.startedAt,runTimestamp(1));
     const startupClaimToken="startup_claim_1";
     assert.equal((await store.claimSandboxStartup({
       taskId:run.taskId,runId:run.runId,expectedFencingToken:run.fencingToken,
@@ -413,6 +426,7 @@ describe("sandbox Run store", () => {
     assert.equal(activated.kind,"activated");
     const active=await store.sandboxRuns.get(run.runId);
     assert.equal(active?.state,"active");
+    assert.equal(active?.startedAt,runTimestamp(1));
     assert.equal(active?.startupClaimToken,null);
     assert.equal(active?.startupActionDeadlineAt,null);
   });

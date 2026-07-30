@@ -463,6 +463,7 @@ export interface RecordTaskSandboxStartupPodInput {
   podUid:string;
   podIp:string|null;
   observedAt:string;
+  podReadyAt?:string;
 }
 
 export interface InitializeTaskSandboxStartupConfigInput {

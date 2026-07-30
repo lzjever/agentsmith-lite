@@ -1107,7 +1107,8 @@ export class PostgresProductStore implements ProductStore {
         run.state!=="starting"||run.fencingToken!==input.expectedFencingToken||
         input.startupClaimToken!==undefined&&run.startupClaimToken!==input.startupClaimToken||
         run.startupConfigMapName!==input.expectedConfigMapName||
-        run.startupConfigHash!==input.expectedConfigHash||!input.podUid
+        run.startupConfigHash!==input.expectedConfigHash||!input.podUid||
+        input.podReadyAt!==undefined&&!input.podIp
       )return null;
       if(run.resourceNames.configMap!==run.startupConfigMapName)return null;
       if(run.startupPodUid&&run.startupPodUid!==input.podUid)return null;
@@ -1116,6 +1117,7 @@ export class PostgresProductStore implements ProductStore {
         ...run,
         startupPodUid:input.podUid,
         startupPodIp:run.startupPodIp??input.podIp,
+        startedAt:run.startedAt??input.podReadyAt??null,
         updatedAt:input.observedAt
       };
       await updateSandboxRunWithClient(client,verified);
