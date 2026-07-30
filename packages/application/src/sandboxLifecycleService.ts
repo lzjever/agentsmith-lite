@@ -192,147 +192,171 @@ export class SandboxLifecycleService {
     }
     const fencedLifecycleCandidates=lifecycleCandidates.filter((action)=>!blockedRunIds.has(reconcileActionRunId(action)));
     const cleanupClaims = await this.claimRunsBeforeDestructiveCleanup(fencedLifecycleCandidates, preparedRuns.allRuns);
-    for (const runId of cleanupClaims.rejectedRunIds) blockedRunIds.add(runId);
-    const claimedOrOrphanActions = lifecycleCandidates.filter((action) =>
-      cleanupClaims.claimedRuns.has(reconcileActionRunId(action)) || cleanupClaims.orphanRunIds.has(reconcileActionRunId(action))
-    );
-    let cleanupActions = claimedOrOrphanActions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
-    cleanupActions = await this.deferNewlyPersistedOrphanActions(cleanupActions, cleanupClaims.orphanRunIds);
-    const mutations = await this.applyCleanupActions(this.config.port, cleanupActions);
-    for(const [runId,failure] of mutations.failures){
-      if(cleanupClaims.orphanRunIds.has(runId))result.errors.push(failure.message);
-    }
     const cleanupFailures=new Map<string,CleanupFailure>();
-    const cleanupCompleteCandidates:Array<{
-      current:PersistedSandboxRunState;
-      run:SandboxRunState;
-    }>=[];
-    for(const [runId,claimed] of cleanupClaims.claimedRuns){
-      const inspection=await this.inspectRunResources(this.config.port,claimed);
-      if(inspection.failure){
-        blockedRunIds.add(runId);
-        cleanupFailures.set(runId,inspection.failure);
-        result.errors.push(inspection.failure.message);
-        continue;
-      }
-      const mutationFailure=mutations.failures.get(runId);
-      if(mutationFailure&&!deleteFailureResolved(mutationFailure,inspection.resources)){
-        blockedRunIds.add(runId);
-        cleanupFailures.set(runId,mutationFailure);
-        result.errors.push(mutationFailure.message);
-        continue;
-      }
-      const current=await this.store.sandboxRuns.get(runId);
-      if(!current||current.fencingToken!==claimed.fencingToken){
-        blockedRunIds.add(runId);
-        cleanupFailures.set(runId,{target:"Sandbox Run",message:`Sandbox run ${runId} fencing token changed during cleanup`});
-        result.errors.push(`Sandbox run ${runId} fencing token changed during cleanup`);
-        continue;
-      }
-      const exactPlan=this.plan(
-        [current as PersistedSandboxRunState & SandboxRunState],
-        inspection.resources,
-        [current],
-        false
+    try{
+      for (const runId of cleanupClaims.rejectedRunIds) blockedRunIds.add(runId);
+      const claimedOrOrphanActions = lifecycleCandidates.filter((action) =>
+        cleanupClaims.claimedRuns.has(reconcileActionRunId(action)) || cleanupClaims.orphanRunIds.has(reconcileActionRunId(action))
       );
-      result.actionSummary.push(...exactPlan.actions.map(actionSummary));
-      const action=exactPlan.actions.find((candidate)=>
-        candidate.type==="store_run_state"&&
-        (candidate.reason==="cleanup_complete"||candidate.reason==="cleanup_in_progress")
-      );
-      if (!action || action.type !== "store_run_state") {
-        blockedRunIds.add(runId);
-        cleanupFailures.set(runId,{target:"Sandbox reconciliation",message:`Sandbox run ${runId} produced no cleanup state`});
-        result.errors.push(`Sandbox run ${runId} produced no cleanup state`);
-        continue;
+      let cleanupActions = claimedOrOrphanActions.filter((action) => !blockedRunIds.has(reconcileActionRunId(action)));
+      cleanupActions = await this.deferNewlyPersistedOrphanActions(cleanupActions, cleanupClaims.orphanRunIds);
+      const mutations = await this.applyCleanupActions(this.config.port, cleanupActions);
+      for(const [runId,failure] of mutations.failures){
+        if(cleanupClaims.orphanRunIds.has(runId))result.errors.push(failure.message);
       }
-      if (action.reason === "cleanup_complete") {
-        if(startupDrainRunIds.has(action.run.runId)){
-          const current=await this.store.sandboxRuns.get(action.run.runId);
-          const drainedAt=(this.config.now?.()??new Date()).toISOString();
-          const drained=current?.startupClaimToken&&current.startupActionDeadlineAt
-            ?await this.store.drainSandboxStartupAction({
-                taskId:current.taskId,runId:current.runId,expectedFencingToken:current.fencingToken,
-                claimToken:current.startupClaimToken,actionDeadlineAt:current.startupActionDeadlineAt,
-                drainedAt,
-                failureCode:"startup_failed",
-                failureMessage:"Sandbox startup mutation result remained unknown after its deadline and cleanup.",
-                auditEvent:{
-                  id:`audit_sandbox_failed_startup_drain_${current.runId}`,projectId:current.projectId,
-                  actorId:null,subjectUserId:current.startedByUserId,action:"sandbox.failed",status:"accepted",
-                  resourceKind:"sandbox",resourceId:current.taskId,
-                  detail:{taskId:current.taskId,runId:current.runId},createdAt:drainedAt
-                }
-              })
-            :null;
-          if(drained)result.storedRunIds.push(drained.runId);
-          else await this.resolveCleanupCasConflict(
-            current??claimed,
+      const cleanupCompleteCandidates:Array<{
+        current:PersistedSandboxRunState;
+        claimed:PersistedSandboxRunState;
+        run:SandboxRunState;
+      }>=[];
+      for(const [runId,claimed] of cleanupClaims.claimedRuns){
+        const inspection=await this.inspectRunResources(this.config.port,claimed);
+        if(inspection.failure){
+          blockedRunIds.add(runId);
+          cleanupFailures.set(runId,inspection.failure);
+          result.errors.push(inspection.failure.message);
+          continue;
+        }
+        const mutationFailure=mutations.failures.get(runId);
+        if(mutationFailure&&!deleteFailureResolved(mutationFailure,inspection.resources)){
+          blockedRunIds.add(runId);
+          cleanupFailures.set(runId,mutationFailure);
+          result.errors.push(mutationFailure.message);
+          continue;
+        }
+        const current=await this.store.sandboxRuns.get(runId);
+        if(!current||current.fencingToken!==claimed.fencingToken){
+          blockedRunIds.add(runId);
+          cleanupFailures.set(runId,{target:"Sandbox Run",message:`Sandbox run ${runId} fencing token changed during cleanup`});
+          result.errors.push(`Sandbox run ${runId} fencing token changed during cleanup`);
+          continue;
+        }
+        const exactPlan=this.plan(
+          [current as PersistedSandboxRunState & SandboxRunState],
+          inspection.resources,
+          [current],
+          false
+        );
+        result.actionSummary.push(...exactPlan.actions.map(actionSummary));
+        const action=exactPlan.actions.find((candidate)=>
+          candidate.type==="store_run_state"&&
+          (candidate.reason==="cleanup_complete"||candidate.reason==="cleanup_in_progress")
+        );
+        if (!action || action.type !== "store_run_state") {
+          blockedRunIds.add(runId);
+          cleanupFailures.set(runId,{target:"Sandbox reconciliation",message:`Sandbox run ${runId} produced no cleanup state`});
+          result.errors.push(`Sandbox run ${runId} produced no cleanup state`);
+          continue;
+        }
+        if (action.reason === "cleanup_complete") {
+          if(startupDrainRunIds.has(action.run.runId)){
+            const drainedAt=(this.config.now?.()??new Date()).toISOString();
+            const drained=claimed.startupClaimToken&&claimed.startupActionDeadlineAt
+              ?await this.store.drainSandboxStartupAction({
+                  taskId:claimed.taskId,runId:claimed.runId,expectedFencingToken:claimed.fencingToken,
+                  claimToken:claimed.startupClaimToken,actionDeadlineAt:claimed.startupActionDeadlineAt,
+                  drainedAt,
+                  failureCode:"startup_failed",
+                  failureMessage:"Sandbox startup mutation result remained unknown after its deadline and cleanup.",
+                  auditEvent:{
+                    id:`audit_sandbox_failed_startup_drain_${claimed.runId}`,projectId:claimed.projectId,
+                    actorId:null,subjectUserId:claimed.startedByUserId,action:"sandbox.failed",status:"accepted",
+                    resourceKind:"sandbox",resourceId:claimed.taskId,
+                    detail:{taskId:claimed.taskId,runId:claimed.runId},createdAt:drainedAt
+                  }
+                })
+              :null;
+            if(drained)result.storedRunIds.push(drained.runId);
+            else await this.resolveCleanupCasConflict(
+              claimed,
+              {
+                target:"Sandbox startup drain",
+                message:`Sandbox run ${action.run.runId} startup deadline changed before drain could complete`
+              },
+              result
+            );
+            continue;
+          }
+          cleanupCompleteCandidates.push({current,claimed,run:action.run});
+          continue;
+        }
+        const transition = await this.clearSuccessfulCleanupClaim(current);
+        if (transition) {
+          result.storedRunIds.push(transition.stored.runId);
+        } else {
+          await this.resolveCleanupCasConflict(
+            current,
             {
-              target:"Sandbox startup drain",
-              message:`Sandbox run ${action.run.runId} startup deadline changed before drain could complete`
+              target:"Sandbox cleanup claim",
+              message:`Sandbox run ${action.run.runId} fencing token changed before state could be stored`
             },
             result
           );
-          continue;
         }
-        cleanupCompleteCandidates.push({current,run:action.run});
-        continue;
       }
-      const transition = await this.clearSuccessfulCleanupClaim(current);
-      if (transition) {
-        result.storedRunIds.push(transition.stored.runId);
-      } else {
-        await this.resolveCleanupCasConflict(
-          current,
-          {
-            target:"Sandbox cleanup claim",
-            message:`Sandbox run ${action.run.runId} fencing token changed before state could be stored`
-          },
-          result
-        );
-      }
-    }
-    if(cleanupCompleteCandidates.length>0){
-      const finalInventory=await this.loadFinalManagedInventory(this.config.port);
-      if(finalInventory.failure){
-        result.errors.push(finalInventory.failure.message);
-        for(const candidate of cleanupCompleteCandidates){
-          blockedRunIds.add(candidate.current.runId);
-          cleanupFailures.set(candidate.current.runId,finalInventory.failure);
-        }
-      }else{
-        for(const candidate of cleanupCompleteCandidates){
-          if(managedInventoryHasRun(finalInventory.resources,candidate.current)){
-            const transition=await this.clearSuccessfulCleanupClaim(candidate.current);
+      if(cleanupCompleteCandidates.length>0){
+        const finalInventory=await this.loadFinalManagedInventory(this.config.port);
+        if(finalInventory.failure){
+          result.errors.push(finalInventory.failure.message);
+          for(const candidate of cleanupCompleteCandidates){
+            blockedRunIds.add(candidate.current.runId);
+            cleanupFailures.set(candidate.current.runId,finalInventory.failure);
+          }
+        }else{
+          for(const candidate of cleanupCompleteCandidates){
+            if(managedInventoryHasRun(finalInventory.resources,candidate.current)){
+              const transition=await this.clearSuccessfulCleanupClaim(candidate.current);
+              if(transition){
+                result.storedRunIds.push(transition.stored.runId);
+              }else{
+                await this.resolveCleanupCasConflict(
+                  candidate.current,
+                  {
+                    target:"Sandbox cleanup claim",
+                    message:`Sandbox run ${candidate.current.runId} fencing token changed before state could be stored`
+                  },
+                  result
+                );
+              }
+              continue;
+            }
+            let transition:Awaited<ReturnType<SandboxLifecycleService["completeReleasedRun"]>>;
+            try{
+              transition=await this.completeReleasedRun(candidate.run,candidate.claimed);
+            }catch(error){
+              const failure={
+                target:"Sandbox release settlement",
+                message:`Sandbox run ${candidate.current.runId} release settlement failed: ${sanitizeCleanupError(errorMessage(error))}`
+              };
+              blockedRunIds.add(candidate.current.runId);
+              cleanupFailures.set(candidate.current.runId,failure);
+              result.errors.push(failure.message);
+              continue;
+            }
             if(transition){
               result.storedRunIds.push(transition.stored.runId);
-            }else{
+            } else {
               await this.resolveCleanupCasConflict(
-                candidate.current,
+                candidate.claimed,
                 {
-                  target:"Sandbox cleanup claim",
+                  target:"Sandbox release settlement",
                   message:`Sandbox run ${candidate.current.runId} fencing token changed before state could be stored`
                 },
                 result
               );
             }
-            continue;
-          }
-          const transition = await this.completeReleasedRun(candidate.run);
-          if(transition){
-            result.storedRunIds.push(transition.stored.runId);
-          } else {
-            await this.resolveCleanupCasConflict(
-              candidate.current,
-              {
-                target:"Sandbox release settlement",
-                message:`Sandbox run ${candidate.current.runId} fencing token changed before state could be stored`
-              },
-              result
-            );
           }
         }
+      }
+    }catch(error){
+      const failure={
+        target:"Sandbox cleanup",
+        message:`Sandbox cleanup failed: ${sanitizeCleanupError(errorMessage(error))}`
+      };
+      result.errors.push(failure.message);
+      for(const runId of cleanupClaims.claimedRuns.keys()){
+        blockedRunIds.add(runId);
+        if(!cleanupFailures.has(runId))cleanupFailures.set(runId,failure);
       }
     }
     await this.releaseBlockedCleanupClaims(cleanupClaims.claimedRuns, blockedRunIds, cleanupFailures);
@@ -609,18 +633,30 @@ export class SandboxLifecycleService {
     failures:Map<string,CleanupFailure>
   ): Promise<void> {
     const updatedAt = (this.config.now?.() ?? new Date()).toISOString();
+    const releaseFailures:string[]=[];
     for (const runId of blockedRunIds) {
       const claimed = claimedRuns.get(runId);
       if (!claimed) continue;
       const failure=failures.get(runId)??{target:"Kubernetes cleanup",message:"Sandbox cleanup could not be completed"};
-      await this.store.sandboxRuns.updateWithFencing(runId, claimed.fencingToken, {
-        ...claimed,
-        cleanupClaimedAt: null,
-        lastCleanupAt:updatedAt,
-        lastCleanupError:{at:updatedAt,target:failure.target,message:sanitizeCleanupError(failure.message)},
-        fencingToken: claimed.fencingToken + 1,
-        updatedAt
-      });
+      try{
+        await this.store.sandboxRuns.updateWithFencing(runId, claimed.fencingToken, {
+          ...claimed,
+          cleanupClaimedAt: null,
+          lastCleanupAt:updatedAt,
+          lastCleanupError:{at:updatedAt,target:failure.target,message:sanitizeCleanupError(failure.message)},
+          fencingToken: claimed.fencingToken + 1,
+          updatedAt
+        });
+      }catch{
+        releaseFailures.push(runId);
+      }
+    }
+    if(releaseFailures.length>0){
+      throw new ProductError(
+        `Sandbox cleanup claim release failed for ${releaseFailures.length} Run(s): ${releaseFailures.join(", ")}`,
+        500,
+        "sandbox_cleanup_claim_release_failed"
+      );
     }
   }
 
@@ -655,62 +691,67 @@ export class SandboxLifecycleService {
     return stored ? { previous: current, stored } : null;
   }
 
-  private async completeReleasedRun(run:SandboxRunState):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
-    const current=await this.store.sandboxRuns.get(run.runId);if(!current)return null;
+  private async completeReleasedRun(
+    run:SandboxRunState,
+    claimed:PersistedSandboxRunState
+  ):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
     const releasedAt=(this.config.now?.()??new Date()).toISOString();
-    const complete=async(fileMeasurement?:{bytes:number;measuredAt:string})=>{
-      const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:releasedAt,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
-      const startedAt=current.startedAt;
-      const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
-      const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
-      const result=await this.store.completeSandboxRunRelease({
-        runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,
-        ...(fileMeasurement?{fileMeasurement}:{}),
-        auditEvent:{
-          id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,
-          subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",
-          resourceKind:"sandbox",resourceId:current.taskId,
-          detail:{
-            taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason,
-            ...(fileMeasurement?{metric:"project_file_bytes" as const,current:fileMeasurement.bytes}:{})
-          },
-          createdAt:releasedAt
-        },
-        releaseReceipt:{
-          responseStatus:200,
-          responseBody:{outcome:"completed",keyDisposition:"retire",taskId:current.taskId,runId:current.runId},
-          updatedAt:releasedAt
-        }
-      });
-      if(result==="conflict")return null;
-      if(result==="applied"&&fileMeasurement&&this.config.refreshProjectFileAlerts){
-        try{await this.config.refreshProjectFileAlerts(current.projectId)}
-        catch(error){console.error(`Project file alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`)}
-      }
-      try{
-        await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
-        await recoverProjectAlerts(this.store,current.projectId,"sandbox_capacity",{unconfiguredFallback:true});
-        if(stored.releaseReason!=="failed"){
-          const endpointId=(await this.store.findTask(current.taskId))?.endpointId;
-          await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_failure",endpointId?{endpointId}:{});
-          await recoverProjectAlerts(this.store,current.projectId,"sandbox_failure",{...(endpointId?{endpointId}:{}),unconfiguredFallback:true});
-        }
-      }
-      catch(error){console.error(`Sandbox capacity alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
-      return{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
-    };
-    if(!this.config.withProjectFileMeasurement)return complete();
-    let callbackEntered=false;
+    const transition=await this.completeWithoutFileMeasurement(claimed,run,releasedAt);
+    if(!transition||!this.config.withProjectFileMeasurement)return transition;
+    let reconciled=false;
     try{
-      return await this.config.withProjectFileMeasurement(current.projectId,async(bytes)=>{
-        callbackEntered=true;
-        return complete({bytes,measuredAt:(this.config.now?.()??new Date()).toISOString()});
+      await this.config.withProjectFileMeasurement(claimed.projectId,async(bytes)=>{
+        const measuredAt=(this.config.now?.()??new Date()).toISOString();
+        const usage=await this.store.setProjectFileBytes(claimed.projectId,bytes,measuredAt);
+        if(!usage)throw new Error("Project file usage is unavailable");
       });
+      reconciled=true;
     }catch(error){
-      if(callbackEntered)throw error;
       console.error(`Project file measurement failed: ${sanitizeCleanupError(errorMessage(error))}`);
-      return complete();
     }
+    if(reconciled&&this.config.refreshProjectFileAlerts){
+      try{await this.config.refreshProjectFileAlerts(claimed.projectId)}
+      catch(error){console.error(`Project file alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`)}
+    }
+    return transition;
+  }
+
+  private async completeWithoutFileMeasurement(
+    current:PersistedSandboxRunState,
+    run:SandboxRunState,
+    releasedAt:string
+  ):Promise<{previous:PersistedSandboxRunState;stored:PersistedSandboxRunState}|null>{
+    const stored={...(run as PersistedSandboxRunState),state:"released" as const,releaseReason:releaseReason(current),releasedAt,startupClaimToken:null,startupLeaseExpiresAt:null,startupActionDeadlineAt:null,cleanupClaimedAt:null,lastCleanupAt:releasedAt,lastCleanupError:null,fencingToken:current.fencingToken+1,updatedAt:releasedAt};
+    const startedAt=current.startedAt;
+    const durationSeconds=startedAt===null?0:Math.max(0,(Date.parse(releasedAt)-Date.parse(startedAt))/1000);
+    const settlement={runId:current.runId,workspaceId:current.workspaceId,projectId:current.projectId,taskId:current.taskId,fileLibraryId:current.fileLibraryId,startedByUserId:current.startedByUserId,startedAt,releasedAt,durationSeconds,resources:structuredClone(current.resourceSnapshot),releaseReason:stored.releaseReason!};
+    const result=await this.store.completeSandboxRunRelease({
+      runId:current.runId,expectedFencingToken:current.fencingToken,run:stored,settlement,
+      auditEvent:{
+        id:`audit_sandbox_released_${current.runId}`,projectId:current.projectId,actorId:null,
+        subjectUserId:current.startedByUserId,action:"sandbox.released",status:"accepted",
+        resourceKind:"sandbox",resourceId:current.taskId,
+        detail:{taskId:current.taskId,runId:current.runId,releaseReason:settlement.releaseReason},
+        createdAt:releasedAt
+      },
+      releaseReceipt:{
+        responseStatus:200,
+        responseBody:{outcome:"completed",keyDisposition:"retire",taskId:current.taskId,runId:current.runId},
+        updatedAt:releasedAt
+      }
+    });
+    if(result==="conflict")return null;
+    try{
+      await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_capacity");
+      await recoverProjectAlerts(this.store,current.projectId,"sandbox_capacity",{unconfiguredFallback:true});
+      if(stored.releaseReason!=="failed"){
+        const endpointId=(await this.store.findTask(current.taskId))?.endpointId;
+        await evaluateProjectAlertRules(this.store,current.projectId,"sandbox_failure",endpointId?{endpointId}:{});
+        await recoverProjectAlerts(this.store,current.projectId,"sandbox_failure",{...(endpointId?{endpointId}:{}),unconfiguredFallback:true});
+      }
+    }
+    catch(error){console.error(`Sandbox capacity alert refresh failed: ${sanitizeCleanupError(errorMessage(error))}`);}
+    return{previous:current,stored:await this.store.sandboxRuns.get(current.runId)??stored};
   }
 
   private async persistTerminalFailureTransitions(

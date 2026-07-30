@@ -9,6 +9,7 @@ import { createApplicationServices } from "../../packages/application/src/factor
 import { ProjectPolicyService } from "../../packages/application/src/projectPolicyService.js";
 import { SandboxLifecycleService } from "../../packages/application/src/sandboxLifecycleService.js";
 import type { KubernetesResource } from "../../packages/contracts/src/api.js";
+import { ProductError } from "../../packages/domain/src/errors.js";
 import type { PersistedAgentTask, PersistedSandboxRunState } from "../../packages/ports/src/store.js";
 import type { KubernetesResourceRef } from "../../packages/sandbox-controller/src/kubernetesPort.js";
 import { applySandboxReconcileActions, reconcileSandboxRuns } from "../../packages/sandbox-controller/src/reconciler.js";
@@ -129,6 +130,36 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal((await store.queryProjectAuditEvents(run.projectId,{limit:20})).items.length,1);
   });
 
+  it("continues releasing later owned cleanup claims when the first release throws",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const first=await createReleaseRequestedRun(store);
+    const second=await createReleaseRequestedRun(store,"lifecycle_second_claim",false);
+    const update=store.sandboxRuns.updateWithFencing.bind(store.sandboxRuns);
+    store.sandboxRuns.updateWithFencing=async(runId,...args)=>{
+      if(runId===first.run.runId)throw new Error("database unavailable at postgres://claim-user:claim-password@db.internal/agentsmith");
+      return update(runId,...args);
+    };
+
+    await assert.rejects(
+      new SandboxLifecycleService(store,{
+        namespace:first.run.namespace,
+        port:new LifecyclePort([...observedResources(first.run),...observedResources(second.run)],true),
+        now:()=>new Date(timestamp(3))
+      }).reapSandboxRunsOnce({apply:true}),
+      (error:unknown)=>{
+        assert.ok(error instanceof ProductError);
+        assert.equal(error.code,"sandbox_cleanup_claim_release_failed");
+        assert.match(error.message,/1 Run/);
+        assert.match(error.message,new RegExp(first.run.runId));
+        assert.doesNotMatch(error.message,/claim-password|postgres:|database unavailable/);
+        return true;
+      }
+    );
+
+    assert.notEqual((await store.sandboxRuns.get(first.run.runId))?.cleanupClaimedAt,null);
+    assert.equal((await store.sandboxRuns.get(second.run.runId))?.cleanupClaimedAt,null);
+  });
+
   it("retains an exact inspection error and recovers on the next maintenance tick",async()=>{
     const store=createLocalInMemoryProductStore();
     const {run}=await createReleaseRequestedRun(store);
@@ -238,7 +269,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     );
   });
 
-  it("measures Project files under the file lock after final absence and commits Release usage, audit, and alerts",async()=>{
+  it("releases capacity before reconciling Project files after final absence",async()=>{
     const store=createLocalInMemoryProductStore();
     const {run}=await createReleaseRequestedRun(store);
     const policies=new ProjectPolicyService(store,new AuthorizationService(store));
@@ -251,6 +282,7 @@ describe("sandbox lifecycle fenced cleanup",()=>{
       port:new LifecyclePort([],false),
       now:()=>new Date(timestamp(3)),
       withProjectFileMeasurement:async(projectId,project)=>{
+        events.push(`state-before-scan:${(await store.sandboxRuns.get(run.runId))?.state}`);
         events.push(`scan:${projectId}`);
         const outcome=await project(194);
         events.push(`finalized:${(await store.sandboxRuns.get(run.runId))?.state}`);
@@ -264,9 +296,10 @@ describe("sandbox lifecycle fenced cleanup",()=>{
 
     assert.deepEqual(result.errors,[]);
     assert.deepEqual(events,[
+      "state-before-scan:released",
       `scan:${run.projectId}`,
-      `alert:${run.projectId}:released`,
-      "finalized:released"
+      "finalized:released",
+      `alert:${run.projectId}:released`
     ]);
     const usage=await store.findProjectResourceUsage(run.projectId);assert.ok(usage);
     assert.equal(usage.projectFileBytes,194);
@@ -275,11 +308,34 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.deepEqual(releaseAudit?.detail,{
       taskId:run.taskId,
       runId:run.runId,
-      releaseReason:"requested",
-      metric:"project_file_bytes",
-      current:194
+      releaseReason:"requested"
     });
     assert.equal((await store.queryProjectAlerts(run.projectId,{view:"active",limit:20})).items.some((alert)=>alert.type==="project_file_bytes_limit"),true);
+  });
+
+  it("keeps the Run released while post-settlement file measurement is blocked",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    let unblock!:()=>void;
+    const blocked=new Promise<void>((resolve)=>{unblock=resolve});
+    let measurementEntered!:()=>void;
+    const entered=new Promise<void>((resolve)=>{measurementEntered=resolve});
+    const reap=new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:new LifecyclePort([],false),
+      now:()=>new Date(timestamp(3)),
+      withProjectFileMeasurement:async(_projectId,project)=>{
+        measurementEntered();
+        await blocked;
+        return project(194);
+      }
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    await entered;
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+    assert.equal((await store.findProjectResourceUsage(run.projectId))?.activeSandboxes,0);
+    unblock();
+    assert.deepEqual((await reap).errors,[]);
   });
 
   it("wires the existing active-Library scanner into final Release",async()=>{
@@ -344,26 +400,83 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.doesNotMatch(errors[0]??"",/bsk_file_measurement_secret/);
   });
 
-  it("does not fallback to an unmeasured finalize after the measurement callback reaches a conflict",async()=>{
+  it("clears a cleanup claim after one settlement failure and retries on the next tick",async()=>{
     const store=createLocalInMemoryProductStore();
     const {run}=await createReleaseRequestedRun(store);
     const complete=store.completeSandboxRunRelease.bind(store);
     let completeCalls=0;
     store.completeSandboxRunRelease=async(input)=>{
       completeCalls+=1;
-      return completeCalls===1?"conflict":complete(input);
+      if(completeCalls===1)throw new Error("temporary settlement failure");
+      return complete(input);
     };
+
+    const lifecycle=new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port:new LifecyclePort([],false),
+      now:()=>new Date(timestamp(3))
+    });
+    const failed=await lifecycle.reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    assert.equal(completeCalls,1);
+    assert.equal(failed.errors.length,1);
+    const retryable=await store.sandboxRuns.get(run.runId);assert.ok(retryable);
+    assert.equal(retryable.state,"release_requested");
+    assert.equal(retryable.cleanupClaimedAt,null);
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,0);
+
+    const retried=await lifecycle.reapSandboxRunsOnce({apply:true,runId:run.runId});
+    assert.deepEqual(retried.errors,[]);
+    assert.equal(completeCalls,2);
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+  });
+
+  it("settles in the same tick that final inventory confirms all owned resources absent",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const port=new LifecyclePort([],false);
 
     const result=await new SandboxLifecycleService(store,{
       namespace:run.namespace,
-      port:new LifecyclePort([],false),
-      now:()=>new Date(timestamp(3)),
-      withProjectFileMeasurement:async(_projectId,project)=>project(194)
+      port,
+      now:()=>new Date(timestamp(3))
     }).reapSandboxRunsOnce({apply:true,runId:run.runId});
 
-    assert.equal(completeCalls,1);
-    assert.equal(result.errors.length,1);
-    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"release_requested");
+    assert.deepEqual(result.errors,[]);
+    assert.equal(port.listCalls,2);
+    assert.equal((await store.sandboxRuns.get(run.runId))?.state,"released");
+    assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,1);
+  });
+
+  it("does not settle with a cleanup claim reacquired after final inventory",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const {run}=await createReleaseRequestedRun(store);
+    const port=new LifecyclePort([],false);
+    const list=port.listManagedResources.bind(port);
+    port.listManagedResources=async()=>{
+      const resources=await list();
+      if(port.listCalls===2){
+        const expired=await store.sandboxRuns.get(run.runId);assert.ok(expired);
+        const reclaimed=await store.sandboxRuns.claimForCleanup({
+          runId:run.runId,
+          expectedFencingToken:expired.fencingToken,
+          claimedAt:timestamp(5)
+        });
+        assert.ok(reclaimed);
+      }
+      return resources;
+    };
+
+    await new SandboxLifecycleService(store,{
+      namespace:run.namespace,
+      port,
+      now:()=>new Date(timestamp(3))
+    }).reapSandboxRunsOnce({apply:true,runId:run.runId});
+
+    const persisted=await store.sandboxRuns.get(run.runId);assert.ok(persisted);
+    assert.equal(persisted.state,"release_requested");
+    assert.equal(persisted.cleanupClaimedAt,timestamp(5));
     assert.equal((await store.listSandboxUsageSettlements(run.projectId,run.startedByUserId)).length,0);
   });
 
@@ -598,6 +711,53 @@ describe("sandbox lifecycle fenced cleanup",()=>{
     assert.equal(pending.state,"starting");
     assert.equal(pending.cleanupClaimedAt,null);
     assert.equal(pending.lastCleanupError?.target,"Sandbox startup drain");
+  });
+
+  it("does not drain with a cleanup claim reacquired by another worker",async()=>{
+    const store=createLocalInMemoryProductStore();
+    const fixture=await createReleaseRequestedRun(store);
+    const starting:PersistedSandboxRunState={
+      ...fixture.run,
+      state:"starting",
+      startupReadyAt:timestamp(0),
+      startupClaimToken:"crashed-startup",
+      startupLeaseExpiresAt:timestamp(2),
+      startupActionDeadlineAt:timestamp(3),
+      releaseReason:null,
+      releaseRequestedAt:null,
+      fencingToken:fixture.run.fencingToken+1,
+      updatedAt:timestamp(1)
+    };
+    assert.ok(await store.sandboxRuns.updateWithFencing(fixture.run.runId,fixture.run.fencingToken,starting));
+    const port=new LifecyclePort(observedResources(starting),false);
+    const get=store.sandboxRuns.get.bind(store.sandboxRuns);
+    let reclaimed=false;
+    store.sandboxRuns.get=async(runId)=>{
+      const snapshot=await get(runId);
+      if(!reclaimed&&runId===starting.runId&&port.inspectCalls.length===6&&snapshot?.cleanupClaimedAt){
+        reclaimed=true;
+        const next=await store.sandboxRuns.claimForCleanup({
+          runId,
+          expectedFencingToken:snapshot.fencingToken,
+          claimedAt:timestamp(6)
+        });
+        assert.ok(next);
+      }
+      return snapshot;
+    };
+
+    await new SandboxLifecycleService(store,{
+      namespace:starting.namespace,
+      port,
+      now:()=>new Date(timestamp(4))
+    }).reapSandboxRunsOnce({apply:true,runId:starting.runId});
+
+    const persisted=await get(starting.runId);assert.ok(persisted);
+    assert.equal(reclaimed,true);
+    assert.equal(persisted.state,"starting");
+    assert.equal(persisted.cleanupClaimedAt,timestamp(6));
+    assert.equal(persisted.startupClaimToken,"crashed-startup");
+    assert.equal((await store.queryProjectAuditEvents(starting.projectId,{limit:20})).items.length,0);
   });
 
   it("does not claim release-requested cleanup while its local startup Promise is unsettled",async()=>{
