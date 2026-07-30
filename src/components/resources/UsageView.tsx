@@ -502,14 +502,14 @@ function SandboxUsage({
       className="space-y-5 outline-none"
       aria-labelledby="sandbox-usage-heading"
     >
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className="min-w-0">
           <Heading level={2} id="sandbox-usage-heading">Sandbox allocations</Heading>
-          <Text as="p" type="supporting" color="secondary" display="block" className="mt-1">
+          <Text as="p" type="supporting" color="secondary" display="block" wordBreak="break-word" className="mt-1">
             {memberScope} · summary from {formatLocalDateTime(sandbox.summaryStartedAt)} through {formatLocalDateTime(sandbox.measuredAt)}
           </Text>
         </div>
-        {overview.canSelectMemberUsage&&currentUserId?<div className="w-72 max-w-full"><MemberDirectoryPicker kind="project" scopeId={projectId} label="Sandbox member" value={selectedSandboxUserId??currentUserId} onChange={onSandboxUserChange} pinned={[{userId:currentUserId,displayName:"You",email:currentUserId},...(selectedMember?[selectedMember]:[])]}/></div>:null}
+        {overview.canSelectMemberUsage&&currentUserId?<div className="min-w-0 w-full lg:w-72 lg:shrink-0"><MemberDirectoryPicker kind="project" scopeId={projectId} label="Sandbox member" value={selectedSandboxUserId??currentUserId} onChange={onSandboxUserChange} pinned={[{userId:currentUserId,displayName:"You",email:currentUserId},...(selectedMember?[selectedMember]:[])]}/></div>:null}
       </div>
       <dl className="grid gap-px overflow-hidden border border-border bg-border sm:grid-cols-2 xl:grid-cols-5">
         <SandboxTotal label="Unreleased runs" value={formatInteger(String(sandbox.unreleasedCount))} />
