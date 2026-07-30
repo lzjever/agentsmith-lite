@@ -5,11 +5,11 @@ import type {
 import {
   readTaskCommandMetadata,
   type TaskMessageCommandMetadata
-} from "./task-command-storage.js";
+} from "./task-command-storage.ts";
 import {
   clearTaskMessageCommandAttempt,
   restoreTaskDraft
-} from "./task-draft-snapshot.js";
+} from "./task-draft-snapshot.ts";
 
 export type RetainedTaskMessageRecovery =
   | { status: "completed"; receipt: TaskMessageReceipt }
