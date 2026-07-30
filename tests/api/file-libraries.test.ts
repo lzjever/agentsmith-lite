@@ -61,7 +61,7 @@ describe("file library API", () => {
     const fileAudits=(await store.queryProjectAuditEvents(projectId,{limit:100})).items;
     const uploadAudits=fileAudits.filter((item)=>item.action==="file.upload");
     assert.equal(uploadAudits.length,2);
-    assert.equal(uploadAudits.every((item)=>item.detail?.filePath?.startsWith(`libraries/${first.id}/home/`)),true);
+    assert.equal(uploadAudits.every((item)=>item.detail?.filePath?.startsWith(`${first.rootSubPath}/`)),true);
 
     const originalAudit=store.appendProjectAuditEvent.bind(store);
     store.appendProjectAuditEvent=async event=>{if(event.action==="file.upload")throw new Error("audit unavailable");return originalAudit(event)};

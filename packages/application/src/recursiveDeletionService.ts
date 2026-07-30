@@ -339,7 +339,12 @@ export class RecursiveDeletionService {
       throw new ProductError("File Library deletion operation identity is invalid",500);
     }
     const libraryRoot=this.paths.normalizeRelativeProjectPath(target.libraryRoot);
-    if(libraryRoot!==`libraries/${target.libraryId}/home`){
+    const segments=libraryRoot.split("/");
+    const rootName=segments[1]??"";
+    const attemptPrefix=`${target.libraryId}-attempt_`;
+    if(segments.length!==3||segments[0]!=="libraries"||segments[2]!=="home"||
+      !(rootName===target.libraryId||
+        rootName.startsWith(attemptPrefix)&&/^[A-Za-z0-9._:-]+$/.test(rootName.slice(attemptPrefix.length)))){
       throw new ProductError("File Library root path is invalid",409);
     }
     return{
@@ -348,7 +353,7 @@ export class RecursiveDeletionService {
       libraryRoot,
       relativePath:libraryRoot,
       operationId:target.owner.operationId,
-      sourceParentSegments:["libraries",target.libraryId],
+      sourceParentSegments:["libraries",rootName],
       sourceName:"home"
     };
   }
