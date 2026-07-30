@@ -331,6 +331,10 @@ describe("Task command session storage", () => {
     writeTaskCommandMetadata(storage, "task-create", createMetadata);
     writeTaskCommandMetadata(storage, "task-message", messageMetadata);
 
+    assert.deepEqual(
+      restoreTaskCommandMetadata(storage, "task-message", messageIdentity),
+      messageMetadata
+    );
     assert.equal(restoreTaskCreateDraft(storage, { ...createIdentity, userId: "user_2" }), null);
     assert.equal(restoreTaskCreateDraft(storage, { ...createIdentity, projectId: "project_2" }), null);
     assert.equal(

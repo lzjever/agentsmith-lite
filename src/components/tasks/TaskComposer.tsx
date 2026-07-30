@@ -16,7 +16,7 @@ import {
 import { sandboxCapacityRecovery, type SandboxCapacityRecovery } from "./sandbox-capacity-recovery";
 import { SandboxCapacityRecoveryNotice } from "./SandboxCapacityRecoveryNotice";
 
-export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, canManagePolicy, policyHref, capabilities, queuedMessages, busy, payloadLocked, storageUnavailable, unavailableMessage = "Messaging is unavailable", onSend, onUpdateQueued, onDeleteQueued }: { userId: string; projectId: string; taskId: string; activeSandboxesHref: string; canManagePolicy: boolean; policyHref: string; capabilities: TaskCapabilities; queuedMessages: TaskQueuedMessage[]; busy: boolean; payloadLocked: boolean; storageUnavailable: boolean; unavailableMessage?: string; onSend: (content: string, submittedDraft: string) => Promise<void>; onUpdateQueued: (messageId: string, content: string) => Promise<void>; onDeleteQueued: (messageId: string) => Promise<void> }) {
+export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, canManagePolicy, policyHref, capabilities, queuedMessages, busy, payloadLocked, storageUnavailable, recoveredSubmission, unavailableMessage = "Messaging is unavailable", onSend, onUpdateQueued, onDeleteQueued }: { userId: string; projectId: string; taskId: string; activeSandboxesHref: string; canManagePolicy: boolean; policyHref: string; capabilities: TaskCapabilities; queuedMessages: TaskQueuedMessage[]; busy: boolean; payloadLocked: boolean; storageUnavailable: boolean; recoveredSubmission: { sequence: number; draft: string } | null; unavailableMessage?: string; onSend: (content: string, submittedDraft: string) => Promise<void>; onUpdateQueued: (messageId: string, content: string) => Promise<void>; onDeleteQueued: (messageId: string) => Promise<void> }) {
   const composer = useRef<HTMLElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState("");
@@ -35,6 +35,8 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
   const [rejectedFocusSequence, setRejectedFocusSequence] = useState(0);
   const rejectedFocusRequest = useRef(false);
   const submittingDraft = useRef<string | null>(null);
+  const recoveredSubmissionSequence = useRef(recoveredSubmission?.sequence ?? 0);
+  recoveredSubmissionSequence.current = recoveredSubmission?.sequence ?? 0;
   const messageBusy = busy || submitting || saving || deleting;
   const composerEditable = capabilities.sendMessage && !messageBusy && !payloadLocked;
   const nextEdit = editDraft.trim();
@@ -80,8 +82,18 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
     return () => cancelAnimationFrame(frame);
   }, [composerEditable, rejectedFocusSequence]);
 
+  useEffect(() => {
+    if (!recoveredSubmission) return;
+    setSendError("");
+    setSendErrorTitle("Message could not be sent");
+    setCapacityRecovery(null);
+    setDraft((current) => current === recoveredSubmission.draft ? "" : current);
+    setDraftNotice("");
+  }, [recoveredSubmission]);
+
   async function submit() {
     const submittedDraft = draft;
+    const startingRecoverySequence = recoveredSubmissionSequence.current;
     const content = draft.trim();
     if (
       !content
@@ -105,6 +117,11 @@ export function TaskComposer({ userId, projectId, taskId, activeSandboxesHref, c
         requestAnimationFrame(() => input.current?.focus());
       }
     } catch (reason) {
+      if (recoveredSubmissionSequence.current !== startingRecoverySequence) {
+        setSendError("");
+        setCapacityRecovery(null);
+        return;
+      }
       if (reason instanceof TaskCommandStorageUnavailableError) {
         setSendError("");
         setCapacityRecovery(null);
