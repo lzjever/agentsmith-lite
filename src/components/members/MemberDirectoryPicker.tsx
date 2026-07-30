@@ -27,7 +27,7 @@ export function MemberDirectoryPicker({kind,scopeId,label,value,onChange,exclude
   const options=useMemo(()=>items.map((item)=>({value:item.userId,label:memberLabel(item)})),[items]);
   function select(userId:string){const member=items.find((item)=>item.userId===userId);if(member){setSelected(member);onChange(member);}}
   return <div className="grid gap-2">
-    <TextInput label={`Search ${label.toLowerCase()}`} startIcon={<Search size={15}/>} value={directory.query} onChange={directory.setSearch} placeholder={`Search ${label.toLowerCase()}`} isDisabled={disabled} hasAutoFocus={hasAutoFocus} data-autofocus={hasAutoFocus ? "" : undefined} size="lg"/>
+    <TextInput label={`Search ${label.toLowerCase()}`} startIcon={<Search size={15}/>} value={directory.query} onChange={directory.setSearch} placeholder={`Search ${label.toLowerCase()}`} isDisabled={disabled} hasAutoFocus={hasAutoFocus} data-autofocus={hasAutoFocus ? "" : undefined} size="lg" width="100%"/>
     <Selector label={label} options={options} value={options.some((option)=>option.value===value)?value:""} onChange={select} placeholder={directory.state==="loading"?"Loading members...":"Select a member"} isDisabled={disabled||directory.state!=="ready"||options.length===0} size="lg" width="100%"/>
     {directory.refreshError||directory.state==="error"?<div role="alert" className="flex items-center justify-between gap-2"><Text type="supporting" className="text-error">{directory.refreshError||directory.error}</Text><Button label="Retry" variant="ghost" size="sm" onClick={()=>void directory.retry()}/></div>:null}
     {directory.state==="ready"&&options.length===0&&!directory.refreshing?<Text type="supporting" color="secondary">No members match this search.</Text>:null}
