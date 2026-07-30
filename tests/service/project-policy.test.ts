@@ -75,6 +75,41 @@ describe("project resource policy", () => {
     assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes, 1);
   });
 
+  it("separates file quota reservation from the accepted upload Audit",async()=>{
+    const store=createInMemoryProductStore();
+    const services=createApplicationServices({
+      store,
+      dataRoot:"/tmp/agentsmith-file-upload-accounting",
+      builtinAdminPassword:"admin-password"
+    });
+    const {user}=await services.auth.loginAfterBootstrap("admin-password");
+    const workspace=await services.workspaces.createWorkspace(user.id,{name:"W"});
+    const project=await services.workspaces.createProject(user.id,workspace.id,{name:"P"});
+    const filePath="libraries/library_accounting-attempt/home/result.txt";
+
+    await services.policies.reserveFileUpload(project.id,user.id,filePath,3);
+    assert.equal((await store.findProjectResourceUsage(project.id))?.projectFileBytes,3);
+    assert.equal(
+      (await store.queryProjectAuditEvents(project.id,{limit:100})).items
+        .filter((event)=>event.action==="file.upload").length,
+      0
+    );
+
+    await services.policies.commitFileUpload(
+      project.id,
+      user.id,
+      "library_accounting",
+      filePath,
+      3,
+      "text/plain"
+    );
+    const audits=(await store.queryProjectAuditEvents(project.id,{limit:100})).items
+      .filter((event)=>event.action==="file.upload");
+    assert.equal(audits.length,1);
+    assert.equal(audits[0]?.status,"accepted");
+    assert.deepEqual(audits[0]?.detail,{filePath,bytes:3,mediaType:"text/plain"});
+  });
+
   it("records over-limit Library measurements without failing and recovers the alert", async () => {
     const store = createInMemoryProductStore();
     const services = createApplicationServices({ store, dataRoot: "/tmp/agentsmith-file-reconcile", builtinAdminPassword: "admin-password" });

@@ -2,12 +2,9 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
-  mkdir,
   open,
   readdir,
-  rename,
-  rm,
-  writeFile,
+  rmdir,
   type FileHandle
 } from "node:fs/promises";
 import path from "node:path";
@@ -26,6 +23,7 @@ import type { FileDeletionOperationOwner, FileLibraryDeletionOperationOwner, Pro
 import {
   DescriptorFileTreeWalker,
   descriptorPath,
+  type DescriptorFileIdentity,
   type DescriptorTreeCheckpoint
 } from "./descriptorFileTreeWalker.js";
 import { FilePathValidationService } from "./filePathValidationService.js";
@@ -42,6 +40,19 @@ interface ResolvedProjectFilePath {
   absolutePath: string;
 }
 
+export interface PersistedLibraryFile {
+  location:LibraryOwnedFileLocation;
+  identity:DescriptorFileIdentity|null;
+  existingBytes:Buffer|null;
+  newlyWritten:boolean;
+}
+
+export interface LibraryOwnedFileLocation {
+  projectRoot:string;
+  rootSubPath:string;
+  relativePath:string;
+}
+
 interface DeletedProjectFile {
   response: DeleteProjectFileResponse;
   bytes: number;
@@ -56,6 +67,13 @@ interface FileByteAccounting {
     mediaType: string;
     entryType?: ProjectFileDeletionEntryType;
   }): Promise<void>;
+}
+
+export interface FileUploadAccounting {
+  rootSubPaths?:string[];
+  reconcile?(bytes:number):Promise<void>;
+  reserve(path:string,delta:number,file:{bytes:number;mediaType:string}):Promise<void>;
+  committed(path:string,file:{bytes:number;mediaType:string}):Promise<void>;
 }
 
 interface FileDeletionContext {
@@ -120,12 +138,91 @@ export class FileService {
     await this.ensureLibraryRootExists(projectRoot,rootSubPath);
   }
 
-  uploadLibraryFile(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput){return this.uploadFileWithAccounting(projectRoot,input,{record:async()=>undefined},rootSubPath)}
-  uploadLibraryFileWithAccounting(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput,accounting:FileByteAccounting){return this.uploadFileWithAccounting(projectRoot,input,accounting,rootSubPath)}
+  async discardEmptyLibraryRoot(projectRoot:string,rootSubPath:string):Promise<boolean>{
+    const segments=this.normalizeLibraryRootSubPath(rootSubPath).split("/");
+    const project=await this.paths.openProjectRoot(projectRoot,false);
+    try{
+      const parentSegments=segments.slice(0,-1);
+      const parent=await this.tree.openDirectoryPath(project,parentSegments,false);
+      try{
+        await rmdir(descriptorPath(parent,segments.at(-1)!));
+        await parent.sync();
+      }catch(error){
+        if(isNotFound(error))return true;
+        if(isNotEmpty(error))return false;
+        throw error;
+      }finally{
+        await parent.close();
+      }
+      const libraryParent=await this.tree.openDirectoryPath(project,parentSegments.slice(0,-1),false);
+      try{
+        await rmdir(descriptorPath(libraryParent,parentSegments.at(-1)!));
+        await libraryParent.sync();
+      }catch(error){
+        if(!isNotFound(error)&&!isNotEmpty(error))throw error;
+      }finally{
+        await libraryParent.close();
+      }
+      return true;
+    }finally{
+      await project.close();
+    }
+  }
+
+  uploadLibraryFile(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput){return this.uploadFileWithAccounting(projectRoot,input,{reserve:async()=>undefined,committed:async()=>undefined},rootSubPath)}
+  uploadLibraryFileWithAccounting(projectRoot:string,rootSubPath:string,input:UploadProjectFileInput,accounting:FileUploadAccounting){return this.uploadFileWithAccounting(projectRoot,input,accounting,rootSubPath)}
   listLibraryFiles(projectRoot:string,rootSubPath:string,input="",canDelete=true){return this.listFilesAtRoot(projectRoot,input,rootSubPath,canDelete)}
   downloadLibraryFile(projectRoot:string,rootSubPath:string,input:string){return this.downloadFile(projectRoot,input,rootSubPath)}
   deleteLibraryFile(projectRoot:string,rootSubPath:string,input:string){return this.deleteFile(projectRoot,input,rootSubPath)}
   deleteLibraryFileWithAccounting(projectRoot:string,rootSubPath:string,input:string,accounting:FileByteAccounting,deletion?:FileDeletionContext){return this.deleteFileWithAccounting(projectRoot,input,accounting,rootSubPath,deletion)}
+
+  async persistLibraryOwnedFile(
+    projectRoot:string,
+    rootSubPath:string,
+    relativePath:string,
+    bytes:Uint8Array
+  ):Promise<PersistedLibraryFile>{
+    const normalizedPath=this.normalizeLibraryFilePath(relativePath,false);
+    const canonicalRoot=this.normalizeLibraryRootSubPath(rootSubPath);
+    const location={projectRoot,rootSubPath:canonicalRoot,relativePath:normalizedPath};
+    return this.withOwnedFileParent(location,true,async(parent,name)=>{
+      const existingBytes=await this.tree.readOptionalRegularFile(parent,name);
+      if(existingBytes)return{
+        location,
+        identity:null,
+        existingBytes,
+        newlyWritten:false
+      };
+      try{
+        const written=await this.tree.writeRegularFile(parent,name,bytes,false);
+        return{
+          location,
+          identity:{dev:written.dev,ino:written.ino},
+          existingBytes:null,
+          newlyWritten:true
+        };
+      }catch(error){
+        if(!isAlreadyExists(error))throw error;
+        return{
+          location,
+          identity:null,
+          existingBytes:await this.tree.readOptionalRegularFile(parent,name),
+          newlyWritten:false
+        };
+      }
+    });
+  }
+
+  async readLibraryOwnedFile(location:LibraryOwnedFileLocation,label:string):Promise<Buffer|null>{
+    try{
+      return await this.withOwnedFileParent(location,false,(parent,name)=>
+        this.tree.readOptionalRegularFile(parent,name,label)
+      );
+    }catch(error){
+      if(isNotFound(error))return null;
+      throw error;
+    }
+  }
 
   async deleteLibraryRootWithAccounting(
     projectRoot:string,
@@ -165,42 +262,79 @@ export class FileService {
     });
   }
 
-  private async uploadFileWithAccounting(projectRoot: string, input: UploadProjectFileInput, accounting: FileByteAccounting, rootSubPath:string): Promise<ProjectFileWriteResponse> {
+  private async uploadFileWithAccounting(projectRoot: string, input: UploadProjectFileInput, accounting: FileUploadAccounting, rootSubPath:string): Promise<ProjectFileWriteResponse> {
     if (input.bytes.byteLength > MAX_PROJECT_FILE_BYTES) {
       throw new ProductError(`Project file exceeds the ${MAX_PROJECT_FILE_BYTES}-byte limit`, 413);
     }
     return withProjectFileLock(projectRoot, async () => {
       await this.reconcileFileBytesUnlocked(projectRoot, accounting, rootSubPath);
-      const { normalizedPath, absolutePath } = await this.resolveLibraryFilePath(projectRoot,rootSubPath,input.path);
-      if (input.overwrite !== true && await regularFileExists(absolutePath)) {
-        throw new ProductError("Project file already exists", 409);
-      }
-      const previous = input.overwrite === true ? await readOptionalRegularFile(absolutePath) : null;
-      await mkdir(path.dirname(absolutePath), { recursive: true });
-      await this.resolveLibraryFilePath(projectRoot,rootSubPath,normalizedPath);
-      const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.tmp`);
+      const normalizedPath=this.normalizeLibraryFilePath(input.path,false);
+      this.paths.assertOrdinaryFilePath(normalizedPath);
+      const canonicalRoot=this.normalizeLibraryRootSubPath(rootSubPath);
+      const project=await this.paths.openProjectRoot(projectRoot,true);
+      let parent:FileHandle|undefined;
       try {
-        await writeFile(temporaryPath, input.bytes, { flag: "wx" });
-        await rename(temporaryPath, absolutePath);
-      } finally {
-        await rm(temporaryPath, { force: true });
+        const segments=[...canonicalRoot.split("/"),...normalizedPath.split("/")];
+        const name=segments.pop()!;
+        try{
+          parent=await this.tree.openDirectoryPath(project,segments,true);
+        }catch(error){
+          throw projectWritePathError(error);
+        }
+        const previous=await this.tree.readOptionalRegularFile(parent,name);
+        if(input.overwrite!==true&&previous!==null)throw new ProductError("Project file already exists",409);
+        let accountingRecorded=false;
+        let written;
+        try{
+          written=await this.tree.writeRegularFile(
+            parent,
+            name,
+            input.bytes,
+            input.overwrite===true,
+            async(pending)=>{
+              await accounting.reserve(
+                normalizedPath,
+                pending.size-(previous?.byteLength??0),
+                {
+                  bytes:pending.size,
+                  mediaType:detectProjectFileMediaType(input.bytes,normalizedPath)
+                }
+              );
+              accountingRecorded=true;
+            },
+            async(committed)=>{
+              try{
+                await this.reconcileFileBytesUnlocked(projectRoot,accounting,rootSubPath);
+              }catch(error){
+                console.error("Project file measurement reconciliation failed",error);
+              }
+              await accounting.committed(normalizedPath,{
+                bytes:committed.size,
+                mediaType:detectProjectFileMediaType(input.bytes,normalizedPath)
+              });
+            }
+          );
+        }catch(error){
+          if(accountingRecorded){
+            try{
+              await this.reconcileFileBytesUnlocked(projectRoot,accounting,rootSubPath);
+            }catch(reconcileError){
+              console.error("Project file commit reconciliation failed",reconcileError);
+            }
+          }
+          if(input.overwrite!==true&&isAlreadyExists(error))throw new ProductError("Project file already exists",409);
+          throw error;
+        }
+        return {
+          path: normalizedPath,
+          bytes: written.size,
+          mediaType: detectProjectFileMediaType(input.bytes, normalizedPath),
+          updatedAt: written.mtime.toISOString()
+        };
+      }finally{
+        await parent?.close();
+        await project.close();
       }
-      const written = await lstat(absolutePath);
-      if (!written.isFile()) {
-        throw new ProductError("Written path is not a regular file");
-      }
-      try {
-        await accounting.record(normalizedPath,written.size-(previous?.byteLength??0),{bytes:written.size,mediaType:detectProjectFileMediaType(input.bytes,normalizedPath)});
-      } catch (error) {
-        await restoreOptionalRegularFile(absolutePath, previous);
-        throw error;
-      }
-      return {
-        path: normalizedPath,
-        bytes: written.size,
-        mediaType: detectProjectFileMediaType(input.bytes, normalizedPath),
-        updatedAt: written.mtime.toISOString()
-      };
     });
   }
 
@@ -271,7 +405,7 @@ export class FileService {
       };
   }
 
-  private async reconcileFileBytesUnlocked(projectRoot: string, accounting: FileByteAccounting,rootSubPath:string): Promise<void> {
+  private async reconcileFileBytesUnlocked(projectRoot: string, accounting: Pick<FileByteAccounting,"rootSubPaths"|"reconcile">,rootSubPath:string): Promise<void> {
     if (!accounting.reconcile) return;
     await accounting.reconcile(await this.measureFileRootsBytesUnlocked(projectRoot,accounting.rootSubPaths??[rootSubPath]));
   }
@@ -414,9 +548,17 @@ export class FileService {
     }catch(error){
       if(!(error instanceof ProductError&&error.code==="file_library_storage_missing"))throw error;
     }
-    const {absolutePath}=await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
-    await mkdir(absolutePath,{recursive:true});
-    await this.resolveLibraryFilePath(projectRoot,rootSubPath,"",true);
+    const project=await this.paths.openProjectRoot(projectRoot,true);
+    try{
+      const root=await this.tree.openDirectoryPath(
+        project,
+        this.normalizeLibraryRootSubPath(rootSubPath).split("/"),
+        true
+      );
+      await root.close();
+    }finally{
+      await project.close();
+    }
   }
 
   private async requireLibraryRootExists(projectRoot:string,rootSubPath:string):Promise<void>{
@@ -444,6 +586,30 @@ export class FileService {
     const normalized=this.paths.normalizeRelativeProjectPath(input);
     if(!/^libraries\/[^/]+\/home$/.test(normalized))throw new ProductError("File Library root path is invalid");
     return normalized;
+  }
+
+  private async withOwnedFileParent<T>(
+    input:LibraryOwnedFileLocation,
+    create:boolean,
+    operation:(parent:FileHandle,name:string)=>Promise<T>
+  ):Promise<T>{
+    const canonicalRoot=this.normalizeLibraryRootSubPath(input.rootSubPath);
+    const normalizedPath=this.normalizeLibraryFilePath(input.relativePath,false);
+    const project=await this.paths.openProjectRoot(input.projectRoot,create);
+    let parent:FileHandle|undefined;
+    try{
+      const segments=[...canonicalRoot.split("/"),...normalizedPath.split("/")];
+      const name=segments.pop()!;
+      try{
+        parent=await this.tree.openDirectoryPath(project,segments,create);
+      }catch(error){
+        throw projectWritePathError(error);
+      }
+      return await operation(parent,name);
+    }finally{
+      await parent?.close();
+      await project.close();
+    }
   }
 }
 
@@ -527,17 +693,6 @@ function fileLibraryDeleting():ProductError{
   );
 }
 
-async function readOptionalRegularFile(absolutePath: string): Promise<Buffer | null> {
-  try {
-    const entry = await lstat(absolutePath);
-    if (!entry.isFile()) throw new ProductError("Path is not a regular file");
-    return readRegularFileWithoutFollowingSymlink(absolutePath,"Project file");
-  } catch (error) {
-    if (isNotFound(error)) return null;
-    throw error;
-  }
-}
-
 export async function readRegularFileWithoutFollowingSymlink(source:string,label="Project file"):Promise<Buffer>{
   let handle;
   try{
@@ -558,27 +713,18 @@ function isSymlinkOpenError(error:unknown):boolean{
   return typeof error==="object"&&error!==null&&"code" in error&&error.code==="ELOOP";
 }
 
-async function regularFileExists(absolutePath: string): Promise<boolean> {
-  try {
-    const entry = await lstat(absolutePath);
-    if (!entry.isFile()) throw new ProductError("Path is not a regular file");
-    return true;
-  } catch (error) {
-    if (isNotFound(error)) return false;
-    throw error;
-  }
+function isAlreadyExists(error:unknown):boolean{
+  return typeof error==="object"&&error!==null&&"code" in error&&error.code==="EEXIST";
 }
 
-async function restoreOptionalRegularFile(absolutePath: string, bytes: Buffer | null): Promise<void> {
-  if (bytes === null) {
-    await rm(absolutePath, { force: true });
-    return;
+function isNotEmpty(error:unknown):boolean{
+  return typeof error==="object"&&error!==null&&"code" in error&&error.code==="ENOTEMPTY";
+}
+
+function projectWritePathError(error:unknown):unknown{
+  if(typeof error==="object"&&error!==null&&"code" in error){
+    if(error.code==="ELOOP")return new ProductError("Path escapes the project root");
+    if(error.code==="ENOTDIR")return new ProductError("Path is not a directory");
   }
-  const temporaryPath = path.join(path.dirname(absolutePath), `.${path.basename(absolutePath)}.${randomUUID()}.rollback`);
-  try {
-    await writeFile(temporaryPath, bytes, { flag: "wx" });
-    await rename(temporaryPath, absolutePath);
-  } finally {
-    await rm(temporaryPath, { force: true });
-  }
+  return error;
 }

@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, rename, rm, rmdir, stat, writeFile, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, rename, rm, rmdir, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { generateBotifiedConfig, serializeBotifiedConfig } from "../../botified-runtime/src/config.js";
 import { parseBotifiedTimelineEvents, type BotifiedTimelineEvent } from "../../botified-runtime/src/projection.js";
@@ -99,7 +99,11 @@ import {
   type SandboxLifecycleService
 } from "./sandboxLifecycleService.js";
 import { WorkspaceService } from "./workspaceService.js";
-import { detectProjectFileMediaType,readRegularFileWithoutFollowingSymlink,withProjectFileLock } from "./fileService.js";
+import {
+  detectProjectFileMediaType,
+  withProjectFileLock,
+  type LibraryOwnedFileLocation
+} from "./fileService.js";
 import { openProjectRootDescriptor } from "./filePathValidationService.js";
 import { ProjectPolicyService } from "./projectPolicyService.js";
 import type { ProjectAccessSnapshot, ProjectPermission } from "./authorizationService.js";
@@ -1503,16 +1507,12 @@ export class TaskService {
       throw new ProductError("Task artifact not found", 404);
     }
     const stored = await this.taskArtifactStoragePath(task, artifact);
-    for (const filePath of [stored.filePath]) {
-      try {
-        const bytes = await readRegularFileWithoutFollowingSymlink(filePath, "Task artifact");
-        if (bytes.byteLength !== artifact.bytes || artifact.sha256 && createHash("sha256").update(bytes).digest("hex") !== artifact.sha256.toLowerCase()) {
-          throw new ProductError("Stored task artifact no longer matches its published metadata", 409);
-        }
-        return { artifact: publicArtifact(artifact), bytes };
-      } catch (error) {
-        if (!isNotFound(error)) throw error;
+    const bytes=await this.fileLibraries.readOwnedFile(stored.location,"Task artifact");
+    if(bytes){
+      if (bytes.byteLength !== artifact.bytes || artifact.sha256 && createHash("sha256").update(bytes).digest("hex") !== artifact.sha256.toLowerCase()) {
+        throw new ProductError("Stored task artifact no longer matches its published metadata", 409);
       }
+      return { artifact: publicArtifact(artifact), bytes };
     }
     throw new ProductError("Task artifact file not found", 404);
   }
@@ -1687,7 +1687,6 @@ export class TaskService {
     const changes: TaskInteractionChangeInput[] = [];
     const inBatchCorrelations = new Map<string, TaskInteractionProjectionState>();
     const artifactProjections: PersistTaskArtifactProjectionInput[] = [];
-    const newlyWrittenArtifactPaths: string[] = [];
     const canonicalAcceptedMessageIds=new Set(timeline.events.flatMap((event)=>
       (event.type==="input.accepted"||event.type==="input.queued")&&stringValue(event.data.input_id)
         ?[stringValue(event.data.input_id)!]:[]
@@ -1721,7 +1720,6 @@ export class TaskService {
           name: normalizeArtifactDisplayName(projected.artifact.name, artifactFileId)
         }, artifactFileId);
         artifactProjections.push(downloaded.projection);
-        if (downloaded.newlyWritten) newlyWrittenArtifactPaths.push(downloaded.filePath);
         existingArtifacts.add(artifactFileId);
       }
     }
@@ -1740,26 +1738,20 @@ export class TaskService {
         responseStatus:200,responseBody:taskMessageIdempotencyEnvelope(message,task,message.actorId!,receipt),updatedAt:syncedAt
       });
     }
-    try {
-      if(artifactProjections.length)await this.reconcileTaskLibraryBytes(task);
-      await this.store.persistTaskInteractionMutation({
-        taskId: task.id,
-        changes,
-        ...(canonicalAcceptedMessageIds.size?{canonicalAcceptedMessageIds:[...canonicalAcceptedMessageIds]}:{}),
-        ...(idempotencyCompletions.length?{idempotencyCompletions}:{}),
-        ...(artifactProjections.length ? { artifactProjections } : {}),
-        sourceSync: {
-          expectedSourceCursor: snapshot.sourceCursor,
-          sourceCursor: timeline.nextCursor,
-          historyStatus: timeline.historyStatus,
-          lastSyncedAt: syncedAt
-        }
-      });
-    } catch (error) {
-      for (const filePath of newlyWrittenArtifactPaths) await rm(filePath, { force:true });
-      if(newlyWrittenArtifactPaths.length)await this.reconcileTaskLibraryBytes(task).catch((reconcileError)=>console.error("Task artifact usage rollback reconciliation failed",reconcileError));
-      throw error;
-    }
+    if(artifactProjections.length)await this.reconcileTaskLibraryBytes(task);
+    await this.store.persistTaskInteractionMutation({
+      taskId: task.id,
+      changes,
+      ...(canonicalAcceptedMessageIds.size?{canonicalAcceptedMessageIds:[...canonicalAcceptedMessageIds]}:{}),
+      ...(idempotencyCompletions.length?{idempotencyCompletions}:{}),
+      ...(artifactProjections.length ? { artifactProjections } : {}),
+      sourceSync: {
+        expectedSourceCursor: snapshot.sourceCursor,
+        sourceCursor: timeline.nextCursor,
+        historyStatus: timeline.historyStatus,
+        lastSyncedAt: syncedAt
+      }
+    });
     await this.writeRuntimeState(task.id, { ...state, lastSyncedAt:syncedAt });
     const botifiedState=await this.readVerifiedBotifiedState(task,state.baseUrl,serviceKey);
     const updated = await this.store.findTask(task.id) ?? task;
@@ -1989,7 +1981,9 @@ export class TaskService {
     serviceKey: string,
     artifact: AgentTaskArtifact,
     botifiedFileId: string
-  ): Promise<{ projection: PersistTaskArtifactProjectionInput; filePath: string; newlyWritten: boolean }> {
+  ): Promise<{
+    projection:PersistTaskArtifactProjectionInput;
+  }> {
     const downloaded = await this.callBotified("download file", () =>
       this.botified.downloadFile(baseUrl, serviceKey, botifiedFileId)
     );
@@ -2008,15 +2002,18 @@ export class TaskService {
       sha256: actualSha256,
       ...artifactPreview(downloaded.bytes, artifact.name)
     };
-    const { root, filePath } = await this.taskArtifactStoragePath(task, verifiedArtifact);
-    await mkdir(root, { recursive: true });
-    let newlyWritten = false;
-    try {
-      await writeFile(filePath, downloaded.bytes, { flag: "wx" });
-      newlyWritten = true;
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      const existingBytes = await readRegularFileWithoutFollowingSymlink(filePath,"Task artifact");
+    const storage = await this.taskArtifactStoragePath(task, verifiedArtifact);
+    const persisted=await this.fileLibraries.persistOwnedFile(
+      storage.location.projectRoot,
+      storage.location.rootSubPath,
+      storage.location.relativePath,
+      downloaded.bytes
+    );
+    if(!persisted.newlyWritten){
+      const existingBytes=persisted.existingBytes;
+      if(!existingBytes){
+        throw new ProductError("Stored task artifact file is unavailable",409);
+      }
       if (existingBytes.byteLength !== actualBytes || createHash("sha256").update(existingBytes).digest("hex") !== actualSha256) {
         throw new ProductError("Stored task artifact file does not match the published artifact", 409);
       }
@@ -2028,13 +2025,13 @@ export class TaskService {
         artifact: verifiedArtifact,
         auditEvent: { id: `audit_artifact_${verifiedArtifact.id}`, projectId: task.projectId, actorId: null, action: "artifact.project", status: "accepted", resourceKind: "artifact", resourceId: verifiedArtifact.id, createdAt: timestamp },
         updatedAt: timestamp
-      },
-      filePath,
-      newlyWritten
+      }
     };
   }
 
-  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{ root: string; filePath: string }> {
+  private async taskArtifactStoragePath(task: PersistedAgentTask, artifact: PersistedTaskArtifact): Promise<{
+    location:LibraryOwnedFileLocation;
+  }> {
     const project = await this.store.findProject(task.projectId);
     if (!project) {
       throw new ProductError("Task project not found", 409);
@@ -2043,13 +2040,18 @@ export class TaskService {
     if(!task.fileLibraryId)throw new ProductError("Task File Library is unavailable",409);
     const library=await this.store.findFileLibrary(task.fileLibraryId);
     if(!library||library.projectId!==task.projectId)throw new ProductError("Task File Library is unavailable",409);
-    const root=path.resolve(dataRoot,project.rootPath,library.rootSubPath,"workspace",".artifacts",task.id);
+    const projectRoot=path.resolve(dataRoot,project.rootPath);
+    const root=path.resolve(projectRoot,library.rootSubPath,"workspace",".artifacts",task.id);
     assertPathInside(dataRoot, root, "Task artifact directory is outside the data root");
     const sandboxPath = artifact.fileId.startsWith("sandbox-published:") ? artifact.fileId.slice("sandbox-published:".length) : null;
     const filename = `${artifactStorageSegment(artifact.id, "artifact")}-${artifactStorageSegment(artifact.name, artifact.fileId)}`;
     const filePath = sandboxPath ? path.resolve(root, ...sandboxPath.split("/")) : path.resolve(root, filename);
     assertPathInside(root, filePath, "Task artifact path is outside the artifact directory");
-    return { root, filePath };
+    return{location:{
+      projectRoot,
+      rootSubPath:library.rootSubPath,
+      relativePath:path.relative(path.resolve(projectRoot,library.rootSubPath),filePath).split(path.sep).join("/")
+    }};
   }
 
   private async reconcileTaskLibraryBytes(task:PersistedAgentTask):Promise<void>{

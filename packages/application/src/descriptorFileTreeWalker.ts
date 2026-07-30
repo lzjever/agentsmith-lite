@@ -1,12 +1,23 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rename, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { ProductError } from "../../domain/src/errors.js";
 import type { FileDeletionOperationEntryType } from "../../ports/src/store.js";
 
 const O_PATH = 0x200000;
 
-export type DescriptorTreePurpose = "measure" | "remove";
+export type DescriptorTreePurpose = "measure" | "remove" | "write";
 export type DescriptorTreeCheckpoint = () => Promise<void>;
+
+export interface DescriptorFileIdentity {
+  dev:bigint;
+  ino:bigint;
+}
+
+export interface DescriptorWrittenFile extends DescriptorFileIdentity {
+  size:number;
+  mtime:Date;
+}
 
 export interface DescriptorFileTreeObserver {
   beforeOpenEntry?(event: {
@@ -30,6 +41,116 @@ export class DescriptorFileTreeWalker {
   openEntry(parent: FileHandle, name: string): Promise<FileHandle> {
     validateDescriptorName(name);
     return open(descriptorPath(parent, name), O_PATH | constants.O_NOFOLLOW);
+  }
+
+  async openDirectoryPath(parent: FileHandle, names: readonly string[], create: boolean): Promise<FileHandle> {
+    let current = await open(descriptorPath(parent), constants.O_RDONLY | constants.O_DIRECTORY);
+    try {
+      for (const name of names) {
+        validateDescriptorName(name);
+        await this.observer?.beforeOpenEntry?.({
+          purpose: "write",
+          name,
+          observedType: "directory"
+        });
+        let next: FileHandle;
+        try {
+          next = await this.openDirectory(current, name);
+        } catch (error) {
+          if(isNotDirectory(error)||isSymbolicLink(error)){
+            const observed=await this.optionalStat(current,name);
+            if(observed?.isSymbolicLink())throw new ProductError("Path escapes the project root");
+            if(observed&&!observed.isDirectory())throw new ProductError("Path is not a directory");
+          }
+          if (!create || !isNotFound(error)) throw error;
+          try {
+            await mkdir(descriptorPath(current, name), { mode: 0o700 });
+          } catch (mkdirError) {
+            if (!isAlreadyExists(mkdirError)) throw mkdirError;
+          }
+          next = await this.openDirectory(current, name);
+        }
+        await current.close();
+        current = next;
+      }
+      return current;
+    } catch (error) {
+      await current.close();
+      throw error;
+    }
+  }
+
+  async readOptionalRegularFile(parent: FileHandle, name: string, label="File path"): Promise<Buffer | null> {
+    validateDescriptorName(name);
+    let handle: FileHandle;
+    try {
+      handle = await open(descriptorPath(parent, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      if (isSymbolicLink(error)) throw new ProductError(`${label} uses a symbolic link`);
+      throw error;
+    }
+    try {
+      if (!(await handle.stat()).isFile()) throw new ProductError(`${label} must be a regular file`);
+      return await handle.readFile();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  async writeRegularFile(
+    parent: FileHandle,
+    name: string,
+    bytes: Uint8Array,
+    overwrite: boolean,
+    beforeCommit?:(written:DescriptorWrittenFile)=>Promise<void>,
+    afterCommit?:(written:DescriptorWrittenFile)=>Promise<void>
+  ): Promise<DescriptorWrittenFile> {
+    validateDescriptorName(name);
+    const temporaryName = `.${name}.${randomUUID()}.tmp`;
+    let temporary: FileHandle | undefined;
+    let temporaryOwned=false;
+    try {
+      temporary = await open(
+        descriptorPath(parent, temporaryName),
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600
+      );
+      temporaryOwned=true;
+      await temporary.writeFile(bytes);
+      await temporary.sync();
+      const metadata=await temporary.stat({bigint:true});
+      if(!metadata.isFile())throw new ProductError("Written path is not a regular file");
+      const written:DescriptorWrittenFile={
+        dev:metadata.dev,
+        ino:metadata.ino,
+        size:safeDescriptorSize(metadata.size),
+        mtime:metadata.mtime
+      };
+      await beforeCommit?.(written);
+      await temporary.close();
+      temporary = undefined;
+      if (overwrite) {
+        await rename(descriptorPath(parent, temporaryName), descriptorPath(parent, name));
+        temporaryOwned=false;
+      } else {
+        await link(descriptorPath(parent, temporaryName), descriptorPath(parent, name));
+        await unlink(descriptorPath(parent, temporaryName));
+        temporaryOwned=false;
+      }
+      await afterCommit?.(written);
+      await parent.sync();
+      return written;
+    } finally {
+      await temporary?.close();
+      if(temporaryOwned){
+        try {
+          await unlink(descriptorPath(parent, temporaryName));
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+        }
+      }
+    }
   }
 
   async optionalStat(parent: FileHandle, name: string) {
@@ -213,4 +334,16 @@ function isNotFound(error: unknown): boolean {
 function isEntryTypeRace(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
     (error.code === "ELOOP" || error.code === "ENOTDIR" || error.code === "ENOENT");
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+}
+
+function isSymbolicLink(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ELOOP";
+}
+
+function isNotDirectory(error:unknown):boolean{
+  return typeof error==="object"&&error!==null&&"code" in error&&error.code==="ENOTDIR";
 }

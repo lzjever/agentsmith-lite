@@ -316,9 +316,14 @@ export class ProjectPolicyService {
     await this.bestEffortFileProjection("file reconciliation projection",()=>this.projectFileAlertProjection(projectId,fileLibraryBytes,policy.projectFileBytesLimit));
     return fileStorageUsage(policy,usage);
   }
-  async recordFileMutation(projectId:string,actorId:string,action:Extract<ProjectAuditAction,"file.upload"|"file.delete">,resourceId:string,filePath:string,delta:number,bytes:number,mediaType:string):Promise<void>{
+  async reserveFileUpload(projectId:string,actorId:string,filePath:string,delta:number):Promise<void>{
     await this.recordFileBytes(projectId,actorId,filePath,delta);
-    await this.bestEffortFileProjection("file mutation audit",()=>this.recordOperation(projectId,actorId,action,"accepted",resourceId,"file",{filePath,bytes,mediaType}));
+  }
+  async commitFileUpload(projectId:string,actorId:string,resourceId:string,filePath:string,bytes:number,mediaType:string):Promise<void>{
+    await this.bestEffortFileProjection(
+      "file upload audit",
+      ()=>this.recordOperation(projectId,actorId,"file.upload","accepted",resourceId,"file",{filePath,bytes,mediaType})
+    );
   }
   async refreshFileAlerts(projectId: string): Promise<void> {
     const [policy,usage]=await Promise.all([this.requirePolicy(projectId),this.usage(projectId)]);

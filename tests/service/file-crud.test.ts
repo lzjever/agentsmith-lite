@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdtemp, mkdir, open, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -31,7 +32,12 @@ describe("file CRUD service", () => {
       assert.deepEqual([...await readFile(path.join(root, LIBRARY_ROOT, "notes", "plan.md"))], [...content]);
       await assert.rejects(
         () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "notes/plan.md", bytes: Buffer.from("replacement") }),
-        (error) => productError(error, 409, /already exists/)
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,409);
+          assert.equal(error.message,"Project file already exists");
+          return true;
+        }
       );
 
       const listed = await service.listLibraryFiles(root, LIBRARY_ROOT, "");
@@ -181,6 +187,88 @@ describe("file CRUD service", () => {
         ()=>service.downloadLibraryFile(root,LIBRARY_ROOT,"missing.txt"),
         (error:unknown)=>error instanceof ProductError&&
           error.statusCode===404&&error.code==="file_path_not_found"
+      );
+    }finally{
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+
+  it("keeps uploads and owned Artifact writes inside descriptor-anchored directories",async()=>{
+    for(const target of [
+      {path:"notes/value.txt",swap:"notes"},
+      {path:"workspace/.artifacts/task_1/value.txt",swap:".artifacts"}
+    ]){
+      const root=await mkdtemp(path.join(tmpdir(),"asl-files-write-race-"));
+      const outside=await mkdtemp(path.join(tmpdir(),"asl-files-write-race-outside-"));
+      const libraryRoot=path.join(root,LIBRARY_ROOT);
+      const swapped=path.join(libraryRoot,...target.path.split("/").slice(0,target.path.split("/").indexOf(target.swap)+1));
+      const displaced=`${swapped}.displaced`;
+      let replaced=false;
+      const walker=new DescriptorFileTreeWalker({
+        async beforeOpenEntry(event){
+          if(event.purpose!=="write"||event.name!==target.swap||replaced)return;
+          replaced=true;
+          await rename(swapped,displaced);
+          await symlink(outside,swapped);
+        }
+      });
+      try{
+        await mkdir(path.dirname(swapped),{recursive:true});
+        await mkdir(swapped);
+        const service=new FileService(new FilePathValidationService(),walker);
+        const write=target.swap==="notes"
+          ?()=>service.uploadLibraryFile(root,LIBRARY_ROOT,{path:target.path,bytes:Buffer.from("blocked")})
+          :()=>service.persistLibraryOwnedFile(root,LIBRARY_ROOT,target.path,Buffer.from("blocked"));
+        await assert.rejects(
+          write,
+          (error:unknown)=>productError(error,400,/Path escapes the project root/)
+        );
+        assert.equal(replaced,true);
+        await assert.rejects(()=>readFile(path.join(outside,"value.txt")),{code:"ENOENT"});
+      }finally{
+        await rm(root,{recursive:true,force:true});
+        await rm(outside,{recursive:true,force:true});
+      }
+    }
+  });
+
+  it("keeps the temporary descriptor identity when the committed name is replaced",async()=>{
+    const root=await mkdtemp(path.join(tmpdir(),"asl-artifact-identity-race-"));
+    const parentPath=path.join(root,"artifacts");
+    const finalPath=path.join(parentPath,"value.txt");
+    const displaced=`${finalPath}.displaced`;
+    try{
+      await mkdir(parentPath);
+      const parent=await open(parentPath,constants.O_RDONLY|constants.O_DIRECTORY);
+      const written=await new DescriptorFileTreeWalker().writeRegularFile(
+        parent,
+        "value.txt",
+        Buffer.from("owned"),
+        false
+      );
+      await parent.close();
+      await rename(finalPath,displaced);
+      await writeFile(finalPath,"replacement");
+      const owned=await lstat(displaced,{bigint:true});
+      const replacement=await lstat(finalPath,{bigint:true});
+      assert.deepEqual({dev:written.dev,ino:written.ino},{dev:owned.dev,ino:owned.ino});
+      assert.notDeepEqual({dev:written.dev,ino:written.ino},{dev:replacement.dev,ino:replacement.ino});
+
+      const location={
+        projectRoot:root,
+        rootSubPath:LIBRARY_ROOT,
+        relativePath:"workspace/.artifacts/task_1/value.txt"
+      };
+      await mkdir(path.dirname(path.join(root,LIBRARY_ROOT,location.relativePath)),{recursive:true});
+      await symlink(displaced,path.join(root,LIBRARY_ROOT,location.relativePath));
+      await assert.rejects(
+        ()=>new FileService().readLibraryOwnedFile(location,"Task artifact"),
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,400);
+          assert.equal(error.message,"Task artifact uses a symbolic link");
+          return true;
+        }
       );
     }finally{
       await rm(root,{recursive:true,force:true});
@@ -713,6 +801,18 @@ describe("file CRUD service", () => {
         () => service.deleteLibraryFile(root, LIBRARY_ROOT, "plain.txt/child.txt"),
         (error) => productError(error, 400, /Path is not a directory/)
       );
+      await assert.rejects(
+        ()=>service.uploadLibraryFile(root,LIBRARY_ROOT,{
+          path:"plain.txt/child.txt",
+          bytes:Buffer.from("blocked")
+        }),
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,400);
+          assert.equal(error.message,"Path is not a directory");
+          return true;
+        }
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -743,7 +843,12 @@ describe("file CRUD service", () => {
       );
       await assert.rejects(
         () => service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "escape/new.txt", bytes: new Uint8Array() }),
-        /Path escapes the project root/
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,400);
+          assert.equal(error.message,"Path escapes the project root");
+          return true;
+        }
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -795,18 +900,35 @@ describe("file CRUD service", () => {
     }
   });
 
-  it("restores the previous file when locked byte accounting rejects an overwrite", async () => {
+  it("does not move a Sandbox replacement when upload accounting rejects an overwrite", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-accounting-"));
     const service = new FileService();
+    const target=path.join(root,LIBRARY_ROOT,"locked.txt");
+    const displaced=`${target}.sandbox-before`;
     try {
       await service.uploadLibraryFile(root, LIBRARY_ROOT, { path: "locked.txt", bytes: Buffer.from("before") });
       await assert.rejects(
         () => service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "locked.txt", bytes: Buffer.from("after"), overwrite: true }, {
-          record: async () => { throw new ProductError("Project file bytes limit reached", 409); }
+          reserve: async () => {
+            await rename(target,displaced);
+            await writeFile(target,"sandbox replacement");
+            throw new ProductError("Project file bytes limit reached", 409);
+          },
+          committed:async()=>undefined
         }),
-        /project file bytes limit reached/i
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,409);
+          assert.equal(error.message,"Project file bytes limit reached");
+          return true;
+        }
       );
-      assert.equal(Buffer.from((await service.downloadLibraryFile(root, LIBRARY_ROOT, "locked.txt")).bytes).toString(), "before");
+      assert.equal(await readFile(target,"utf8"),"sandbox replacement");
+      assert.equal(await readFile(displaced,"utf8"),"before");
+      assert.deepEqual(
+        (await readdir(path.dirname(target))).sort(),
+        ["locked.txt","locked.txt.sandbox-before"]
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -825,11 +947,12 @@ describe("file CRUD service", () => {
     });
     try {
       const upload = service.uploadLibraryFileWithAccounting(root, LIBRARY_ROOT, { path: "rejected.txt", bytes: Buffer.from("temporary") }, {
-        record: async () => {
+        reserve: async () => {
           accountingStarted();
           await accountingBlocked;
           throw new ProductError("Project file bytes limit reached", 409);
-        }
+        },
+        committed:async()=>undefined
       }).then(
         () => null,
         (error: unknown) => error
@@ -852,15 +975,65 @@ describe("file CRUD service", () => {
     }
   });
 
+  it("writes accepted accounting only after commit and reconciles both outcomes",async()=>{
+    const root=await mkdtemp(path.join(tmpdir(),"asl-files-commit-accounting-"));
+    const service=new FileService();
+    const failedTarget=path.join(root,LIBRARY_ROOT,"contended.txt");
+    const failedEvents:string[]=[];
+    try{
+      await service.ensureLibraryRoot(root,LIBRARY_ROOT);
+      await assert.rejects(
+        ()=>service.uploadLibraryFileWithAccounting(
+          root,
+          LIBRARY_ROOT,
+          {path:"contended.txt",bytes:Buffer.from("request")},
+          {
+            async reserve(){
+              failedEvents.push("reserve");
+              await writeFile(failedTarget,"sandbox");
+            },
+            async reconcile(bytes){failedEvents.push(`reconcile:${bytes}`);},
+            async committed(){failedEvents.push("accepted");}
+          }
+        ),
+        (error:unknown)=>{
+          assert.ok(error instanceof ProductError);
+          assert.equal(error.statusCode,409);
+          assert.equal(error.message,"Project file already exists");
+          return true;
+        }
+      );
+      assert.deepEqual(failedEvents,["reconcile:0","reserve","reconcile:7"]);
+      assert.equal(await readFile(failedTarget,"utf8"),"sandbox");
+
+      const successEvents:string[]=[];
+      await service.uploadLibraryFileWithAccounting(
+        root,
+        LIBRARY_ROOT,
+        {path:"committed.txt",bytes:Buffer.from("done")},
+        {
+          async reserve(){successEvents.push("reserve");},
+          async reconcile(bytes){successEvents.push(`reconcile:${bytes}`);},
+          async committed(){successEvents.push("accepted");}
+        }
+      );
+      assert.deepEqual(successEvents,["reconcile:7","reserve","reconcile:11","accepted"]);
+      assert.equal(await readFile(path.join(root,LIBRARY_ROOT,"committed.txt"),"utf8"),"done");
+    }finally{
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+
   it("serializes concurrent charged uploads so rejected quota writes leave no file behind", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "asl-files-concurrent-accounting-"));
     const service = new FileService();
     let used = 0;
     const accounting = {
-      async record(_path: string, delta: number) {
+      async reserve(_path: string, delta: number) {
         if (used + delta > 4) throw new ProductError("Project file bytes limit reached", 409);
         used += delta;
-      }
+      },
+      async committed(){}
     };
     try {
       const results = await Promise.allSettled([
@@ -887,13 +1060,14 @@ describe("file CRUD service", () => {
           reconciled.push(bytes);
           used = bytes;
         },
-        async record(_path, delta) {
+        async reserve(_path, delta) {
           if (used + delta > 6) throw new ProductError("Project file bytes limit reached", 409);
           used += delta;
-        }
+        },
+        async committed(){}
       });
 
-      assert.deepEqual(reconciled, [4]);
+      assert.deepEqual(reconciled, [4,6]);
       assert.equal(used, 6);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -37,7 +37,7 @@ describe("file library service", () => {
 
     await assert.rejects(() => services.fileLibraries.create(viewerId, projectId, { name: "Viewer library" }), /Project access denied/);
     const created = await services.fileLibraries.create(ownerId, projectId, { name: "Workspace" });
-    assert.match(created.rootSubPath, new RegExp(`^libraries/${created.id}/home$`));
+    assert.match(created.rootSubPath,new RegExp(`^libraries/${created.id}-attempt_[^/]+/home$`));
     assert.deepEqual((await services.fileLibraries.list(viewerId, projectId)).map((item) => item.id), [created.id]);
 
     const renamed = await services.fileLibraries.rename(ownerId, projectId, created.id, { name: "Renamed", expectedUpdatedAt: created.updatedAt });
@@ -326,7 +326,100 @@ describe("file library service", () => {
     assert.equal((await services.fileLibraries.list(ownerId, projectId)).length, 1);
   });
 
-  it("repairs a failed directory create with the persisted idempotency resource ID", async () => {
+  it("adopts an identical concurrent create without deleting its owned root",async()=>{
+    const {services,store,ownerId,projectId}=await fixture();
+    const project=await services.authorization.requireProject(ownerId,projectId);
+    const create=store.createFileLibrary.bind(store);
+    let marker="";
+    let loserRoot="";
+    store.createFileLibrary=async(value)=>{
+      loserRoot=path.join(services.projectAbsoluteRoot(project.rootPath),value.rootSubPath);
+      const winner={
+        ...value,
+        rootSubPath:`libraries/${value.id}-attempt_winner/home`
+      };
+      await services.files.ensureLibraryRoot(
+        services.projectAbsoluteRoot(project.rootPath),
+        winner.rootSubPath
+      );
+      const concurrent=await create(winner);
+      assert.ok(concurrent);
+      marker=path.join(services.projectAbsoluteRoot(project.rootPath),winner.rootSubPath,"concurrent.txt");
+      await writeFile(marker,"owned by committed create");
+      return null;
+    };
+
+    const created=await services.fileLibraries.create(
+      ownerId,
+      projectId,
+      {name:"Concurrent owner"},
+      "concurrent-owner-key"
+    );
+
+    assert.equal((await store.findFileLibrary(created.id))?.id,created.id);
+    assert.equal(created.rootSubPath,`libraries/${created.id}-attempt_winner/home`);
+    assert.equal(await readFile(marker,"utf8"),"owned by committed create");
+    await assert.rejects(()=>readdir(path.dirname(loserRoot)),{code:"ENOENT"});
+    assert.equal((await store.listFileLibrariesForProject(projectId)).length,1);
+  });
+
+  it("cleans only the exclusive different ID root after a duplicate-name conflict",async()=>{
+    const {services,store,ownerId,projectId}=await fixture();
+    const first=await services.fileLibraries.create(ownerId,projectId,{name:"Duplicate name"});
+    const project=await services.authorization.requireProject(ownerId,projectId);
+    const projectRoot=services.projectAbsoluteRoot(project.rootPath);
+    const firstMarker=path.join(projectRoot,first.rootSubPath,"retained.txt");
+    await writeFile(firstMarker,"retained");
+    const create=store.createFileLibrary.bind(store);
+    let attemptedRoot="";
+    store.createFileLibrary=async(value)=>{
+      attemptedRoot=path.join(projectRoot,value.rootSubPath);
+      return create(value);
+    };
+
+    await assert.rejects(
+      ()=>services.fileLibraries.create(
+        ownerId,
+        projectId,
+        {name:"Duplicate name"},
+        "different-id-duplicate-name"
+      ),
+      (error:unknown)=>{
+        assert.ok(error instanceof ProductError);
+        assert.equal(error.statusCode,409);
+        assert.equal(error.message,"File Library name already exists");
+        return true;
+      }
+    );
+
+    assert.equal(await readFile(firstMarker,"utf8"),"retained");
+    await assert.rejects(()=>readdir(path.dirname(attemptedRoot)),{code:"ENOENT"});
+    assert.equal((await store.listFileLibrariesForProject(projectId)).length,1);
+  });
+
+  it("keeps the attempt root when the database create outcome is uncertain",async()=>{
+    const {services,store,ownerId,projectId}=await fixture();
+    const project=await services.authorization.requireProject(ownerId,projectId);
+    let marker="";
+    store.createFileLibrary=async(value)=>{
+      marker=path.join(services.projectAbsoluteRoot(project.rootPath),value.rootSubPath,"uncertain.txt");
+      await writeFile(marker,"retain");
+      throw new Error("database outcome unknown");
+    };
+
+    await assert.rejects(
+      ()=>services.fileLibraries.create(
+        ownerId,
+        projectId,
+        {name:"Uncertain"},
+        "uncertain-database-create"
+      ),
+      /File Library could not be created/
+    );
+    assert.equal(await readFile(marker,"utf8"),"retain");
+  });
+
+  it("does not expose a Library record when its root cannot be created", async () => {
     const { services, store, ownerId, projectId } = await fixture();
     const originalEnsure = services.files.ensureLibraryRoot.bind(services.files);
     let ensureCalls = 0;
@@ -345,10 +438,11 @@ describe("file library service", () => {
     };
 
     await assert.rejects(() => services.fileLibraries.create(ownerId, projectId, { name: "Repair" }, "repair-create-key"), /File Library could not be created/);
-    const reserved = (await store.listFileLibrariesForProject(projectId))[0]!;
+    assert.deepEqual(await store.listFileLibrariesForProject(projectId),[]);
     const repaired = await services.fileLibraries.create(ownerId, projectId, { name: "Repair" }, "repair-create-key");
-    assert.equal(repaired.id, reserved.id);
+    assert.match(repaired.id,/^library_/);
     assert.equal((await store.listFileLibrariesForProject(projectId)).length, 1);
+    assert.equal(ensureCalls,2);
   });
 
   it("serializes an authorized library mutation ahead of deletion", async () => {

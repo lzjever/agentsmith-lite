@@ -5,7 +5,7 @@ import { PRODUCT_NAME_MAX_LENGTH, requireNonEmptyString } from "../../domain/src
 import type { FileLibraryBindingLookup, ProductStore } from "../../ports/src/store.js";
 import type { AuthorizationService } from "./authorizationService.js";
 import { withFileLibraryLifecycleLock } from "./fileLibraryLifecycleLock.js";
-import type { FileService } from "./fileService.js";
+import type { FileService, LibraryOwnedFileLocation } from "./fileService.js";
 import { canonicalRequestHash, runIdempotentMutation } from "./idempotentMutation.js";
 
 const REQUEST_LEASE_MS=30_000;
@@ -52,7 +52,8 @@ export class FileLibraryService {
       const currentProject = await this.authorization.requireProject(userId, projectId, "write");
       const existing = await this.store.findFileLibrary(id);
       if (existing) {
-        if (existing.projectId !== projectId || existing.workspaceId !== currentProject.workspaceId || existing.name !== name) {
+        if (existing.projectId !== projectId || existing.workspaceId !== currentProject.workspaceId ||
+          existing.name !== name || existing.createdByUserId !== userId) {
           throw new ProductError("File Library create identity conflict", 409);
         }
         this.requireActive(existing);
@@ -65,15 +66,32 @@ export class FileLibraryService {
         workspaceId: currentProject.workspaceId,
         projectId,
         name,
-        rootSubPath: `libraries/${id}/home`,
+        rootSubPath:`libraries/${id}-${newId("attempt")}/home`,
         lifecycleStatus:"active",
         createdByUserId: userId,
         createdAt: timestamp,
         updatedAt: timestamp
       };
+      const projectRoot=this.projectAbsoluteRoot(currentProject.rootPath);
+      await this.files.ensureLibraryRoot(projectRoot,library.rootSubPath);
       const created = await this.store.createFileLibrary(library);
-      if (!created) throw new ProductError("File Library name already exists", 409);
-      await this.files.ensureLibraryRoot(this.projectAbsoluteRoot(currentProject.rootPath), created.rootSubPath);
+      if (!created) {
+        const concurrent=await this.store.findFileLibrary(id);
+        if(concurrent&&
+          concurrent.workspaceId===library.workspaceId&&
+          concurrent.projectId===library.projectId&&
+          concurrent.name===library.name&&
+          concurrent.createdByUserId===library.createdByUserId&&
+          concurrent.lifecycleStatus==="active"){
+          if(concurrent.rootSubPath!==library.rootSubPath){
+            await this.files.discardEmptyLibraryRoot(projectRoot,library.rootSubPath);
+          }
+          return this.project(concurrent,true);
+        }
+        await this.files.discardEmptyLibraryRoot(projectRoot,library.rootSubPath);
+        if(concurrent)throw new ProductError("File Library create identity conflict",409);
+        throw new ProductError("File Library name already exists", 409);
+      }
       return this.project(created, true);
     });
     if (!idempotencyKey) return create(newId("library"));
@@ -89,6 +107,14 @@ export class FileLibraryService {
       completeServerErrors: false,
       run: create
     });
+  }
+
+  persistOwnedFile(projectRoot:string,rootSubPath:string,relativePath:string,bytes:Uint8Array){
+    return this.files.persistLibraryOwnedFile(projectRoot,rootSubPath,relativePath,bytes);
+  }
+
+  readOwnedFile(location:LibraryOwnedFileLocation,label:string):Promise<Buffer|null>{
+    return this.files.readLibraryOwnedFile(location,label);
   }
 
   async rename(userId: string, projectId: string, libraryId: string, input: RenameFileLibraryInput): Promise<FileLibraryProjection> {
