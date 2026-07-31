@@ -420,8 +420,8 @@ The timeline has two explicit behavioral modes:
 **Following latest**
 
 - default on initial entry;
-- restored only by an explicit current-work action: sending a message or
-  selecting `Jump to latest`;
+- restored when the user returns to the bottom, sends a message, or selects
+  `Jump to latest`;
 - preview growth and durable interactions keep the viewport at the bottom;
 - updates do not use per-token smooth scrolling.
 
@@ -430,7 +430,8 @@ The timeline has two explicit behavioral modes:
 - entered when the user deliberately moves away from the bottom;
 - all live updates preserve the current viewport;
 - a downward `New activity` control shows the accumulated update count;
-- only sending a message or explicit `Jump to latest` resumes following;
+- returning to the bottom, sending a message, or selecting `Jump to latest`
+  resumes following;
 - the count tracks newly appended durable interactions, not preview frames or
   revisions of an existing item.
 

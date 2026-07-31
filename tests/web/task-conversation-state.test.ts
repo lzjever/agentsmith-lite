@@ -18,6 +18,7 @@ import {
   reduceTaskAssistantPreview,
   reduceTaskPresentationState,
   retainedHistoryScrollTop,
+  taskFollowModeAtDistance,
   taskMessageReceiptError,
   type TaskPresentationAction,
   type TaskPresentationState
@@ -786,6 +787,14 @@ describe("task presentation reducer", () => {
     assert.equal(state.newActivityCount, 0);
     assert.equal(state.preview, null);
     assert.equal(state.pendingPreview, null);
+  });
+
+  it("uses hysteresis when following and reading the Task tail", () => {
+    assert.equal(taskFollowModeAtDistance("following", 96), "following");
+    assert.equal(taskFollowModeAtDistance("following", 96.01), "reading");
+    assert.equal(taskFollowModeAtDistance("reading", 25), "reading");
+    assert.equal(taskFollowModeAtDistance("reading", 24), "following");
+    assert.equal(taskFollowModeAtDistance("reading", 0), "following");
   });
 
   it("preserves stale revisions and keeps ordinary interactions ordered with a rebuilt index", () => {

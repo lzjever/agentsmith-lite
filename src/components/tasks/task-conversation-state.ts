@@ -10,6 +10,8 @@ import type {
 export type TaskAssistantPreview = Extract<TaskInteractionStreamEvent, { type: "assistant_preview" }> | null;
 export type TaskConnectionState = "connecting" | "reconnecting" | "connected" | "disconnected" | "recovered";
 export type TaskFollowMode = "following" | "reading";
+export const TASK_FOLLOW_EXIT_DISTANCE_PX = 96;
+export const TASK_FOLLOW_RESUME_DISTANCE_PX = 24;
 
 type ItemLocation = { index: number; revision: number };
 type SandboxLifecycle = TaskDetail["sandboxState"]["state"];
@@ -340,6 +342,19 @@ export function captureTaskCommandFence(state: TaskPresentationState): TaskComma
 
 export function isNearHistoryTop(scrollTop: number): boolean {
   return scrollTop <= 80;
+}
+
+export function taskFollowModeAtDistance(
+  mode: TaskFollowMode,
+  distanceFromBottom: number
+): TaskFollowMode {
+  if (mode === "following" && distanceFromBottom > TASK_FOLLOW_EXIT_DISTANCE_PX) {
+    return "reading";
+  }
+  if (mode === "reading" && distanceFromBottom <= TASK_FOLLOW_RESUME_DISTANCE_PX) {
+    return "following";
+  }
+  return mode;
 }
 
 export function retainedHistoryScrollTop(

@@ -2,24 +2,36 @@
 
 import { CircleAlert, CircleDot, Loader2, Square } from "lucide-react";
 import { Button as AstryxButton, IconButton, Text } from "@astryxdesign/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TaskCapabilities, TaskDetail, TaskInteractionSnapshot } from "../../lib/api/client";
 
 export function TaskRunStatus({ currentTurn, sandboxState, capabilities, aborting, onAbort }: { currentTurn: TaskDetail["currentTurn"]; sandboxState: TaskDetail["sandboxState"]; capabilities: TaskCapabilities; aborting: boolean; onAbort: () => Promise<void> }) {
-  const [abortError, setAbortError] = useState<{runId:string|null;message:string}|null>(null);
+  const turnIdentity = useRef({ currentTurn, generation:0 });
+  if (turnIdentity.current.currentTurn !== currentTurn) {
+    turnIdentity.current = { currentTurn, generation:turnIdentity.current.generation+1 };
+  }
+  const turnGeneration = turnIdentity.current.generation;
+  const [abortError, setAbortError] = useState<{runId:string|null;turnGeneration:number;message:string}|null>(null);
+  const abortContext = useRef({ runId:sandboxState.runId, turnGeneration, canAbort:capabilities.abortTurn&&currentTurn.state==="running" });
+  abortContext.current = { runId:sandboxState.runId, turnGeneration, canAbort:capabilities.abortTurn&&currentTurn.state==="running" };
   useEffect(() => {
-    setAbortError((current) => current?.runId===sandboxState.runId ? current : null);
-  }, [sandboxState.runId]);
+    setAbortError((current) => current?.runId===sandboxState.runId && current.turnGeneration===turnGeneration && capabilities.abortTurn && currentTurn.state==="running" ? current : null);
+  }, [capabilities.abortTurn,currentTurn.state,sandboxState.runId,turnGeneration]);
   async function abort() {
     if (!capabilities.abortTurn || aborting) return;
     const runId=sandboxState.runId;
+    const attemptedTurnGeneration=turnGeneration;
     setAbortError(null);
     try { await onAbort(); }
-    catch (reason) { setAbortError({runId,message:reason instanceof Error ? reason.message : "Current turn could not be stopped."}); }
+    catch (reason) {
+      if (abortContext.current.runId===runId&&abortContext.current.turnGeneration===attemptedTurnGeneration&&abortContext.current.canAbort) {
+        setAbortError({runId,turnGeneration:attemptedTurnGeneration,message:reason instanceof Error ? reason.message : "Current turn could not be stopped."});
+      }
+    }
   }
   const presentation = taskStatePresentation(currentTurn, sandboxState);
   const Icon = presentation.icon;
-  const visibleAbortError=abortError?.runId===sandboxState.runId?abortError:null;
+  const visibleAbortError=capabilities.abortTurn&&currentTurn.state==="running"&&abortError?.runId===sandboxState.runId&&abortError.turnGeneration===turnGeneration?abortError:null;
   return <div className="flex min-w-max shrink-0 items-center gap-2">
     {presentation.spinning ? <Icon aria-hidden="true" className={`size-4 shrink-0 animate-spin ${presentation.iconClass}`} /> : <Icon aria-hidden="true" className={`size-4 shrink-0 ${presentation.iconClass}`} />}
     <span role="status" aria-live="polite" aria-atomic="true"><Text type="supporting" color="secondary" className="whitespace-nowrap">{presentation.label}</Text></span>

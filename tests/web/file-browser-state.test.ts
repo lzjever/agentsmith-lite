@@ -165,7 +165,7 @@ describe("file browser bounded presentation", () => {
     assert.deepEqual(page.entries.map((entry) => entry.name), ["item-051.txt"]);
   });
 
-  it("retains the selected path while paging", () => {
+  it("clears the selected path when paging moves it outside the visible page", () => {
     const entries = numberedEntries(121);
     let state = createFileBrowserState(entries);
     state = reduceFileBrowserState(state, {
@@ -174,8 +174,37 @@ describe("file browser bounded presentation", () => {
     });
     state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
 
-    assert.equal(state.selectedPath, "files/item-001.txt");
+    assert.equal(state.selectedPath, null);
     assert.equal(selectFileBrowserPage(state).page, 2);
+  });
+
+  it("retains selection only while filtering and sorting keep it visible", () => {
+    let filtered = createFileBrowserState(numberedEntries(60));
+    filtered = reduceFileBrowserState(filtered, {
+      type: "selection_changed",
+      path: "files/item-001.txt"
+    });
+    filtered = reduceFileBrowserState(filtered, {
+      type: "filter_changed",
+      query: "item-001"
+    });
+    assert.equal(filtered.selectedPath, "files/item-001.txt");
+    filtered = reduceFileBrowserState(filtered, {
+      type: "filter_changed",
+      query: "item-002"
+    });
+    assert.equal(filtered.selectedPath, null);
+
+    let sorted = createFileBrowserState(numberedEntries(60));
+    sorted = reduceFileBrowserState(sorted, {
+      type: "selection_changed",
+      path: "files/item-001.txt"
+    });
+    sorted = reduceFileBrowserState(sorted, {
+      type: "sort_changed",
+      sort: { field: "name", direction: "desc" }
+    });
+    assert.equal(sorted.selectedPath, null);
   });
 
   it("upserts entries into the authoritative snapshot without losing selection", () => {
@@ -212,13 +241,13 @@ describe("file browser bounded presentation", () => {
     );
   });
 
-  it("clamps the page after removals and clears only the removed selection", () => {
+  it("clamps the page after removals and clears a selection no longer visible", () => {
     let state = createFileBrowserState(numberedEntries(51));
+    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, {
       type: "selection_changed",
-      path: "files/item-001.txt"
+      path: "files/item-051.txt"
     });
-    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, { type: "refresh_started" });
     state = reduceFileBrowserState(state, {
       type: "entry_removed",
@@ -226,16 +255,10 @@ describe("file browser bounded presentation", () => {
     });
 
     assert.equal(state.loadState, "ready");
-    assert.equal(state.selectedPath, "files/item-001.txt");
+    assert.equal(state.selectedPath, null);
     assert.equal(selectFileBrowserPage(state).page, 1);
     assert.deepEqual(selectFileBrowserPage(state).range, { start: 1, end: 50 });
-
-    state = reduceFileBrowserState(state, {
-      type: "entry_removed",
-      path: "files/item-001.txt"
-    });
-    assert.equal(state.selectedPath, null);
-    assert.equal(selectFileBrowserPage(state).totalCount, 49);
+    assert.equal(selectFileBrowserPage(state).totalCount, 50);
   });
 });
 
@@ -254,11 +277,11 @@ describe("file browser refresh continuity", () => {
   it("retains the last successful snapshot and selection when refresh fails", () => {
     const entries = numberedEntries(60);
     let state = createFileBrowserState(entries);
+    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, {
       type: "selection_changed",
       path: entries[54]?.path ?? null
     });
-    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, { type: "refresh_started" });
     state = reduceFileBrowserState(state, {
       type: "refresh_failed",
@@ -271,7 +294,7 @@ describe("file browser refresh continuity", () => {
     assert.deepEqual(selectFileBrowserPage(state).range, { start: 51, end: 60 });
   });
 
-  it("clears selection after a successful refresh only when its path disappears", () => {
+  it("retains selection after refresh only while it remains on the visible page", () => {
     const entries = numberedEntries(3);
     let state = createFileBrowserState(entries);
     state = reduceFileBrowserState(state, {
@@ -292,7 +315,14 @@ describe("file browser refresh continuity", () => {
     state = reduceFileBrowserState(state, { type: "refresh_started" });
     state = reduceFileBrowserState(state, {
       type: "refresh_succeeded",
-      entries: entries.filter((entry) => entry.path !== "files/item-002.txt")
+      entries: [
+        ...numberedEntries(50).map((entry, index) => ({
+          ...entry,
+          name: `aaa-${String(index + 1).padStart(3, "0")}.txt`,
+          path: `files/aaa-${String(index + 1).padStart(3, "0")}.txt`
+        })),
+        ...entries
+      ]
     });
     assert.equal(state.selectedPath, null);
   });
@@ -423,11 +453,11 @@ describe("file browser deletion continuity", () => {
       }
     };
     let state = createFileBrowserState(entries);
+    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, {
       type: "selection_changed",
       path: "files/item-051.txt"
     });
-    state = reduceFileBrowserState(state, { type: "page_changed", page: 2 });
     state = reduceFileBrowserState(state, { type: "delete_access_revoked" });
 
     assert.equal(state.selectedPath, "files/item-051.txt");

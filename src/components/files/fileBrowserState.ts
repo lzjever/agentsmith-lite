@@ -132,13 +132,16 @@ export function reduceFileBrowserState(
 ): FileBrowserState {
   switch (action.type) {
     case "filter_changed":
-      return { ...state, query: action.query, page: 1 };
+      return convergeVisibleSelection({ ...state, query: action.query, page: 1 });
     case "sort_changed":
-      return { ...state, sort: action.sort, page: 1 };
+      return convergeVisibleSelection({ ...state, sort: action.sort, page: 1 });
     case "page_changed":
-      return { ...state, page: clampPage(action.page, filteredEntryCount(state)) };
+      return convergeVisibleSelection({
+        ...state,
+        page: clampPage(action.page, filteredEntryCount(state))
+      });
     case "selection_changed":
-      return { ...state, selectedPath: action.path };
+      return convergeVisibleSelection({ ...state, selectedPath: action.path });
     case "location_changed":
       return {
         ...state,
@@ -281,18 +284,21 @@ function replaceEntries(
   loadState: FileBrowserLoadState,
   message: string
 ): FileBrowserState {
-  const selectedPath =
-    state.selectedPath && entries.some((entry) => entry.path === state.selectedPath)
-      ? state.selectedPath
-      : null;
   const next = { ...state, entries };
-  return {
+  return convergeVisibleSelection({
     ...next,
     page: clampPage(state.page, filteredEntryCount(next)),
-    selectedPath,
     loadState,
     message
-  };
+  });
+}
+
+function convergeVisibleSelection(state: FileBrowserState): FileBrowserState {
+  if (
+    state.selectedPath === null
+    || selectFileBrowserPage(state).entries.some((entry) => entry.path === state.selectedPath)
+  ) return state;
+  return { ...state, selectedPath: null };
 }
 
 function filteredEntryCount(state: Pick<FileBrowserState, "entries" | "query">): number {

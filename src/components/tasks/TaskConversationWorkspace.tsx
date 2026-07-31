@@ -24,6 +24,7 @@ import { TaskInteractionList } from "./TaskInteractionList";
 import {
   convergeRequiredTaskRefresh,
   createSingleFlightTaskRefresh,
+  taskFollowModeAtDistance,
   taskMessageReceiptError,
   type TaskAssistantPreview,
   type TaskCommandFence,
@@ -114,12 +115,15 @@ export function TaskConversationWorkspace({
   };
 
   const viewport = useRef<HTMLDivElement>(null);
+  const scrollContent = useRef<HTMLDivElement>(null);
   const streamCursor = useRef<string | undefined>(state.streamCursor);
   const streamController = useRef<AbortController | undefined>(undefined);
   const streamGeneration = useRef(0);
   const streamEventSequence = useRef(0);
   const reconnectTimer = useRef<number | undefined>(undefined);
   const reconnectCount = useRef(0);
+  const recoveryNoticeTimer = useRef<number | undefined>(undefined);
+  const recoveryGeneration = useRef(0);
   const singleFlightCanonicalRefresh = useRef<ReturnType<
     typeof createSingleFlightTaskRefresh
   > | null>(null);
@@ -132,6 +136,38 @@ export function TaskConversationWorkspace({
   const latestPreview = useRef<TaskAssistantPreview>(null);
   const stateRef = useRef<TaskPresentationState>(state);
   stateRef.current = state;
+  const dispatchCurrent = useCallback(function dispatchCurrentAction(
+    action: TaskPresentationAction
+  ): TaskPresentationState {
+    let connectionGeneration: number | undefined;
+    if (action.type === "connection_changed") {
+      connectionGeneration = ++recoveryGeneration.current;
+      if (recoveryNoticeTimer.current !== undefined) {
+        window.clearTimeout(recoveryNoticeTimer.current);
+        recoveryNoticeTimer.current = undefined;
+      }
+    }
+    const next = dispatch(action);
+    stateRef.current = next;
+    if (
+      connectionGeneration !== undefined
+      && next.connection === "recovered"
+    ) {
+      const scheduledGeneration = connectionGeneration;
+      recoveryNoticeTimer.current = window.setTimeout(() => {
+        if (
+          recoveryGeneration.current !== scheduledGeneration
+          || stateRef.current.connection !== "recovered"
+        ) return;
+        recoveryNoticeTimer.current = undefined;
+        dispatchCurrentAction({
+          type: "connection_changed",
+          connection: "connected"
+        });
+      }, 2_000);
+    }
+    return next;
+  }, [dispatch]);
 
   useEffect(() => {
     streamCursor.current = state.streamCursor;
@@ -307,10 +343,48 @@ export function TaskConversationWorkspace({
       }
       return;
     }
-    if (!state.initialized || !initialScrollPending.current) return;
-    initialScrollPending.current = false;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [anchorGeneration, state.initialized, state.items]);
+    if (!state.initialized || !element) return;
+    if (initialScrollPending.current) {
+      initialScrollPending.current = false;
+      element.scrollTop = element.scrollHeight;
+      return;
+    }
+    if (state.followMode === "following") {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [anchorGeneration, state.followMode, state.initialized, state.items, state.preview]);
+
+  useEffect(() => {
+    const element = viewport.current;
+    const content = scrollContent.current;
+    if (
+      !state.initialized
+      || !element
+      || !content
+      || typeof ResizeObserver === "undefined"
+    ) return;
+    let previousViewportHeight = element.clientHeight;
+    let previousContentHeight = content.getBoundingClientRect().height;
+    const observer = new ResizeObserver(() => {
+      const nextViewportHeight = element.clientHeight;
+      const nextContentHeight = content.getBoundingClientRect().height;
+      if (
+        nextViewportHeight > 0
+        && stateRef.current.followMode === "following"
+        && (
+          nextViewportHeight !== previousViewportHeight
+          || nextContentHeight > previousContentHeight
+        )
+      ) {
+        element.scrollTop = element.scrollHeight;
+      }
+      previousViewportHeight = nextViewportHeight;
+      previousContentHeight = nextContentHeight;
+    });
+    observer.observe(element);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [state.initialized]);
 
   useEffect(() => {
     let disposed = false;
@@ -325,12 +399,12 @@ export function TaskConversationWorkspace({
       streamEventSequence.current = 0;
       controller = nextController;
       streamController.current = nextController;
-      dispatch({
+      dispatchCurrent({
         type: "stream_started",
         taskId,
         streamGeneration: generation
       });
-      dispatch({
+      dispatchCurrent({
         type: "connection_changed",
         connection: reconnectCount.current > 0 ? "reconnecting" : "connecting"
       });
@@ -350,7 +424,7 @@ export function TaskConversationWorkspace({
             const streamSequence = ++streamEventSequence.current;
             applyStreamEvent(event, {
               taskId,
-              dispatch,
+              dispatch: dispatchCurrent,
               streamGeneration: generation,
               streamSequence,
               clearPreviewTimer,
@@ -382,14 +456,14 @@ export function TaskConversationWorkspace({
           || streamController.current !== nextController
         ) return;
         if (reason instanceof ApiError && (reason.status === 403 || reason.status === 404)) {
-          dispatch({ type: "connection_changed", connection: "disconnected" });
+          dispatchCurrent({ type: "connection_changed", connection: "disconnected" });
           setError(reason.message);
           handlers.current.onUnavailable?.(reason);
           return;
         }
         if (reason instanceof ApiError && reason.status === 400) {
           if (badCursorRecoveryUsed.current) {
-            dispatch({ type: "connection_changed", connection: "disconnected" });
+            dispatchCurrent({ type: "connection_changed", connection: "disconnected" });
             setError(reason.message);
             return;
           }
@@ -402,7 +476,7 @@ export function TaskConversationWorkspace({
             reconnectTimer.current = window.setTimeout(() => void connect(), 0);
           } catch (refreshReason) {
             if (disposed) return;
-            dispatch({ type: "connection_changed", connection: "disconnected" });
+            dispatchCurrent({ type: "connection_changed", connection: "disconnected" });
             setError(refreshReason instanceof Error
               ? refreshReason.message
               : "Conversation could not be recovered.");
@@ -414,7 +488,7 @@ export function TaskConversationWorkspace({
           return;
         }
         reconnectCount.current += 1;
-        dispatch({ type: "connection_changed", connection: "disconnected" });
+        dispatchCurrent({ type: "connection_changed", connection: "disconnected" });
         setError(reason instanceof Error ? reason.message : "Conversation updates are unavailable.");
         reconnectTimer.current = window.setTimeout(
           () => void connect(),
@@ -430,9 +504,16 @@ export function TaskConversationWorkspace({
       if (streamController.current === controller) streamController.current = undefined;
       if (reconnectTimer.current !== undefined) window.clearTimeout(reconnectTimer.current);
     };
-  }, [clearPreviewTimer, dispatch, queuePreview, recoverFreshSnapshot, refreshGeneration, scrollToLatest, taskId]);
+  }, [clearPreviewTimer, dispatchCurrent, queuePreview, recoverFreshSnapshot, refreshGeneration, scrollToLatest, taskId]);
 
   useEffect(() => () => clearPreviewTimer(), [clearPreviewTimer]);
+  useEffect(() => () => {
+    if (recoveryNoticeTimer.current !== undefined) {
+      window.clearTimeout(recoveryNoticeTimer.current);
+      recoveryNoticeTimer.current = undefined;
+    }
+    recoveryGeneration.current += 1;
+  }, []);
 
   async function loadEarlier() {
     if (!state.nextPageCursor || loadingEarlierRef.current) return;
@@ -440,14 +521,14 @@ export function TaskConversationWorkspace({
     loadingEarlierRef.current = true;
     setLoadingEarlier(true);
     setHistoryError("");
-    dispatch({ type: "reading_started" });
+    dispatchCurrent({ type: "reading_started" });
     try {
       const older = await apiClient.getTaskInteractions(taskId, state.nextPageCursor);
       if (element) {
         historyAnchor.current = captureHistoryAnchor(element);
         setAnchorGeneration((value) => value + 1);
       }
-      dispatch({
+      dispatchCurrent({
         type: "history_prepend_received",
         taskId,
         items: older.items,
@@ -873,14 +954,19 @@ export function TaskConversationWorkspace({
   function onScroll() {
     const element = viewport.current;
     if (!element) return;
-    if (stateRef.current.followMode === "following" && !isAtBottom(element)) {
-      dispatch({ type: "reading_started" });
+    const current = stateRef.current.followMode;
+    const next = taskFollowModeAtDistance(current, distanceFromBottom(element));
+    if (current === "following" && next === "reading") {
+      stateRef.current = dispatch({ type: "reading_started" });
+    } else if (current === "reading" && next === "following") {
+      stateRef.current = dispatch({ type: "jump_to_latest" });
     }
   }
 
   function showNewActivity() {
-    dispatch({ type: "jump_to_latest" });
-    scrollToLatest("smooth");
+    stateRef.current = dispatch({ type: "jump_to_latest" });
+    const element = viewport.current;
+    if (element) element.scrollTop = element.scrollHeight;
   }
 
   const currentPresentation = state.presentation;
@@ -951,30 +1037,32 @@ export function TaskConversationWorkspace({
         className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5"
         onScroll={onScroll}
       >
-        {state.hasMoreBefore ? (
-          <div className="mb-4 text-center">
-            {historyError ? (
-              <Banner
-                className="mb-2 text-left"
-                status="error"
-                title="Earlier messages unavailable"
-                description={historyError}
+        <div ref={scrollContent}>
+          {state.hasMoreBefore ? (
+            <div className="mb-4 text-center">
+              {historyError ? (
+                <Banner
+                  className="mb-2 text-left"
+                  status="error"
+                  title="Earlier messages unavailable"
+                  description={historyError}
+                />
+              ) : null}
+              <Button
+                label={loadingEarlier ? "Loading..." : "Load earlier messages"}
+                variant="ghost"
+                size="md"
+                isDisabled={loadingEarlier}
+                onClick={() => void loadEarlier()}
               />
-            ) : null}
-            <Button
-              label={loadingEarlier ? "Loading..." : "Load earlier messages"}
-              variant="ghost"
-              size="md"
-              isDisabled={loadingEarlier}
-              onClick={() => void loadEarlier()}
-            />
-          </div>
-        ) : null}
-        <TaskInteractionList
-          taskId={taskId}
-          items={state.items}
-          preview={state.preview}
-        />
+            </div>
+          ) : null}
+          <TaskInteractionList
+            taskId={taskId}
+            items={state.items}
+            preview={state.preview}
+          />
+        </div>
       </div>
       {state.followMode === "reading" ? (
         <div className="shrink-0 border-t border-border bg-surface py-2 text-center">
@@ -1130,8 +1218,8 @@ function findInteractionRow(
     .find((row) => row.dataset.interactionId === interactionId);
 }
 
-function isAtBottom(element: HTMLDivElement): boolean {
-  return element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+function distanceFromBottom(element: HTMLDivElement): number {
+  return Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight);
 }
 
 function assertNever(value: never): never {

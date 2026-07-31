@@ -181,6 +181,12 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
     setPreviewState({ status: "idle" });
   }, [stateOwnership]);
 
+  useEffect(() => {
+    if (browser.selectedPath !== null) return;
+    clearPreview();
+    setMobileDetailsOpen(false);
+  }, [browser.selectedPath, clearPreview]);
+
   const removeKnownEntryFromPresentation = useCallback((entryPath: string) => {
     const libraryId = selectedLibraryRef.current;
     if (!libraryId) return;
@@ -190,13 +196,11 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
       fileDetailScope(projectId, libraryId, entryPath)
     ]);
     settleDirectoryLoading(libraryId, directoryPath);
-    clearPreview();
     if (!stateOwnership.finishMutation(intent)) return;
     const action = { type: "entry_removed", path: entryPath } as const;
     browserRef.current = reduceFileBrowserState(browserRef.current, action);
     dispatchBrowser(action);
-    setMobileDetailsOpen(false);
-  }, [clearPreview, projectId, settleDirectoryLoading, stateOwnership]);
+  }, [projectId, settleDirectoryLoading, stateOwnership]);
 
   const resetFileContext = useCallback(() => {
     focusRestoreVersion.current += 1;
@@ -389,8 +393,6 @@ function ProjectFiles({ workspaceId, projectId }: { workspaceId: string | undefi
         const currentSelected = browserRef.current.entries.find((entry) => entry.path === selectedPath);
         const refreshedSelected = result.entries.find((entry) => entry.path === selectedPath);
         if (!refreshedSelected) {
-          clearPreview();
-          setMobileDetailsOpen(false);
           setFilesNotice("The selected entry no longer exists. The File Library view has been updated.");
         } else if (currentSelected && fileEntryVersionChanged(currentSelected, refreshedSelected)) {
           clearPreview();

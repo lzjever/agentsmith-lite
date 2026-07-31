@@ -26,6 +26,12 @@ export function NotificationsPage() {
       if (!mounted.current || !coordinator.current.isCurrentLoad(request)) return;
       loadedOnce.current = true;
       setItems(coordinator.current.replace(listed));
+      setMutationError((current) => {
+        if (!current) return null;
+        const item = listed.find((candidate) => candidate.id === current.id);
+        if (current.action === "dismiss") return item ? current : null;
+        return !item || item.readAt ? null : current;
+      });
       setState("ready");
     } catch {
       if (!mounted.current || !coordinator.current.isCurrentLoad(request)) return;
